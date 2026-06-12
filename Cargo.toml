@@ -1,0 +1,12 @@
+[package]
+name = "json-apply"
+version = "0.1.0"
+edition = "2021"
+description = "Three-way reconcile for app-owned JSON files (kubectl-apply-style merge for a single local file)"
+license = "MIT"
+
+[dependencies]
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
