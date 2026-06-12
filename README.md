@@ -35,9 +35,10 @@ entirely by the BASE↔DESIRED diff.
 All tooling comes from the flake:
 
 ```sh
-nix develop          # cargo, rustc, clippy, rustfmt, rust-analyzer
+nix develop          # cargo, rustc, clippy, rustfmt, rust-analyzer, cargo-llvm-cov
 cargo test           # unit + integration tests
 cargo clippy
+cargo llvm-cov       # source-based coverage (LLVM_COV/PROFDATA preset by the shell)
 ```
 
 Or build/test hermetically through Nix (runs the test suite in `checkPhase`):

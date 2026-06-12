@@ -319,3 +319,94 @@ fn preserves_existing_file_mode() {
     let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
+
+#[test]
+fn writes_to_bare_filename_in_cwd() {
+    // TARGET has no directory component -> write_atomic falls back to ".".
+    let dir = tempfile::tempdir().unwrap();
+    let desired = dir.path().join("desired.json");
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let out = Command::new(BIN)
+        .current_dir(dir.path())
+        .args(["config.json", desired.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let v: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"a":1}));
+}
+
+#[test]
+fn diff_is_empty_when_nothing_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // TARGET already equals the canonical output of DESIRED.
+    fs::write(&target, "{\n  \"a\": 1\n}\n").unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let out = run(&[
+        "--diff",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0)); // nothing pending
+    assert!(out.stdout.is_empty()); // empty diff
+}
+
+#[test]
+fn diff_omits_unchanged_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"keep":1,"a":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    let out = run(&[
+        "--diff",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    let diff = String::from_utf8(out.stdout).unwrap();
+    assert!(diff.contains("~ a: 1 => 2"), "{diff}");
+    assert!(!diff.contains("keep"), "{diff}"); // unchanged key not shown
+}
+
+#[test]
+fn invalid_indent_exits_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&desired, "{}").unwrap();
+
+    let out = run(&[
+        "--indent",
+        "wat",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn errors_when_target_directory_is_unwritable() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let ro = dir.path().join("ro");
+    fs::create_dir(&ro).unwrap();
+    let desired = dir.path().join("desired.json");
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap(); // no write
+
+    let target = ro.join("config.json");
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+
+    // Restore perms so the tempdir can be cleaned up.
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}

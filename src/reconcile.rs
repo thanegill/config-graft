@@ -12,10 +12,9 @@ use std::collections::HashSet;
 pub type Path = Vec<String>;
 
 /// How a DESIRED array combines with a TARGET array during the deep-merge.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum ArrayStrategy {
     /// DESIRED's array replaces TARGET's wholesale (atomic; the default).
-    #[default]
     Replace,
     /// Append DESIRED's elements onto TARGET's (order preserved, duplicates kept).
     Concat,
@@ -145,20 +144,20 @@ pub fn deep_merge(target: &mut Value, desired: &Value, arrays: ArrayStrategy) {
                 return;
             }
         }
-        Value::Array(d) if arrays != ArrayStrategy::Replace => {
+        Value::Array(d) if arrays == ArrayStrategy::Concat => {
             if let Value::Array(t) = target {
-                match arrays {
-                    ArrayStrategy::Concat => t.extend(d.iter().cloned()),
-                    // Union ignoring order: keep TARGET's elements, append any
-                    // DESIRED element not already present (dedup by value).
-                    ArrayStrategy::Set => {
-                        for e in d {
-                            if !t.contains(e) {
-                                t.push(e.clone());
-                            }
-                        }
+                t.extend(d.iter().cloned());
+                return;
+            }
+        }
+        Value::Array(d) if arrays == ArrayStrategy::Set => {
+            if let Value::Array(t) = target {
+                // Union ignoring order: keep TARGET's elements, append any
+                // DESIRED element not already present (dedup by value).
+                for e in d {
+                    if !t.contains(e) {
+                        t.push(e.clone());
                     }
-                    ArrayStrategy::Replace => unreachable!(),
                 }
                 return;
             }
@@ -495,10 +494,18 @@ mod tests {
     }
 
     #[test]
-    fn array_strategy_only_applies_when_both_are_arrays() {
+    fn set_array_replaces_when_target_not_array() {
         // TARGET value isn't an array -> DESIRED array replaces regardless.
         assert_eq!(
             reconciled_arrays(json!({"a":5}), json!({"a":[1,2]}), ArrayStrategy::Set),
+            json!({"a":[1,2]})
+        );
+    }
+
+    #[test]
+    fn concat_array_replaces_when_target_not_array() {
+        assert_eq!(
+            reconciled_arrays(json!({"a":5}), json!({"a":[1,2]}), ArrayStrategy::Concat),
             json!({"a":[1,2]})
         );
     }
@@ -561,5 +568,41 @@ mod tests {
             serde_json::to_string(&sorted).unwrap(),
             r#"{"a":{"c":2,"d":1},"b":1}"#
         );
+    }
+
+    #[test]
+    fn sort_keys_recurses_through_arrays() {
+        let sorted = sort_keys(&json!({"list":[{"b":1,"a":2}],"n":5}));
+        assert_eq!(
+            serde_json::to_string(&sorted).unwrap(),
+            r#"{"list":[{"a":2,"b":1}],"n":5}"#
+        );
+    }
+
+    #[test]
+    fn array_strategy_derives_clone_eq_debug() {
+        let s = ArrayStrategy::Set;
+        assert_eq!(s, s); // Eq
+        assert_eq!(s, s.clone()); // Clone (Copy)
+        assert_ne!(ArrayStrategy::Replace, ArrayStrategy::Concat);
+        assert!(format!("{s:?}").contains("Set")); // Debug
+    }
+
+    #[test]
+    fn del_path_guards_empty_path_and_non_object() {
+        // Empty path: no-op.
+        let mut v = json!({"a":1});
+        del_path(&mut v, &[]);
+        assert_eq!(v, json!({"a":1}));
+
+        // Descending into a non-object value: no-op.
+        let mut scalar = json!(5);
+        del_path(&mut scalar, &["a".to_string()]);
+        assert_eq!(scalar, json!(5));
+
+        // Happy path still deletes.
+        let mut nested = json!({"a":{"b":1}});
+        del_path(&mut nested, &["a".to_string(), "b".to_string()]);
+        assert_eq!(nested, json!({"a":{}}));
     }
 }

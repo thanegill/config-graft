@@ -33,8 +33,12 @@
             pkgs.clippy
             pkgs.rustfmt
             pkgs.rust-analyzer
+            pkgs.cargo-llvm-cov
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          # cargo-llvm-cov needs the LLVM tools matching rustc (both LLVM 21 here).
+          LLVM_COV = "${pkgs.llvmPackages.llvm}/bin/llvm-cov";
+          LLVM_PROFDATA = "${pkgs.llvmPackages.llvm}/bin/llvm-profdata";
         };
       });
 
