@@ -4,16 +4,31 @@
 //! what we applied last time). Arrays and scalars are atomic leaves, so a list
 //! is reconciled and pruned as a whole, never element-by-element.
 
+use clap::ValueEnum;
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 
 /// A managed leaf path: object keys only (arrays/scalars are atomic leaves).
 pub type Path = Vec<String>;
 
+/// How a DESIRED array combines with a TARGET array during the deep-merge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, ValueEnum)]
+pub enum ArrayStrategy {
+    /// DESIRED's array replaces TARGET's wholesale (atomic; the default).
+    #[default]
+    Replace,
+    /// Append DESIRED's elements onto TARGET's (order preserved, duplicates kept).
+    Concat,
+    /// Union of both arrays, ignoring order and dropping duplicates.
+    Set,
+}
+
 /// Options controlling reconciliation.
 pub struct Options {
     /// Prune keys dropped from DESIRED (requires BASE). When false, only merge.
     pub prune: bool,
+    /// How DESIRED arrays combine with TARGET arrays.
+    pub arrays: ArrayStrategy,
 }
 
 /// Reconcile DESIRED into a clone of TARGET, using BASE as the merge ancestor.
@@ -44,7 +59,7 @@ pub fn reconcile(target: &Value, desired: &Value, base: Option<&Value>, opts: &O
     }
 
     // 4: deep-merge DESIRED (DESIRED wins leaf conflicts).
-    deep_merge(&mut result, desired);
+    deep_merge(&mut result, desired, opts.arrays);
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
@@ -112,18 +127,43 @@ fn del_path(v: &mut Value, path: &[String]) {
     }
 }
 
-/// Deep-merge `desired` into `target`: objects merge recursively; anything else
-/// (arrays, scalars, type changes) is replaced wholesale by `desired`.
-pub fn deep_merge(target: &mut Value, desired: &Value) {
-    if let (Value::Object(t), Value::Object(d)) = (&mut *target, desired) {
-        for (k, dv) in d {
-            if let Some(tv) = t.get_mut(k) {
-                deep_merge(tv, dv);
-            } else {
-                t.insert(k.clone(), dv.clone());
+/// Deep-merge `desired` into `target`: objects always merge recursively. Two
+/// arrays combine per `arrays` (replace / concat / set-union); every other
+/// case — scalars, type changes, array-vs-non-array — is replaced wholesale by
+/// `desired`.
+pub fn deep_merge(target: &mut Value, desired: &Value, arrays: ArrayStrategy) {
+    match desired {
+        Value::Object(d) => {
+            if let Value::Object(t) = target {
+                for (k, dv) in d {
+                    if let Some(tv) = t.get_mut(k) {
+                        deep_merge(tv, dv, arrays);
+                    } else {
+                        t.insert(k.clone(), dv.clone());
+                    }
+                }
+                return;
             }
         }
-        return;
+        Value::Array(d) if arrays != ArrayStrategy::Replace => {
+            if let Value::Array(t) = target {
+                match arrays {
+                    ArrayStrategy::Concat => t.extend(d.iter().cloned()),
+                    // Union ignoring order: keep TARGET's elements, append any
+                    // DESIRED element not already present (dedup by value).
+                    ArrayStrategy::Set => {
+                        for e in d {
+                            if !t.contains(e) {
+                                t.push(e.clone());
+                            }
+                        }
+                    }
+                    ArrayStrategy::Replace => unreachable!(),
+                }
+                return;
+            }
+        }
+        _ => {}
     }
     *target = desired.clone();
 }
@@ -151,7 +191,27 @@ mod tests {
     use serde_json::json;
 
     fn reconciled(t: Value, d: Value, b: Option<Value>, prune: bool) -> Value {
-        reconcile(&t, &d, b.as_ref(), &Options { prune })
+        reconcile(
+            &t,
+            &d,
+            b.as_ref(),
+            &Options {
+                prune,
+                arrays: ArrayStrategy::Replace,
+            },
+        )
+    }
+
+    fn reconciled_arrays(t: Value, d: Value, arrays: ArrayStrategy) -> Value {
+        reconcile(
+            &t,
+            &d,
+            None,
+            &Options {
+                prune: true,
+                arrays,
+            },
+        )
     }
 
     #[test]
@@ -313,6 +373,193 @@ mod tests {
                 true
             ),
             json!({"b":5,"appOnly":true,"c":3})
+        );
+    }
+
+    #[test]
+    fn deeply_nested_merge() {
+        assert_eq!(
+            reconciled(
+                json!({"a":{"b":{"c":{"d":1,"keep":9}}}}),
+                json!({"a":{"b":{"c":{"d":2}}}}),
+                Some(json!({})),
+                true
+            ),
+            json!({"a":{"b":{"c":{"d":2,"keep":9}}}})
+        );
+    }
+
+    #[test]
+    fn object_replaces_scalar_on_type_change() {
+        assert_eq!(
+            reconciled(json!({"a":1}), json!({"a":{"x":2}}), Some(json!({})), true),
+            json!({"a":{"x":2}})
+        );
+    }
+
+    #[test]
+    fn scalar_replaces_object_on_type_change() {
+        assert_eq!(
+            reconciled(json!({"a":{"x":2}}), json!({"a":7}), Some(json!({})), true),
+            json!({"a":7})
+        );
+    }
+
+    #[test]
+    fn non_object_target_coerced_to_empty() {
+        assert_eq!(
+            reconciled(json!([1, 2, 3]), json!({"a":1}), None, true),
+            json!({"a":1})
+        );
+    }
+
+    #[test]
+    fn empty_desired_no_base_is_noop() {
+        assert_eq!(
+            reconciled(json!({"a":1,"b":[2]}), json!({}), None, true),
+            json!({"a":1,"b":[2]})
+        );
+    }
+
+    #[test]
+    fn prune_only_when_target_matches_base() {
+        // c matches base -> pruned; d was user-changed -> kept.
+        assert_eq!(
+            reconciled(
+                json!({"c":2,"d":9}),
+                json!({}),
+                Some(json!({"c":2,"d":2})),
+                true
+            ),
+            json!({"d":9})
+        );
+    }
+
+    // ----- array strategies -----
+
+    #[test]
+    fn arrays_replace_by_default() {
+        assert_eq!(
+            reconciled_arrays(
+                json!({"a":[1,2,3]}),
+                json!({"a":[3,4]}),
+                ArrayStrategy::Replace
+            ),
+            json!({"a":[3,4]})
+        );
+    }
+
+    #[test]
+    fn arrays_concat_keeps_order_and_duplicates() {
+        assert_eq!(
+            reconciled_arrays(
+                json!({"a":[1,2]}),
+                json!({"a":[2,3]}),
+                ArrayStrategy::Concat
+            ),
+            json!({"a":[1,2,2,3]})
+        );
+    }
+
+    #[test]
+    fn arrays_set_unions_ignoring_order_and_dedups() {
+        assert_eq!(
+            reconciled_arrays(
+                json!({"a":[1,2,3]}),
+                json!({"a":[3,2,4]}),
+                ArrayStrategy::Set
+            ),
+            json!({"a":[1,2,3,4]})
+        );
+    }
+
+    #[test]
+    fn arrays_set_is_idempotent_when_subset() {
+        // DESIRED already a subset of TARGET -> no change.
+        assert_eq!(
+            reconciled_arrays(json!({"a":[1,2,3]}), json!({"a":[2,3]}), ArrayStrategy::Set),
+            json!({"a":[1,2,3]})
+        );
+    }
+
+    #[test]
+    fn arrays_set_dedups_object_elements_by_value() {
+        assert_eq!(
+            reconciled_arrays(
+                json!({"s":[{"id":1}]}),
+                json!({"s":[{"id":1},{"id":2}]}),
+                ArrayStrategy::Set
+            ),
+            json!({"s":[{"id":1},{"id":2}]})
+        );
+    }
+
+    #[test]
+    fn array_strategy_only_applies_when_both_are_arrays() {
+        // TARGET value isn't an array -> DESIRED array replaces regardless.
+        assert_eq!(
+            reconciled_arrays(json!({"a":5}), json!({"a":[1,2]}), ArrayStrategy::Set),
+            json!({"a":[1,2]})
+        );
+    }
+
+    #[test]
+    fn array_strategy_recurses_into_nested_objects() {
+        assert_eq!(
+            reconciled_arrays(
+                json!({"o":{"a":[1,2]}}),
+                json!({"o":{"a":[2,3]}}),
+                ArrayStrategy::Set
+            ),
+            json!({"o":{"a":[1,2,3]}})
+        );
+    }
+
+    #[test]
+    fn set_merged_list_still_pruned_atomically_when_dropped_unchanged() {
+        // With prune + Set, a managed list unchanged from base is removed whole.
+        let result = reconcile(
+            &json!({"a":[1,2],"z":9}),
+            &json!({}),
+            Some(&json!({"a":[1,2]})),
+            &Options {
+                prune: true,
+                arrays: ArrayStrategy::Set,
+            },
+        );
+        assert_eq!(result, json!({"z":9}));
+    }
+
+    // ----- helper-level unit tests -----
+
+    #[test]
+    fn leaf_paths_treats_arrays_as_atomic() {
+        let mut paths = leaf_paths(&json!({"a":1,"b":{"c":2},"d":[1,2]}));
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                vec!["a".to_string()],
+                vec!["b".to_string(), "c".to_string()],
+                vec!["d".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn get_path_reads_nested_and_misses() {
+        let v = json!({"a":{"b":7}});
+        assert_eq!(get_path(&v, &["a".into(), "b".into()]), Some(&json!(7)));
+        assert_eq!(get_path(&v, &["a".into(), "x".into()]), None);
+        assert_eq!(get_path(&v, &["nope".into()]), None);
+    }
+
+    #[test]
+    fn sort_keys_sorts_recursively() {
+        let sorted = sort_keys(&json!({"b":1,"a":{"d":1,"c":2}}));
+        assert_eq!(
+            serde_json::to_string(&sorted).unwrap(),
+            r#"{"a":{"c":2,"d":1},"b":1}"#
         );
     }
 }

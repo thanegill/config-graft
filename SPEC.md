@@ -53,6 +53,7 @@ json-apply [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
 - `--indent <N|tab>` — output indentation (default: 2 spaces).
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
+- `--array-strategy <replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `replace` (atomic, default), `concat` (append, keeping order and duplicates), or `set` (union, ignoring order and dropping duplicates).
 
 ### Exit codes
 
@@ -79,12 +80,15 @@ Keys in `target` that were never in `base` or `desired` are always preserved.
 ## 5. Merge & type semantics
 
 - **Objects** — merged recursively (the only container that merges).
-- **Arrays** — **atomic**: an array in DESIRED replaces the array in TARGET wholesale; no concatenation, no element-wise merge, even for arrays of objects. Pruning treats an array as one leaf (removed/kept as a whole). *Rationale: positional element-merge is ambiguous and index-shift-prone; matches kubectl's "atomic list" default.*
+- **Arrays** — combine per `--array-strategy`:
+  - `replace` (default) — **atomic**: DESIRED's array replaces TARGET's wholesale; no element-wise merge, even for arrays of objects. *Rationale: positional element-merge is ambiguous and index-shift-prone; matches kubectl's "atomic list" default.*
+  - `concat` — DESIRED's elements are appended to TARGET's, preserving order and duplicates.
+  - `set` — union of both arrays, ignoring order and dropping duplicate values (membership by deep equality). Idempotent: re-applying a DESIRED already contained in TARGET is a no-op.
+
+  The strategy applies only when **both** sides are arrays; an array-vs-non-array always replaces. **Pruning is always atomic** — a managed array is removed or kept as one leaf regardless of strategy.
 - **Scalars** — DESIRED replaces.
 - **`null`** — a normal value, not a delete sentinel. Removal is driven by BASE↔DESIRED diffing, not by RFC 7386 null.
 - **Type changes** (e.g. object→array at a key) — DESIRED's value replaces wholesale.
-
-*Optional extension:* `--array-strategy replace|concat|set` with per-path overrides, defaulting to `replace`.
 
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
@@ -146,12 +150,17 @@ RESULT  {"b":5,"appOnly":true,"c":3}   # a pruned (==base); b kept; appOnly kept
 
 ## 12. Test matrix (must-pass)
 
-Deep-merge wins; target-only keys survive; prune dropped leaf; prune empties
-parent; keep user-edited scalar; **array replaced wholesale**; **array-of-objects
-atomic**; **prune dropped list (atomic, no index-shift)**; **prune list empties
-parent**; **keep user-edited list**; `null` is a value not a delete;
-missing/invalid TARGET; missing/invalid BASE (no prune); `--check` idempotence;
-`--stdout` leaves TARGET untouched.
+Deep-merge wins; target-only keys survive; deeply nested merge; type changes
+(object↔scalar) replace; prune dropped leaf; prune empties parent; keep
+user-edited scalar; **array replaced wholesale**; **array-of-objects atomic**;
+**prune dropped list (atomic, no index-shift)**; **prune list empties parent**;
+**keep user-edited list**; **arrays concat (order + dups kept)**; **arrays set
+(union, order-independent, deduped)**; **set idempotent on subset**; **strategy
+applies only when both are arrays**; `null` is a value not a delete;
+non-object/missing/invalid TARGET coerced to empty; missing/invalid BASE (no
+prune); usage error exit 2; invalid `--array-strategy` exit 2; `--check`
+idempotence; `--stdout` leaves TARGET untouched; `--sort-keys`/`--indent`
+output; `--diff` add/remove/change lines; file mode preserved.
 
 ## 13. Implementation
 

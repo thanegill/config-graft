@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 mod reconcile;
-use reconcile::{get_path, leaf_paths, reconcile, sort_keys, Options};
+use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, Options};
 
 /// Three-way reconcile for app-owned JSON files: deep-merge DESIRED into TARGET
 /// while preserving keys the app wrote and pruning keys dropped from DESIRED
@@ -53,6 +53,15 @@ struct Cli {
     /// Sort every object's keys in the output.
     #[arg(long = "sort-keys")]
     sort_keys: bool,
+
+    /// How DESIRED arrays combine with TARGET arrays: replace (atomic, default),
+    /// concat (append), or set (union, ignoring order and duplicates).
+    #[arg(
+        long = "array-strategy",
+        default_value = "replace",
+        value_name = "STRATEGY"
+    )]
+    array_strategy: ArrayStrategy,
 }
 
 fn main() {
@@ -89,6 +98,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
     let opts = Options {
         prune: !cli.no_prune,
+        arrays: cli.array_strategy,
     };
     let mut result = reconcile(&target, &desired, base.as_ref(), &opts);
     if cli.sort_keys {

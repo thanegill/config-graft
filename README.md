@@ -19,13 +19,16 @@ See [`SPEC.md`](SPEC.md) for the full specification.
 json-apply <TARGET> <DESIRED> [BASE]
 
 json-apply config.json desired.json .state/last-applied.json
-json-apply --check config.json desired.json base.json   # exit 3 if it would change
-json-apply --stdout --diff config.json desired.json      # preview without writing
+json-apply --check config.json desired.json base.json    # exit 3 if it would change
+json-apply --stdout --diff config.json desired.json       # preview without writing
+json-apply --array-strategy set config.json desired.json  # union lists, ignoring order
 ```
 
-Arrays (and scalars) are **atomic**: a managed list is replaced wholesale, never
-merged element-by-element. `null` is a real value, not a delete sentinel —
-deletion is driven entirely by the BASE↔DESIRED diff.
+By default arrays (and scalars) are **atomic**: a managed list is replaced
+wholesale. `--array-strategy` changes how two arrays combine — `concat` appends
+(keeping order and duplicates) or `set` unions them ignoring order and dropping
+duplicates. `null` is a real value, not a delete sentinel — deletion is driven
+entirely by the BASE↔DESIRED diff.
 
 ## Develop
 
