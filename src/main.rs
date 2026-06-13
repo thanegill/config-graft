@@ -23,12 +23,13 @@ struct Cli {
     /// Managed JSON to apply (must be a JSON object).
     desired: PathBuf,
 
-    /// Previous snapshot (last applied); enables pruning. Optional.
-    base: Option<PathBuf>,
+    /// Previous snapshot (last applied); enables pruning. Optional. An empty
+    /// value is treated the same as omitting it (no pruning).
+    base: Option<String>,
 
     /// Previous snapshot, as a flag (alternative to the positional BASE).
     #[arg(long = "base", value_name = "PATH")]
-    base_flag: Option<PathBuf>,
+    base_flag: Option<String>,
 
     /// Deep-merge only; never delete keys.
     #[arg(long = "no-prune")]
@@ -90,10 +91,14 @@ fn run(cli: &Cli) -> Result<i32, String> {
         .filter(Value::is_object)
         .unwrap_or_else(|| Value::Object(Map::new()));
 
-    // Missing/empty/unparseable/non-object BASE disables pruning (first run).
-    let base_path = cli.base_flag.as_ref().or(cli.base.as_ref());
+    // Empty/missing/unparseable/non-object BASE disables pruning (first run).
+    let base_path = cli
+        .base_flag
+        .as_deref()
+        .or(cli.base.as_deref())
+        .filter(|p| !p.is_empty());
     let base = base_path
-        .and_then(|p| read_json(p))
+        .and_then(|p| read_json(Path::new(p)))
         .filter(Value::is_object);
 
     let opts = Options {

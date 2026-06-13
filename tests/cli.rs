@@ -241,6 +241,41 @@ fn base_flag_form_enables_pruning() {
 }
 
 #[test]
+fn empty_base_positional_is_treated_as_no_base() {
+    // An empty BASE argument must be accepted (not rejected by the parser) and
+    // behave like omitting it: no pruning, so "b" survives.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1,"b":2}"#).unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap(), ""]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"a":1,"b":2}));
+}
+
+#[test]
+fn empty_base_flag_is_treated_as_no_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1,"b":2}"#).unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let out = run(&[
+        "--base",
+        "",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"a":1,"b":2}));
+}
+
+#[test]
 fn sort_keys_orders_output() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
