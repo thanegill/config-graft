@@ -1,7 +1,7 @@
 # json-apply
 
-Three-way reconcile for **app-owned JSON and plist files** — `kubectl apply`'s
-merge semantics scoped to a single local file.
+Three-way reconcile for **app-owned JSON, plist, and YAML files** — `kubectl
+apply`'s merge semantics scoped to a single local file.
 
 It deep-merges a *managed subset* (DESIRED) into a file the application also
 writes to (TARGET), while:
@@ -25,6 +25,8 @@ json-apply --array-strategy set config.json desired.json  # union lists, ignorin
 
 json-apply app.plist desired.plist base.plist             # same merge, plist files
 json-apply --format plist config desired                  # force plist on any name
+
+json-apply config.yaml desired.yaml                       # YAML, keeping comments
 ```
 
 By default arrays (and scalars) are **atomic**: a managed list is replaced
@@ -35,10 +37,11 @@ entirely by the BASE↔DESIRED diff.
 
 ## Formats
 
-The merge engine is format-agnostic; **JSON** and Apple **plist** are supported.
-The format is inferred from TARGET's extension (`.plist` → plist, else JSON) and
-governs every file in the run (TARGET, DESIRED, BASE, and output) — there is no
-cross-format conversion. Override detection with `--format json|plist`.
+The merge engine is format-agnostic; **JSON**, Apple **plist**, and **YAML** are
+supported. The format is inferred from TARGET's extension (`.plist` → plist,
+`.yaml`/`.yml` → YAML, else JSON) and governs every file in the run (TARGET,
+DESIRED, BASE, and output) — there is no cross-format conversion. Override
+detection with `--format json|plist|yaml`.
 
 Plist notes:
 
@@ -47,6 +50,18 @@ Plist notes:
 - plist's `Date`/`Data`/`Uid` scalars are atomic leaves and round-trip losslessly.
 - plist has no `null`; `--indent` is JSON-only (the plist XML writer has fixed
   formatting) and is ignored for plist.
+
+YAML notes:
+
+- **Comments, blank lines, and formatting are preserved** on the parts of the
+  file json-apply doesn't change — it edits the existing text in place rather
+  than re-emitting it. Only an empty/first-apply target is written canonically.
+- For safety it edits only the well-behaved subset of YAML and **refuses (exit 1,
+  leaving the file untouched) rather than risk corruption** on anchors/aliases,
+  custom tags, multi-document streams, non-string keys, or a non-mapping root.
+  Every write is verified to round-trip back to the intended result before it
+  lands.
+- `--indent` is ignored for YAML.
 
 ## Develop
 

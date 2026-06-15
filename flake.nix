@@ -1,5 +1,5 @@
 {
-  description = "Three-way reconcile for app-owned JSON and plist files";
+  description = "Three-way reconcile for app-owned JSON, plist, and YAML files";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

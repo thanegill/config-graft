@@ -1,9 +1,9 @@
-# `json-apply` — three-way reconcile for app-owned JSON and plist files
+# `json-apply` — three-way reconcile for app-owned JSON, plist, and YAML files
 
-Declaratively reconcile a managed *subset* of a JSON or plist file into a file
-the application also writes to, using a last-applied snapshot as the merge base —
-i.e. `kubectl apply`'s three-way merge, scoped to a single local file. The merge
-engine is format-agnostic; see §5a for the supported formats.
+Declaratively reconcile a managed *subset* of a JSON, plist, or YAML file into a
+file the application also writes to, using a last-applied snapshot as the merge
+base — i.e. `kubectl apply`'s three-way merge, scoped to a single local file. The
+merge engine is format-agnostic; see §5a for the supported formats.
 
 ---
 
@@ -42,7 +42,7 @@ json-apply [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 ### Arguments
 
 - `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent.
-- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary.
+- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping.
 - `BASE` — path to the previous snapshot. Optional; absent/empty/invalid ⇒ no pruning (first-run behavior).
 
 ### Options
@@ -52,10 +52,10 @@ json-apply [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--stdout` — write the result to stdout; do not modify TARGET.
 - `--diff` — print a human-readable, leaf-level diff of the changes.
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
-- `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only**; ignored for plist (its XML writer has fixed formatting).
+- `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only**; ignored for plist (fixed-format XML) and YAML (edits preserve existing indentation).
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
 - `--array-strategy <replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `replace` (atomic, default), `concat` (append, keeping order and duplicates), or `set` (union, ignoring order and dropping duplicates).
-- `--format <json|plist>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, else json). Governs every file in the run (§5a).
+- `--format <json|plist|yaml>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, else json). Governs every file in the run (§5a).
 
 ### Exit codes
 
@@ -98,7 +98,8 @@ The engine runs on an internal value model; each format has a codec that maps
 its native value type ⇄ that model. Reconciliation is **homogeneous** — one
 format governs TARGET, DESIRED, BASE, and output — so a run is never a
 cross-format conversion. The format is inferred from TARGET's extension
-(`.plist` → plist, else JSON) and can be forced with `--format`.
+(`.plist` → plist, `.yaml`/`.yml` → YAML, else JSON) and can be forced with
+`--format`.
 
 - **JSON** — objects, arrays, strings, numbers, booleans, `null`. Output is
   pretty-printed per `--indent`, key order preserved (§8).
@@ -109,6 +110,16 @@ cross-format conversion. The format is inferred from TARGET's extension
   **both XML and binary** plist; output is always normalized **XML** (a binary or
   differently-formatted target is rewritten as canonical XML on first apply —
   the same normalize-on-write behavior JSON has). plist has no `null`.
+- **YAML** (1.2, via `saphyr`) — mappings, sequences, strings, integers, floats,
+  booleans, `null`. **Unlike JSON/plist, an existing target is *not* normalized:**
+  json-apply edits the original file text in place, so **comments, blank lines,
+  quoting, and indentation are preserved** on every region it doesn't change.
+  Only an empty/first-apply target is written canonically. To guarantee this is
+  safe, it edits only the well-behaved subset and **refuses (exit 1, file
+  untouched) rather than risk corruption** on anchors/aliases, custom tags,
+  multi-document streams, non-string keys, or a non-mapping root; every write is
+  verified to round-trip back to the reconciled result before it lands. `--indent`
+  does not apply.
 
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
@@ -123,7 +134,7 @@ ever pruned.
 
 ## 7. File handling & robustness
 
-- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary.
+- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary / YAML mapping. (Exception: a non-empty YAML target that can't be edited safely is **refused**, not overwritten — see §5a.)
 - **Missing/empty/unparseable/non-object BASE** ⇒ pruning disabled (first run).
 - **Invalid DESIRED** ⇒ hard error (exit 1); TARGET untouched.
 - Parent directories of TARGET created as needed.
@@ -139,9 +150,10 @@ ever pruned.
 
 - Not a general diff/patch tool (use `jd`).
 - Not RFC 7386 (no null-deletes) or RFC 6902.
-- No comment/formatting preservation in TARGET (round-trips as canonical JSON / XML plist). JSONC/JSON5 and YAML out of scope.
+- No comment/formatting preservation for **JSON** (canonical pretty-print) or **plist** (canonical XML); JSONC/JSON5 out of scope. (**YAML does** preserve comments/formatting on untouched regions — see §5a.)
 - **No cross-format conversion** (e.g. JSON in / plist out) — a run is homogeneous.
 - **No binary plist output**; plist always writes XML.
+- **YAML:** no editing of anchors/aliases, custom tags, multi-document streams, or non-string keys (refused, not converted); comments are preserved but not relocated when their key moves.
 - Does not manage the BASE snapshot lifecycle — the caller stores/rotates it.
 
 ## 10. Known trade-offs
@@ -190,11 +202,16 @@ output; `--diff` add/remove/change lines; file mode preserved.
 Implemented in **Rust** (this repo):
 
 - `src/value.rs` — the internal `Node` value model the engine runs on, plus the
-  per-format codecs (`Node` ⇄ `serde_json::Value`, `Node` ⇄ `plist::Value`).
+  per-format codecs (`Node` ⇄ `serde_json::Value`, `Node` ⇄ `plist::Value`,
+  `Node` ⇄ `saphyr::Yaml`).
 - `src/reconcile.rs` — the pure algorithm (no I/O) over `Node`, unit-tested against §12.
-- `src/format.rs` — format detection and the read/write boundary (JSON pretty-print, plist XML).
+- `src/format.rs` — format detection and the read/write boundary (JSON pretty-print, plist XML, canonical YAML).
+- `src/yaml_edit.rs` — the comment-preserving YAML writer: a structural diff of the
+  original vs reconciled `Node` trees drives minimal byte-span edits against the
+  original text (spans from `saphyr`'s `MarkedYaml`), with a round-trip backstop
+  that refuses any write that wouldn't reproduce the reconciled result.
 - `src/main.rs` — CLI (clap), I/O, atomic write, `--check`/`--diff`/`--stdout`/`--format`.
-- `tests/cli.rs` — integration tests exercising exit codes and file behavior, for both formats.
+- `tests/cli.rs` — integration tests exercising exit codes and file behavior, for every format.
 - Map nodes use `indexmap` (and the JSON codec keeps `serde_json`'s
   `preserve_order`) so TARGET key order is kept and new keys are appended.
 
