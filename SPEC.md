@@ -1,8 +1,9 @@
-# `json-apply` — three-way reconcile for app-owned JSON files
+# `json-apply` — three-way reconcile for app-owned JSON and plist files
 
-Declaratively reconcile a managed *subset* of a JSON file into a file the
-application also writes to, using a last-applied snapshot as the merge base —
-i.e. `kubectl apply`'s three-way merge, scoped to a single local file.
+Declaratively reconcile a managed *subset* of a JSON or plist file into a file
+the application also writes to, using a last-applied snapshot as the merge base —
+i.e. `kubectl apply`'s three-way merge, scoped to a single local file. The merge
+engine is format-agnostic; see §5a for the supported formats.
 
 ---
 
@@ -41,7 +42,7 @@ json-apply [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 ### Arguments
 
 - `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent.
-- `DESIRED` — path to the managed JSON. Must be a valid JSON object.
+- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary.
 - `BASE` — path to the previous snapshot. Optional; absent/empty/invalid ⇒ no pruning (first-run behavior).
 
 ### Options
@@ -51,9 +52,10 @@ json-apply [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--stdout` — write the result to stdout; do not modify TARGET.
 - `--diff` — print a human-readable, leaf-level diff of the changes.
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
-- `--indent <N|tab>` — output indentation (default: 2 spaces).
+- `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only**; ignored for plist (its XML writer has fixed formatting).
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
 - `--array-strategy <replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `replace` (atomic, default), `concat` (append, keeping order and duplicates), or `set` (union, ignoring order and dropping duplicates).
+- `--format <json|plist>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, else json). Governs every file in the run (§5a).
 
 ### Exit codes
 
@@ -87,8 +89,26 @@ Keys in `target` that were never in `base` or `desired` are always preserved.
 
   The strategy applies only when **both** sides are arrays; an array-vs-non-array always replaces. **Pruning is always atomic** — a managed array is removed or kept as one leaf regardless of strategy.
 - **Scalars** — DESIRED replaces.
-- **`null`** — a normal value, not a delete sentinel. Removal is driven by BASE↔DESIRED diffing, not by RFC 7386 null.
+- **`null`** — a normal value, not a delete sentinel. Removal is driven by BASE↔DESIRED diffing, not by RFC 7386 null. (JSON only; plist has no null.)
 - **Type changes** (e.g. object→array at a key) — DESIRED's value replaces wholesale.
+
+## 5a. Formats
+
+The engine runs on an internal value model; each format has a codec that maps
+its native value type ⇄ that model. Reconciliation is **homogeneous** — one
+format governs TARGET, DESIRED, BASE, and output — so a run is never a
+cross-format conversion. The format is inferred from TARGET's extension
+(`.plist` → plist, else JSON) and can be forced with `--format`.
+
+- **JSON** — objects, arrays, strings, numbers, booleans, `null`. Output is
+  pretty-printed per `--indent`, key order preserved (§8).
+- **plist** — dictionaries, arrays, strings, integers, reals, booleans, and the
+  plist-only scalars **`Date`**, **`Data`**, and **`Uid`**. The engine treats
+  every non-dictionary value as an atomic leaf, so these exotic scalars
+  **round-trip losslessly** without the engine understanding them. Reads accept
+  **both XML and binary** plist; output is always normalized **XML** (a binary or
+  differently-formatted target is rewritten as canonical XML on first apply —
+  the same normalize-on-write behavior JSON has). plist has no `null`.
 
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
@@ -103,10 +123,11 @@ ever pruned.
 
 ## 7. File handling & robustness
 
-- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally).
+- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary.
 - **Missing/empty/unparseable/non-object BASE** ⇒ pruning disabled (first run).
 - **Invalid DESIRED** ⇒ hard error (exit 1); TARGET untouched.
 - Parent directories of TARGET created as needed.
+- Files are parsed as the resolved format (§5a); a TARGET that doesn't parse as that format is treated as empty, as above.
 
 ## 8. Atomicity & formatting
 
@@ -118,7 +139,9 @@ ever pruned.
 
 - Not a general diff/patch tool (use `jd`).
 - Not RFC 7386 (no null-deletes) or RFC 6902.
-- No comment/formatting preservation in TARGET (round-trips as canonical JSON). JSONC/JSON5 out of scope.
+- No comment/formatting preservation in TARGET (round-trips as canonical JSON / XML plist). JSONC/JSON5 and YAML out of scope.
+- **No cross-format conversion** (e.g. JSON in / plist out) — a run is homogeneous.
+- **No binary plist output**; plist always writes XML.
 - Does not manage the BASE snapshot lifecycle — the caller stores/rotates it.
 
 ## 10. Known trade-offs
@@ -166,11 +189,14 @@ output; `--diff` add/remove/change lines; file mode preserved.
 
 Implemented in **Rust** (this repo):
 
-- `src/reconcile.rs` — the pure algorithm (no I/O), unit-tested against §12.
-- `src/main.rs` — CLI (clap), I/O, atomic write, `--check`/`--diff`/`--stdout`.
-- `tests/cli.rs` — integration tests exercising exit codes and file behavior.
-- Output uses `serde_json` with `preserve_order` so TARGET key order is kept and
-  new keys are appended.
+- `src/value.rs` — the internal `Node` value model the engine runs on, plus the
+  per-format codecs (`Node` ⇄ `serde_json::Value`, `Node` ⇄ `plist::Value`).
+- `src/reconcile.rs` — the pure algorithm (no I/O) over `Node`, unit-tested against §12.
+- `src/format.rs` — format detection and the read/write boundary (JSON pretty-print, plist XML).
+- `src/main.rs` — CLI (clap), I/O, atomic write, `--check`/`--diff`/`--stdout`/`--format`.
+- `tests/cli.rs` — integration tests exercising exit codes and file behavior, for both formats.
+- Map nodes use `indexmap` (and the JSON codec keeps `serde_json`'s
+  `preserve_order`) so TARGET key order is kept and new keys are appended.
 
 A `jq` + shell implementation of the same core (minus `--check`/`--diff` and
 atomic rename) also exists as `sync-json` in the author's nixos-config; this Rust

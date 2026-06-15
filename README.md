@@ -1,7 +1,7 @@
 # json-apply
 
-Three-way reconcile for **app-owned JSON files** — `kubectl apply`'s merge
-semantics scoped to a single local file.
+Three-way reconcile for **app-owned JSON and plist files** — `kubectl apply`'s
+merge semantics scoped to a single local file.
 
 It deep-merges a *managed subset* (DESIRED) into a file the application also
 writes to (TARGET), while:
@@ -22,6 +22,9 @@ json-apply config.json desired.json .state/last-applied.json
 json-apply --check config.json desired.json base.json    # exit 3 if it would change
 json-apply --stdout --diff config.json desired.json       # preview without writing
 json-apply --array-strategy set config.json desired.json  # union lists, ignoring order
+
+json-apply app.plist desired.plist base.plist             # same merge, plist files
+json-apply --format plist config desired                  # force plist on any name
 ```
 
 By default arrays (and scalars) are **atomic**: a managed list is replaced
@@ -29,6 +32,21 @@ wholesale. `--array-strategy` changes how two arrays combine — `concat` append
 (keeping order and duplicates) or `set` unions them ignoring order and dropping
 duplicates. `null` is a real value, not a delete sentinel — deletion is driven
 entirely by the BASE↔DESIRED diff.
+
+## Formats
+
+The merge engine is format-agnostic; **JSON** and Apple **plist** are supported.
+The format is inferred from TARGET's extension (`.plist` → plist, else JSON) and
+governs every file in the run (TARGET, DESIRED, BASE, and output) — there is no
+cross-format conversion. Override detection with `--format json|plist`.
+
+Plist notes:
+
+- Reads accept **both** XML and binary plist; output is always normalized **XML**
+  (a binary target is rewritten as XML on first apply).
+- plist's `Date`/`Data`/`Uid` scalars are atomic leaves and round-trip losslessly.
+- plist has no `null`; `--indent` is JSON-only (the plist XML writer has fixed
+  formatting) and is ignored for plist.
 
 ## Develop
 
