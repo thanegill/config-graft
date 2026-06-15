@@ -12,7 +12,7 @@ mod reconcile;
 mod value;
 mod yaml_edit;
 use error::{Error, Outcome};
-use format::{Format, Indent};
+use format::{FormatKind, Indent};
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
 use value::{Leaf, Node};
 
@@ -60,7 +60,7 @@ struct Cli {
     /// Input/output format. Inferred from TARGET's extension when omitted
     /// (.plist → plist, else json). One format governs TARGET, DESIRED, and BASE.
     #[arg(long, value_name = "FORMAT")]
-    format: Option<Format>,
+    format: Option<FormatKind>,
 
     /// Sort every object's keys in the output.
     #[arg(long = "sort-keys")]
@@ -89,11 +89,13 @@ fn main() {
 
 fn run(cli: &Cli) -> Result<Outcome, Error> {
     // One format governs every file. Inferred from TARGET unless overridden.
-    let fmt = cli.format.unwrap_or_else(|| Format::detect(&cli.target));
+    let kind = cli
+        .format
+        .unwrap_or_else(|| FormatKind::detect(&cli.target));
 
-    let desired = format::read(&cli.desired, fmt).ok_or_else(|| Error::DesiredInvalid {
+    let desired = format::read_file(&cli.desired, kind).ok_or_else(|| Error::DesiredInvalid {
         path: cli.desired.clone(),
-        format: fmt,
+        format: kind,
     })?;
     if !desired.is_map() {
         return Err(Error::DesiredNotMapping {
@@ -102,7 +104,7 @@ fn run(cli: &Cli) -> Result<Outcome, Error> {
     }
 
     // Missing/unparseable/non-map TARGET is treated as empty.
-    let target = format::read(&cli.target, fmt)
+    let target = format::read_file(&cli.target, kind)
         .filter(Node::is_map)
         .unwrap_or_else(Node::empty_map);
 
@@ -113,7 +115,7 @@ fn run(cli: &Cli) -> Result<Outcome, Error> {
         .or(cli.base.as_deref())
         .filter(|p| !p.is_empty());
     let base = base_path
-        .and_then(|p| format::read(Path::new(p), fmt))
+        .and_then(|p| format::read_file(Path::new(p), kind))
         .filter(Node::is_map);
 
     let opts = Options {
@@ -126,23 +128,10 @@ fn run(cli: &Cli) -> Result<Outcome, Error> {
     }
 
     // The current on-disk text, used for the idempotence check and — for YAML —
-    // as the basis for comment-preserving edits.
+    // as the basis for comment-preserving edits. The format decides how to use it
+    // (JSON/plist ignore it; YAML edits it in place or emits canonically).
     let current = fs::read_to_string(&cli.target).unwrap_or_default();
-
-    // `--indent` applies to JSON only (validated at parse time by clap).
-    let indent = if fmt == Format::Json {
-        cli.indent.to_bytes()
-    } else {
-        Vec::new()
-    };
-    // For an existing YAML target, edit its text in place to preserve comments;
-    // a refusal (unsupported construct) aborts rather than clobber the file.
-    // Otherwise (and for the first apply to an empty file) emit canonically.
-    let output = if fmt == Format::Yaml && !current.trim().is_empty() {
-        yaml_edit::apply(&current, &result)?
-    } else {
-        format::write(&result, fmt, &indent)?
-    };
+    let output = kind.format().write(&result, &current, cli.indent)?;
 
     if cli.diff {
         print!("{}", diff_text(&target, &result));

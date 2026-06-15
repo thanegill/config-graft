@@ -17,24 +17,88 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
-/// A supported file format.
+/// Which file format a run uses — a selector parsed from `--format` or inferred
+/// from the extension. The behavior lives in the [`Format`] trait it hands back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
-pub enum Format {
+pub enum FormatKind {
     Json,
     Plist,
     Yaml,
 }
 
-impl Format {
+impl FormatKind {
     /// Infer the format from a path's extension: `.plist` → plist,
     /// `.yaml`/`.yml` → yaml, everything else → json (all case-insensitive).
-    pub fn detect(path: &Path) -> Format {
+    pub fn detect(path: &Path) -> FormatKind {
         match path.extension().and_then(|e| e.to_str()) {
-            Some(ext) if ext.eq_ignore_ascii_case("plist") => Format::Plist,
+            Some(ext) if ext.eq_ignore_ascii_case("plist") => FormatKind::Plist,
             Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
-                Format::Yaml
+                FormatKind::Yaml
             }
-            _ => Format::Json,
+            _ => FormatKind::Json,
+        }
+    }
+
+    /// The codec/IO implementation for this format.
+    pub fn format(self) -> &'static dyn Format {
+        match self {
+            FormatKind::Json => &Json,
+            FormatKind::Plist => &Plist,
+            FormatKind::Yaml => &Yaml,
+        }
+    }
+}
+
+/// A format's I/O boundary: parse bytes into a [`Node`] and serialize one back to
+/// text. Object-safe, so [`FormatKind::format`] can return `&dyn Format`.
+pub trait Format {
+    /// Parse `bytes`, or `None` if they don't parse as this format.
+    fn read(&self, bytes: &[u8]) -> Option<Node>;
+    /// Serialize `node`. `current` is the target's existing on-disk text (used by
+    /// YAML to preserve comments; ignored by JSON/plist). `indent` is JSON-only.
+    fn write(&self, node: &Node, current: &str, indent: Indent) -> Result<String, Error>;
+}
+
+impl Format for Json {
+    fn read(&self, bytes: &[u8]) -> Option<Node> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        Json::decode(&value)
+    }
+
+    fn write(&self, node: &Node, _current: &str, indent: Indent) -> Result<String, Error> {
+        Ok(write_json(node, &indent.to_bytes()))
+    }
+}
+
+impl Format for Plist {
+    fn read(&self, bytes: &[u8]) -> Option<Node> {
+        let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;
+        Plist::decode(&value)
+    }
+
+    fn write(&self, node: &Node, _current: &str, _indent: Indent) -> Result<String, Error> {
+        write_plist(node)
+    }
+}
+
+impl Format for Yaml {
+    fn read(&self, bytes: &[u8]) -> Option<Node> {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let docs = saphyr::Yaml::load_from_str(text).ok()?;
+        // Single document only; a multi-doc stream is not reconcilable here.
+        let [doc] = docs.as_slice() else {
+            return None;
+        };
+        Yaml::decode(doc)
+    }
+
+    fn write(&self, node: &Node, current: &str, _indent: Indent) -> Result<String, Error> {
+        // An existing target is edited in place to preserve comments; an empty /
+        // first-apply target is emitted canonically.
+        if current.trim().is_empty() {
+            Ok(write_yaml(node))
+        } else {
+            crate::yaml_edit::apply(current, node)
         }
     }
 }
@@ -67,39 +131,11 @@ pub fn parse_indent(spec: &str) -> Result<Indent, String> {
         .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))
 }
 
-/// Read and parse `path` as `fmt`. Returns `None` if the file is missing or does
-/// not parse as that format. Plist reads accept both XML and binary encodings.
-pub fn read(path: &Path, fmt: Format) -> Option<Node> {
+/// Read and parse `path` as `kind`. Returns `None` if the file is missing or does
+/// not parse as that format. Keeps file I/O out of the [`Format`] trait.
+pub fn read_file(path: &Path, kind: FormatKind) -> Option<Node> {
     let bytes = std::fs::read(path).ok()?;
-    match fmt {
-        Format::Json => {
-            let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-            Json::decode(&value)
-        }
-        Format::Plist => {
-            let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;
-            Plist::decode(&value)
-        }
-        Format::Yaml => {
-            let text = std::str::from_utf8(&bytes).ok()?;
-            let docs = saphyr::Yaml::load_from_str(text).ok()?;
-            // Single document only; a multi-doc stream is not reconcilable here.
-            let [doc] = docs.as_slice() else {
-                return None;
-            };
-            Yaml::decode(doc)
-        }
-    }
-}
-
-/// Serialize `node` as `fmt`. `indent` applies to JSON only; plist always writes
-/// normalized XML (its writer has fixed formatting). Output ends with a newline.
-pub fn write(node: &Node, fmt: Format, indent: &[u8]) -> Result<String, Error> {
-    match fmt {
-        Format::Json => Ok(write_json(node, indent)),
-        Format::Plist => write_plist(node),
-        Format::Yaml => Ok(write_yaml(node)),
-    }
+    kind.format().read(&bytes)
 }
 
 fn write_json(node: &Node, indent: &[u8]) -> String {

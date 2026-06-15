@@ -4,13 +4,13 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::format::Format;
+use crate::format::FormatKind;
 
 /// A reconcile run that failed (always maps to exit code 1).
 #[derive(Debug)]
 pub enum Error {
     /// DESIRED did not parse as the resolved format.
-    DesiredInvalid { path: PathBuf, format: Format },
+    DesiredInvalid { path: PathBuf, format: FormatKind },
     /// DESIRED parsed but is not an object/dictionary/mapping.
     DesiredNotMapping { path: PathBuf },
     /// Writing the target failed.
