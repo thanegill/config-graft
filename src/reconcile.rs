@@ -224,16 +224,22 @@ pub fn sort_keys(v: &Node) -> Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::{Json, ValueCodec};
     use serde_json::{json, Value};
 
     /// JSON value → `Node` (the JSON codec), so the tests can keep expressing
     /// inputs and expectations as readable `json!(...)` literals.
     fn n(v: Value) -> Node {
-        Node::from_json(v)
+        Json::decode(&v).unwrap()
+    }
+
+    /// `Node` → JSON value, for comparing results against `json!(...)`.
+    fn j(node: &Node) -> Value {
+        Json::encode(node)
     }
 
     fn reconciled(t: Value, d: Value, b: Option<Value>, prune: bool) -> Value {
-        reconcile(
+        j(&reconcile(
             &n(t),
             &n(d),
             b.map(n).as_ref(),
@@ -241,12 +247,11 @@ mod tests {
                 prune,
                 arrays: ArrayStrategy::Replace,
             },
-        )
-        .to_json()
+        ))
     }
 
     fn reconciled_arrays(t: Value, d: Value, arrays: ArrayStrategy) -> Value {
-        reconcile(
+        j(&reconcile(
             &n(t),
             &n(d),
             None,
@@ -254,8 +259,7 @@ mod tests {
                 prune: true,
                 arrays,
             },
-        )
-        .to_json()
+        ))
     }
 
     #[test]
@@ -570,7 +574,7 @@ mod tests {
     #[test]
     fn set_merged_list_still_pruned_atomically_when_dropped_unchanged() {
         // With prune + Set, a managed list unchanged from base is removed whole.
-        let result = reconcile(
+        let result = j(&reconcile(
             &n(json!({"a":[1,2],"z":9})),
             &n(json!({})),
             Some(&n(json!({"a":[1,2]}))),
@@ -578,8 +582,7 @@ mod tests {
                 prune: true,
                 arrays: ArrayStrategy::Set,
             },
-        )
-        .to_json();
+        ));
         assert_eq!(result, json!({"z":9}));
     }
 
@@ -611,7 +614,7 @@ mod tests {
     fn sort_keys_sorts_recursively() {
         let sorted = sort_keys(&n(json!({"b":1,"a":{"d":1,"c":2}})));
         assert_eq!(
-            serde_json::to_string(&sorted.to_json()).unwrap(),
+            serde_json::to_string(&j(&sorted)).unwrap(),
             r#"{"a":{"c":2,"d":1},"b":1}"#
         );
     }
@@ -620,7 +623,7 @@ mod tests {
     fn sort_keys_recurses_through_arrays() {
         let sorted = sort_keys(&n(json!({"list":[{"b":1,"a":2}],"n":5})));
         assert_eq!(
-            serde_json::to_string(&sorted.to_json()).unwrap(),
+            serde_json::to_string(&j(&sorted)).unwrap(),
             r#"{"list":[{"a":2,"b":1}],"n":5}"#
         );
     }

@@ -16,6 +16,7 @@ use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, Yaml, YamlData};
 
 use crate::error::Error;
+use crate::format::{ValueCodec, Yaml as YamlCodec};
 use crate::value::Node;
 
 /// Apply `result` onto the original YAML `text`, preserving comments/formatting
@@ -64,7 +65,7 @@ fn parse_node(text: &str) -> Option<Node> {
     let [doc] = docs.as_slice() else {
         return None;
     };
-    Node::from_yaml(doc)
+    YamlCodec::decode(doc)
 }
 
 /// Ordered (key, key-node, value-node) entries of a marked mapping, or `None` if
@@ -124,7 +125,7 @@ fn diff_map(
                 edits.push(Edit {
                     start: vn.span.start.index(),
                     end: vn.span.end.index(),
-                    text: emit_fragment(&rv.to_yaml()),
+                    text: emit_fragment(&YamlCodec::encode(rv)),
                 });
             }
             _ => {
@@ -167,7 +168,7 @@ fn emit_entry(key: &str, value: &Node, ind: usize) -> String {
     let mut m = saphyr::Mapping::new();
     m.insert(
         Yaml::Value(Scalar::String(Cow::Owned(key.to_string()))),
-        value.to_yaml(),
+        YamlCodec::encode(value),
     );
     indent_lines(&emit_fragment(&Yaml::Mapping(m)), ind)
 }
