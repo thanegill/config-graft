@@ -6,10 +6,12 @@ use std::process;
 
 use clap::Parser;
 
+mod error;
 mod format;
 mod reconcile;
 mod value;
 mod yaml_edit;
+use error::{Error, Outcome};
 use format::{Format, Indent};
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
 use value::{Leaf, Node};
@@ -77,25 +79,26 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     match run(&cli) {
-        Ok(code) => process::exit(code),
-        Err(msg) => {
-            eprintln!("json-apply: {msg}");
+        Ok(outcome) => process::exit(outcome.code()),
+        Err(e) => {
+            eprintln!("json-apply: {e}");
             process::exit(1);
         }
     }
 }
 
-fn run(cli: &Cli) -> Result<i32, String> {
+fn run(cli: &Cli) -> Result<Outcome, Error> {
     // One format governs every file. Inferred from TARGET unless overridden.
     let fmt = cli.format.unwrap_or_else(|| Format::detect(&cli.target));
 
-    let desired = format::read(&cli.desired, fmt)
-        .ok_or_else(|| format!("DESIRED is not valid {fmt:?}: {}", cli.desired.display()))?;
+    let desired = format::read(&cli.desired, fmt).ok_or_else(|| Error::DesiredInvalid {
+        path: cli.desired.clone(),
+        format: fmt,
+    })?;
     if !desired.is_map() {
-        return Err(format!(
-            "DESIRED must be a JSON object / plist dictionary / YAML mapping: {}",
-            cli.desired.display()
-        ));
+        return Err(Error::DesiredNotMapping {
+            path: cli.desired.clone(),
+        });
     }
 
     // Missing/unparseable/non-map TARGET is treated as empty.
@@ -148,17 +151,23 @@ fn run(cli: &Cli) -> Result<i32, String> {
     let changed = current != output;
 
     if cli.check {
-        return Ok(if changed { 3 } else { 0 });
+        return Ok(if changed {
+            Outcome::WouldChange
+        } else {
+            Outcome::Applied
+        });
     }
     if cli.stdout {
         print!("{output}");
-        return Ok(0);
+        return Ok(Outcome::Applied);
     }
     if changed {
-        write_atomic(&cli.target, &output)
-            .map_err(|e| format!("writing {}: {e}", cli.target.display()))?;
+        write_atomic(&cli.target, &output).map_err(|e| Error::Write {
+            path: cli.target.clone(),
+            source: e,
+        })?;
     }
-    Ok(0)
+    Ok(Outcome::Applied)
 }
 
 /// Atomic in-place write: temp file in the same dir, fsync, then rename over the

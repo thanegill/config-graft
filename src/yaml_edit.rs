@@ -15,26 +15,23 @@ use std::borrow::Cow;
 use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, Yaml, YamlData};
 
+use crate::error::Error;
 use crate::value::Node;
 
-const REFUSE: &str = "cannot safely edit this YAML while preserving comments \
-    (unsupported construct, e.g. anchors/aliases, a non-mapping root, or an edit \
-    that would not round-trip); aborting rather than risk corrupting the file";
-
 /// Apply `result` onto the original YAML `text`, preserving comments/formatting
-/// on untouched regions. Returns `Err` (caller must not write) when the document
-/// can't be edited safely.
-pub fn apply(text: &str, result: &Node) -> Result<String, String> {
-    let result_map = result.as_map().ok_or(REFUSE)?;
+/// on untouched regions. Returns `Err(Error::YamlUnsafe)` (caller must not write)
+/// when the document can't be edited safely.
+pub fn apply(text: &str, result: &Node) -> Result<String, Error> {
+    let result_map = result.as_map().ok_or(Error::YamlUnsafe)?;
 
     // Re-parse the original for both the structural tree (authoritative target)
     // and the marked tree (byte spans). Anything unsupported refuses here.
-    let target = parse_node(text).ok_or(REFUSE)?;
-    let target_map = target.as_map().ok_or(REFUSE)?;
+    let target = parse_node(text).ok_or(Error::YamlUnsafe)?;
+    let target_map = target.as_map().ok_or(Error::YamlUnsafe)?;
 
-    let marked = MarkedYaml::load_from_str(text).map_err(|e| format!("parsing YAML: {e}"))?;
+    let marked = MarkedYaml::load_from_str(text).map_err(|_| Error::YamlUnsafe)?;
     let [root] = marked.as_slice() else {
-        return Err(REFUSE.to_string());
+        return Err(Error::YamlUnsafe);
     };
 
     let mut edits = Vec::new();
@@ -50,7 +47,7 @@ pub fn apply(text: &str, result: &Node) -> Result<String, String> {
     // Backstop: the edited text must parse back to exactly the reconciled result.
     match parse_node(&out) {
         Some(ref got) if got == result => Ok(out),
-        _ => Err(REFUSE.to_string()),
+        _ => Err(Error::YamlUnsafe),
     }
 }
 
@@ -96,14 +93,14 @@ fn diff_map(
     node: &MarkedYaml,
     src: &str,
     edits: &mut Vec<Edit>,
-) -> Result<(), String> {
-    let entries = marked_entries(node).ok_or(REFUSE)?;
+) -> Result<(), Error> {
+    let entries = marked_entries(node).ok_or(Error::YamlUnsafe)?;
     let find = |key: &str| entries.iter().find(|(k, _, _)| k == key);
 
     // Removed keys: delete the whole entry line range.
     for (k, _) in tmap {
         if !rmap.contains_key(k) {
-            let (_, kn, vn) = find(k).ok_or(REFUSE)?;
+            let (_, kn, vn) = find(k).ok_or(Error::YamlUnsafe)?;
             let start = line_start(src, kn.span.start.index());
             let end = line_end(src, vn.span.end.index());
             edits.push(Edit {
@@ -117,7 +114,7 @@ fn diff_map(
     // Changed / recursed keys.
     for (k, rv) in rmap {
         let Some(tv) = tmap.get(k) else { continue };
-        let (_, kn, vn) = find(k).ok_or(REFUSE)?;
+        let (_, kn, vn) = find(k).ok_or(Error::YamlUnsafe)?;
         match (tv, rv) {
             (Node::Map(tc), Node::Map(rc)) => diff_map(tc, rc, vn, src, edits)?,
             _ if tv == rv => {}
@@ -147,7 +144,7 @@ fn diff_map(
     let added: Vec<&String> = rmap.keys().filter(|k| !tmap.contains_key(*k)).collect();
     if !added.is_empty() {
         // Need an existing sibling to anchor indentation and insertion point.
-        let (_, _, last_v) = entries.last().ok_or(REFUSE)?;
+        let (_, _, last_v) = entries.last().ok_or(Error::YamlUnsafe)?;
         let ind = indent_of(src, entries[0].1.span.start.index());
         let at = line_end(src, last_v.span.end.index());
         let mut text = String::new();

@@ -12,6 +12,7 @@ use clap::ValueEnum;
 use saphyr::LoadableYamlNode;
 use serde::Serialize;
 
+use crate::error::Error;
 use crate::value::Node;
 
 /// A supported file format.
@@ -91,7 +92,7 @@ pub fn read(path: &Path, fmt: Format) -> Option<Node> {
 
 /// Serialize `node` as `fmt`. `indent` applies to JSON only; plist always writes
 /// normalized XML (its writer has fixed formatting). Output ends with a newline.
-pub fn write(node: &Node, fmt: Format, indent: &[u8]) -> Result<String, String> {
+pub fn write(node: &Node, fmt: Format, indent: &[u8]) -> Result<String, Error> {
     match fmt {
         Format::Json => Ok(write_json(node, indent)),
         Format::Plist => write_plist(node),
@@ -110,13 +111,13 @@ fn write_json(node: &Node, indent: &[u8]) -> String {
     out
 }
 
-fn write_plist(node: &Node) -> Result<String, String> {
+fn write_plist(node: &Node) -> Result<String, Error> {
     let value = node.to_plist();
     let mut buf = Vec::new();
     value
         .to_writer_xml(&mut buf)
-        .map_err(|e| format!("serializing plist: {e}"))?;
-    let mut out = String::from_utf8(buf).map_err(|_| "plist XML was not UTF-8".to_string())?;
+        .map_err(Error::PlistSerialize)?;
+    let mut out = String::from_utf8(buf).map_err(Error::PlistNotUtf8)?;
     // The writer ends at `</plist>` with no trailing newline; add one for a
     // consistent canonical form (matching the JSON path).
     out.push('\n');
