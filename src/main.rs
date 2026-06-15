@@ -10,7 +10,7 @@ mod format;
 mod reconcile;
 mod value;
 mod yaml_edit;
-use format::Format;
+use format::{Format, Indent};
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
 use value::{Leaf, Node};
 
@@ -51,9 +51,9 @@ struct Cli {
     check: bool,
 
     /// Output indentation: a number of spaces, or `tab`. JSON only; ignored for
-    /// plist (its XML writer has fixed formatting).
-    #[arg(long, default_value = "2", value_name = "N|tab")]
-    indent: String,
+    /// plist (fixed-format XML) and YAML (edits preserve existing indentation).
+    #[arg(long, default_value = "2", value_name = "N|tab", value_parser = format::parse_indent)]
+    indent: Indent,
 
     /// Input/output format. Inferred from TARGET's extension when omitted
     /// (.plist → plist, else json). One format governs TARGET, DESIRED, and BASE.
@@ -126,9 +126,9 @@ fn run(cli: &Cli) -> Result<i32, String> {
     // as the basis for comment-preserving edits.
     let current = fs::read_to_string(&cli.target).unwrap_or_default();
 
-    // `--indent` is JSON-only; don't even validate it for plist/YAML.
+    // `--indent` applies to JSON only (validated at parse time by clap).
     let indent = if fmt == Format::Json {
-        parse_indent(&cli.indent)?
+        cli.indent.to_bytes()
     } else {
         Vec::new()
     };
@@ -159,16 +159,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             .map_err(|e| format!("writing {}: {e}", cli.target.display()))?;
     }
     Ok(0)
-}
-
-fn parse_indent(spec: &str) -> Result<Vec<u8>, String> {
-    if spec == "tab" {
-        return Ok(b"\t".to_vec());
-    }
-    let n: usize = spec
-        .parse()
-        .map_err(|_| format!("invalid --indent (expected a number or 'tab'): {spec}"))?;
-    Ok(vec![b' '; n])
 }
 
 /// Atomic in-place write: temp file in the same dir, fsync, then rename over the

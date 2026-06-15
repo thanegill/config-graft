@@ -36,6 +36,34 @@ impl Format {
     }
 }
 
+/// Output indentation for the JSON writer: a number of spaces, or a tab.
+#[derive(Clone, Copy, Debug)]
+pub enum Indent {
+    Spaces(usize),
+    Tab,
+}
+
+impl Indent {
+    /// The indentation unit as bytes, for the JSON pretty-printer.
+    pub fn to_bytes(self) -> Vec<u8> {
+        match self {
+            Indent::Spaces(n) => vec![b' '; n],
+            Indent::Tab => b"\t".to_vec(),
+        }
+    }
+}
+
+/// Parse a `--indent` value: a non-negative number of spaces, or `tab`. Used as a
+/// clap value parser, so an invalid value is a usage error (exit 2).
+pub fn parse_indent(spec: &str) -> Result<Indent, String> {
+    if spec == "tab" {
+        return Ok(Indent::Tab);
+    }
+    spec.parse()
+        .map(Indent::Spaces)
+        .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))
+}
+
 /// Read and parse `path` as `fmt`. Returns `None` if the file is missing or does
 /// not parse as that format. Plist reads accept both XML and binary encodings.
 pub fn read(path: &Path, fmt: Format) -> Option<Node> {

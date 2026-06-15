@@ -413,7 +413,7 @@ fn diff_omits_unchanged_keys() {
 }
 
 #[test]
-fn invalid_indent_exits_one() {
+fn invalid_indent_is_usage_error() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
@@ -425,7 +425,7 @@ fn invalid_indent_exits_one() {
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2)); // clap rejects at parse time
 }
 
 #[test]
