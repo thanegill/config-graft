@@ -6,10 +6,11 @@ use std::process;
 
 use clap::Parser;
 use serde::Serialize;
-use serde_json::{Map, Value};
 
 mod reconcile;
+mod value;
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, Options};
+use value::Node;
 
 /// Three-way reconcile for app-owned JSON files: deep-merge DESIRED into TARGET
 /// while preserving keys the app wrote and pruning keys dropped from DESIRED
@@ -79,7 +80,7 @@ fn main() {
 fn run(cli: &Cli) -> Result<i32, String> {
     let desired = read_json(&cli.desired)
         .ok_or_else(|| format!("DESIRED is not valid JSON: {}", cli.desired.display()))?;
-    if !desired.is_object() {
+    if !desired.is_map() {
         return Err(format!(
             "DESIRED must be a JSON object: {}",
             cli.desired.display()
@@ -88,8 +89,8 @@ fn run(cli: &Cli) -> Result<i32, String> {
 
     // Missing/unparseable/non-object TARGET is treated as empty.
     let target = read_json(&cli.target)
-        .filter(Value::is_object)
-        .unwrap_or_else(|| Value::Object(Map::new()));
+        .filter(Node::is_map)
+        .unwrap_or_else(Node::empty_map);
 
     // Empty/missing/unparseable/non-object BASE disables pruning (first run).
     let base_path = cli
@@ -99,7 +100,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
         .filter(|p| !p.is_empty());
     let base = base_path
         .and_then(|p| read_json(Path::new(p)))
-        .filter(Value::is_object);
+        .filter(Node::is_map);
 
     let opts = Options {
         prune: !cli.no_prune,
@@ -135,12 +136,14 @@ fn run(cli: &Cli) -> Result<i32, String> {
     Ok(0)
 }
 
-fn read_json(path: &Path) -> Option<Value> {
+fn read_json(path: &Path) -> Option<Node> {
     let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(Node::from_json(value))
 }
 
-fn serialize(value: &Value, indent: &[u8]) -> String {
+fn serialize(node: &Node, indent: &[u8]) -> String {
+    let value = node.to_json();
     let mut buf = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
@@ -183,7 +186,7 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 
 /// A compact, leaf-level diff (`+` added, `-` removed, `~` changed). Arrays and
 /// scalars are atomic leaves, matching the reconcile semantics.
-fn diff_text(old: &Value, new: &Value) -> String {
+fn diff_text(old: &Node, new: &Node) -> String {
     use std::collections::HashSet;
     let old_leaves: HashSet<Vec<String>> = leaf_paths(old).into_iter().collect();
     let new_leaves: HashSet<Vec<String>> = leaf_paths(new).into_iter().collect();
@@ -209,6 +212,6 @@ fn diff_text(old: &Value, new: &Value) -> String {
     }
 }
 
-fn compact(v: &Value) -> String {
-    serde_json::to_string(v).unwrap_or_default()
+fn compact(v: &Node) -> String {
+    serde_json::to_string(&v.to_json()).unwrap_or_default()
 }

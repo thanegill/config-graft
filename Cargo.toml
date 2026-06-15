@@ -10,3 +10,4 @@ serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+indexmap = "2"

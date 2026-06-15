@@ -4,8 +4,9 @@
 //! what we applied last time). Arrays and scalars are atomic leaves, so a list
 //! is reconciled and pruned as a whole, never element-by-element.
 
+use crate::value::Node;
 use clap::ValueEnum;
-use serde_json::{Map, Value};
+use indexmap::IndexMap;
 use std::collections::HashSet;
 
 /// A managed leaf path: object keys only (arrays/scalars are atomic leaves).
@@ -31,10 +32,10 @@ pub struct Options {
 }
 
 /// Reconcile DESIRED into a clone of TARGET, using BASE as the merge ancestor.
-pub fn reconcile(target: &Value, desired: &Value, base: Option<&Value>, opts: &Options) -> Value {
+pub fn reconcile(target: &Node, desired: &Node, base: Option<&Node>, opts: &Options) -> Node {
     let mut result = match target {
-        Value::Object(_) => target.clone(),
-        _ => Value::Object(Map::new()),
+        Node::Map(_) => target.clone(),
+        _ => Node::Map(IndexMap::new()),
     };
 
     // 1-3: prune leaves we managed before (present in BASE) but no longer do
@@ -72,7 +73,7 @@ pub fn reconcile(target: &Value, desired: &Value, base: Option<&Value>, opts: &O
         ancestors.dedup();
         ancestors.sort_by_key(|p| std::cmp::Reverse(p.len()));
         for anc in &ancestors {
-            if matches!(get_path(&result, anc), Some(Value::Object(o)) if o.is_empty()) {
+            if matches!(get_path(&result, anc), Some(Node::Map(o)) if o.is_empty()) {
                 del_path(&mut result, anc);
             }
         }
@@ -83,16 +84,16 @@ pub fn reconcile(target: &Value, desired: &Value, base: Option<&Value>, opts: &O
 
 /// Managed leaf paths: descend only through objects, so arrays and scalars are
 /// atomic leaves.
-pub fn leaf_paths(v: &Value) -> Vec<Path> {
+pub fn leaf_paths(v: &Node) -> Vec<Path> {
     let mut out = Vec::new();
     let mut prefix = Vec::new();
     collect(v, &mut prefix, &mut out);
     out
 }
 
-fn collect(v: &Value, prefix: &mut Path, out: &mut Vec<Path>) {
+fn collect(v: &Node, prefix: &mut Path, out: &mut Vec<Path>) {
     match v {
-        Value::Object(map) => {
+        Node::Map(map) => {
             for (k, val) in map {
                 prefix.push(k.clone());
                 collect(val, prefix, out);
@@ -104,19 +105,19 @@ fn collect(v: &Value, prefix: &mut Path, out: &mut Vec<Path>) {
 }
 
 /// Value at an object path, if present.
-pub fn get_path<'a>(v: &'a Value, path: &[String]) -> Option<&'a Value> {
+pub fn get_path<'a>(v: &'a Node, path: &[String]) -> Option<&'a Node> {
     let mut cur = v;
     for key in path {
-        cur = cur.as_object()?.get(key)?;
+        cur = cur.as_map()?.get(key)?;
     }
     Some(cur)
 }
 
-fn del_path(v: &mut Value, path: &[String]) {
+fn del_path(v: &mut Node, path: &[String]) {
     let Some((first, rest)) = path.split_first() else {
         return;
     };
-    let Some(obj) = v.as_object_mut() else {
+    let Some(obj) = v.as_map_mut() else {
         return;
     };
     if rest.is_empty() {
@@ -130,10 +131,10 @@ fn del_path(v: &mut Value, path: &[String]) {
 /// arrays combine per `arrays` (replace / concat / set-union); every other
 /// case — scalars, type changes, array-vs-non-array — is replaced wholesale by
 /// `desired`.
-pub fn deep_merge(target: &mut Value, desired: &Value, arrays: ArrayStrategy) {
+pub fn deep_merge(target: &mut Node, desired: &Node, arrays: ArrayStrategy) {
     match desired {
-        Value::Object(d) => {
-            if let Value::Object(t) = target {
+        Node::Map(d) => {
+            if let Node::Map(t) = target {
                 for (k, dv) in d {
                     if let Some(tv) = t.get_mut(k) {
                         deep_merge(tv, dv, arrays);
@@ -144,14 +145,14 @@ pub fn deep_merge(target: &mut Value, desired: &Value, arrays: ArrayStrategy) {
                 return;
             }
         }
-        Value::Array(d) if arrays == ArrayStrategy::Concat => {
-            if let Value::Array(t) = target {
+        Node::Array(d) if arrays == ArrayStrategy::Concat => {
+            if let Node::Array(t) = target {
                 t.extend(d.iter().cloned());
                 return;
             }
         }
-        Value::Array(d) if arrays == ArrayStrategy::Set => {
-            if let Value::Array(t) = target {
+        Node::Array(d) if arrays == ArrayStrategy::Set => {
+            if let Node::Array(t) = target {
                 // Union ignoring order: keep TARGET's elements, append any
                 // DESIRED element not already present (dedup by value).
                 for e in d {
@@ -168,18 +169,18 @@ pub fn deep_merge(target: &mut Value, desired: &Value, arrays: ArrayStrategy) {
 }
 
 /// Recursively sort every object's keys (for `--sort-keys`).
-pub fn sort_keys(v: &Value) -> Value {
+pub fn sort_keys(v: &Node) -> Node {
     match v {
-        Value::Object(map) => {
-            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+        Node::Map(map) => {
+            let mut entries: Vec<(&String, &Node)> = map.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            let mut sorted = Map::new();
+            let mut sorted = IndexMap::with_capacity(entries.len());
             for (k, val) in entries {
                 sorted.insert(k.clone(), sort_keys(val));
             }
-            Value::Object(sorted)
+            Node::Map(sorted)
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(sort_keys).collect()),
+        Node::Array(arr) => Node::Array(arr.iter().map(sort_keys).collect()),
         other => other.clone(),
     }
 }
@@ -187,30 +188,38 @@ pub fn sort_keys(v: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    /// JSON value → `Node` (the JSON codec), so the tests can keep expressing
+    /// inputs and expectations as readable `json!(...)` literals.
+    fn n(v: Value) -> Node {
+        Node::from_json(v)
+    }
 
     fn reconciled(t: Value, d: Value, b: Option<Value>, prune: bool) -> Value {
         reconcile(
-            &t,
-            &d,
-            b.as_ref(),
+            &n(t),
+            &n(d),
+            b.map(n).as_ref(),
             &Options {
                 prune,
                 arrays: ArrayStrategy::Replace,
             },
         )
+        .to_json()
     }
 
     fn reconciled_arrays(t: Value, d: Value, arrays: ArrayStrategy) -> Value {
         reconcile(
-            &t,
-            &d,
+            &n(t),
+            &n(d),
             None,
             &Options {
                 prune: true,
                 arrays,
             },
         )
+        .to_json()
     }
 
     #[test]
@@ -526,14 +535,15 @@ mod tests {
     fn set_merged_list_still_pruned_atomically_when_dropped_unchanged() {
         // With prune + Set, a managed list unchanged from base is removed whole.
         let result = reconcile(
-            &json!({"a":[1,2],"z":9}),
-            &json!({}),
-            Some(&json!({"a":[1,2]})),
+            &n(json!({"a":[1,2],"z":9})),
+            &n(json!({})),
+            Some(&n(json!({"a":[1,2]}))),
             &Options {
                 prune: true,
                 arrays: ArrayStrategy::Set,
             },
-        );
+        )
+        .to_json();
         assert_eq!(result, json!({"z":9}));
     }
 
@@ -541,7 +551,7 @@ mod tests {
 
     #[test]
     fn leaf_paths_treats_arrays_as_atomic() {
-        let mut paths = leaf_paths(&json!({"a":1,"b":{"c":2},"d":[1,2]}));
+        let mut paths = leaf_paths(&n(json!({"a":1,"b":{"c":2},"d":[1,2]})));
         paths.sort();
         assert_eq!(
             paths,
@@ -555,26 +565,26 @@ mod tests {
 
     #[test]
     fn get_path_reads_nested_and_misses() {
-        let v = json!({"a":{"b":7}});
-        assert_eq!(get_path(&v, &["a".into(), "b".into()]), Some(&json!(7)));
+        let v = n(json!({"a":{"b":7}}));
+        assert_eq!(get_path(&v, &["a".into(), "b".into()]), Some(&n(json!(7))));
         assert_eq!(get_path(&v, &["a".into(), "x".into()]), None);
         assert_eq!(get_path(&v, &["nope".into()]), None);
     }
 
     #[test]
     fn sort_keys_sorts_recursively() {
-        let sorted = sort_keys(&json!({"b":1,"a":{"d":1,"c":2}}));
+        let sorted = sort_keys(&n(json!({"b":1,"a":{"d":1,"c":2}})));
         assert_eq!(
-            serde_json::to_string(&sorted).unwrap(),
+            serde_json::to_string(&sorted.to_json()).unwrap(),
             r#"{"a":{"c":2,"d":1},"b":1}"#
         );
     }
 
     #[test]
     fn sort_keys_recurses_through_arrays() {
-        let sorted = sort_keys(&json!({"list":[{"b":1,"a":2}],"n":5}));
+        let sorted = sort_keys(&n(json!({"list":[{"b":1,"a":2}],"n":5})));
         assert_eq!(
-            serde_json::to_string(&sorted).unwrap(),
+            serde_json::to_string(&sorted.to_json()).unwrap(),
             r#"{"list":[{"a":2,"b":1}],"n":5}"#
         );
     }
@@ -591,18 +601,18 @@ mod tests {
     #[test]
     fn del_path_guards_empty_path_and_non_object() {
         // Empty path: no-op.
-        let mut v = json!({"a":1});
+        let mut v = n(json!({"a":1}));
         del_path(&mut v, &[]);
-        assert_eq!(v, json!({"a":1}));
+        assert_eq!(v, n(json!({"a":1})));
 
         // Descending into a non-object value: no-op.
-        let mut scalar = json!(5);
+        let mut scalar = n(json!(5));
         del_path(&mut scalar, &["a".to_string()]);
-        assert_eq!(scalar, json!(5));
+        assert_eq!(scalar, n(json!(5)));
 
         // Happy path still deletes.
-        let mut nested = json!({"a":{"b":1}});
+        let mut nested = n(json!({"a":{"b":1}}));
         del_path(&mut nested, &["a".to_string(), "b".to_string()]);
-        assert_eq!(nested, json!({"a":{}}));
+        assert_eq!(nested, n(json!({"a":{}})));
     }
 }
