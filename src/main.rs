@@ -5,23 +5,24 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::Parser;
-use serde::Serialize;
 
+mod format;
 mod reconcile;
 mod value;
+use format::Format;
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, Options};
-use value::Node;
+use value::{Leaf, Node};
 
-/// Three-way reconcile for app-owned JSON files: deep-merge DESIRED into TARGET
-/// while preserving keys the app wrote and pruning keys dropped from DESIRED
-/// (using BASE, the previously-applied snapshot, as the merge ancestor).
+/// Three-way reconcile for app-owned JSON or plist files: deep-merge DESIRED
+/// into TARGET while preserving keys the app wrote and pruning keys dropped from
+/// DESIRED (using BASE, the previously-applied snapshot, as the merge ancestor).
 #[derive(Parser)]
 #[command(name = "json-apply", version, about)]
 struct Cli {
     /// File to reconcile, in place (created with parents if missing).
     target: PathBuf,
 
-    /// Managed JSON to apply (must be a JSON object).
+    /// Managed data to apply (must be a JSON object / plist dictionary).
     desired: PathBuf,
 
     /// Previous snapshot (last applied); enables pruning. Optional. An empty
@@ -48,9 +49,15 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
-    /// Output indentation: a number of spaces, or `tab`.
+    /// Output indentation: a number of spaces, or `tab`. JSON only; ignored for
+    /// plist (its XML writer has fixed formatting).
     #[arg(long, default_value = "2", value_name = "N|tab")]
     indent: String,
+
+    /// Input/output format. Inferred from TARGET's extension when omitted
+    /// (.plist → plist, else json). One format governs TARGET, DESIRED, and BASE.
+    #[arg(long, value_name = "FORMAT")]
+    format: Option<Format>,
 
     /// Sort every object's keys in the output.
     #[arg(long = "sort-keys")]
@@ -78,28 +85,31 @@ fn main() {
 }
 
 fn run(cli: &Cli) -> Result<i32, String> {
-    let desired = read_json(&cli.desired)
-        .ok_or_else(|| format!("DESIRED is not valid JSON: {}", cli.desired.display()))?;
+    // One format governs every file. Inferred from TARGET unless overridden.
+    let fmt = cli.format.unwrap_or_else(|| Format::detect(&cli.target));
+
+    let desired = format::read(&cli.desired, fmt)
+        .ok_or_else(|| format!("DESIRED is not valid {fmt:?}: {}", cli.desired.display()))?;
     if !desired.is_map() {
         return Err(format!(
-            "DESIRED must be a JSON object: {}",
+            "DESIRED must be a JSON object / plist dictionary: {}",
             cli.desired.display()
         ));
     }
 
-    // Missing/unparseable/non-object TARGET is treated as empty.
-    let target = read_json(&cli.target)
+    // Missing/unparseable/non-map TARGET is treated as empty.
+    let target = format::read(&cli.target, fmt)
         .filter(Node::is_map)
         .unwrap_or_else(Node::empty_map);
 
-    // Empty/missing/unparseable/non-object BASE disables pruning (first run).
+    // Empty/missing/unparseable/non-map BASE disables pruning (first run).
     let base_path = cli
         .base_flag
         .as_deref()
         .or(cli.base.as_deref())
         .filter(|p| !p.is_empty());
     let base = base_path
-        .and_then(|p| read_json(Path::new(p)))
+        .and_then(|p| format::read(Path::new(p), fmt))
         .filter(Node::is_map);
 
     let opts = Options {
@@ -111,8 +121,13 @@ fn run(cli: &Cli) -> Result<i32, String> {
         result = sort_keys(&result);
     }
 
-    let indent = parse_indent(&cli.indent)?;
-    let output = serialize(&result, &indent);
+    // `--indent` is JSON-only; don't even validate it for plist.
+    let indent = if fmt == Format::Json {
+        parse_indent(&cli.indent)?
+    } else {
+        Vec::new()
+    };
+    let output = format::write(&result, fmt, &indent)?;
 
     if cli.diff {
         print!("{}", diff_text(&target, &result));
@@ -134,23 +149,6 @@ fn run(cli: &Cli) -> Result<i32, String> {
             .map_err(|e| format!("writing {}: {e}", cli.target.display()))?;
     }
     Ok(0)
-}
-
-fn read_json(path: &Path) -> Option<Node> {
-    let text = fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    Some(Node::from_json(value))
-}
-
-fn serialize(node: &Node, indent: &[u8]) -> String {
-    let value = node.to_json();
-    let mut buf = Vec::new();
-    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
-    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
-    value.serialize(&mut ser).expect("serializing JSON");
-    let mut out = String::from_utf8(buf).expect("UTF-8 JSON");
-    out.push('\n');
-    out
 }
 
 fn parse_indent(spec: &str) -> Result<Vec<u8>, String> {
@@ -212,6 +210,41 @@ fn diff_text(old: &Node, new: &Node) -> String {
     }
 }
 
+/// Render a node as a compact, single-line token for `--diff`. JSON-representable
+/// values match `serde_json`'s compact form; plist-only leaves get a readable
+/// `<date …>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
 fn compact(v: &Node) -> String {
-    serde_json::to_string(&v.to_json()).unwrap_or_default()
+    match v {
+        Node::Map(m) => {
+            let inner: Vec<String> = m
+                .iter()
+                .map(|(k, val)| format!("{}:{}", quote(k), compact(val)))
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        Node::Array(a) => {
+            let inner: Vec<String> = a.iter().map(compact).collect();
+            format!("[{}]", inner.join(","))
+        }
+        Node::Leaf(l) => compact_leaf(l),
+    }
+}
+
+fn compact_leaf(l: &Leaf) -> String {
+    match l {
+        Leaf::Null => "null".to_string(),
+        Leaf::Bool(b) => b.to_string(),
+        Leaf::Int(i) => i.to_string(),
+        Leaf::Uint(u) => u.to_string(),
+        Leaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
+        Leaf::String(s) => quote(s),
+        Leaf::Date(d) => format!("<date {}>", d.to_xml_format()),
+        Leaf::Data(bytes) => format!("<data {} bytes>", bytes.len()),
+        Leaf::Uid(u) => format!("<uid {u}>"),
+    }
+}
+
+/// JSON-escape and quote a string, matching `serde_json`'s rendering.
+fn quote(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_default()
 }
