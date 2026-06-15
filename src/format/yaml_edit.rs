@@ -15,8 +15,8 @@ use std::borrow::Cow;
 use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, Yaml, YamlData};
 
+use super::{ValueCodec, Yaml as YamlCodec};
 use crate::error::Error;
-use crate::format::{ValueCodec, Yaml as YamlCodec};
 use crate::value::Node;
 
 /// Apply `result` onto the original YAML `text`, preserving comments/formatting

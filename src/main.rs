@@ -10,7 +10,6 @@ mod error;
 mod format;
 mod reconcile;
 mod value;
-mod yaml_edit;
 use error::{Error, Outcome};
 use format::{FormatKind, Indent};
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
