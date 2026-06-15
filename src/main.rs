@@ -9,6 +9,7 @@ use clap::Parser;
 mod format;
 mod reconcile;
 mod value;
+mod yaml_edit;
 use format::Format;
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, Options};
 use value::{Leaf, Node};
@@ -121,20 +122,29 @@ fn run(cli: &Cli) -> Result<i32, String> {
         result = sort_keys(&result);
     }
 
-    // `--indent` is JSON-only; don't even validate it for plist.
+    // The current on-disk text, used for the idempotence check and — for YAML —
+    // as the basis for comment-preserving edits.
+    let current = fs::read_to_string(&cli.target).unwrap_or_default();
+
+    // `--indent` is JSON-only; don't even validate it for plist/YAML.
     let indent = if fmt == Format::Json {
         parse_indent(&cli.indent)?
     } else {
         Vec::new()
     };
-    let output = format::write(&result, fmt, &indent)?;
+    // For an existing YAML target, edit its text in place to preserve comments;
+    // a refusal (unsupported construct) aborts rather than clobber the file.
+    // Otherwise (and for the first apply to an empty file) emit canonically.
+    let output = if fmt == Format::Yaml && !current.trim().is_empty() {
+        yaml_edit::apply(&current, &result)?
+    } else {
+        format::write(&result, fmt, &indent)?
+    };
 
     if cli.diff {
         print!("{}", diff_text(&target, &result));
     }
 
-    // Detect whether the on-disk file would actually change (idempotence).
-    let current = fs::read_to_string(&cli.target).unwrap_or_default();
     let changed = current != output;
 
     if cli.check {
