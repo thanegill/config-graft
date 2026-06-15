@@ -9,8 +9,44 @@ use clap::ValueEnum;
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
-/// A managed leaf path: object keys only (arrays/scalars are atomic leaves).
-pub type Path = Vec<String>;
+/// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
+/// leaves). Distinct from `std::path::Path` — this addresses keys, not files.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct KeyPath(Vec<String>);
+
+impl KeyPath {
+    /// An empty path (the document root).
+    fn new() -> KeyPath {
+        KeyPath(Vec::new())
+    }
+
+    /// Append a key segment.
+    fn push(&mut self, seg: String) {
+        self.0.push(seg);
+    }
+
+    /// Drop the last key segment.
+    fn pop(&mut self) {
+        self.0.pop();
+    }
+
+    /// The path of the first `n` segments (a proper ancestor when `n < len`).
+    fn prefix(&self, n: usize) -> KeyPath {
+        KeyPath(self.0[..n].to_vec())
+    }
+
+    /// Render as a dotted string (for diffs).
+    pub fn join(&self, sep: &str) -> String {
+        self.0.join(sep)
+    }
+}
+
+impl std::ops::Deref for KeyPath {
+    type Target = [String];
+    fn deref(&self) -> &[String] {
+        &self.0
+    }
+}
 
 /// How a DESIRED array combines with a TARGET array during the deep-merge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
@@ -41,10 +77,10 @@ pub fn reconcile(target: &Node, desired: &Node, base: Option<&Node>, opts: &Opti
     // 1-3: prune leaves we managed before (present in BASE) but no longer do
     // (gone from DESIRED) — but only where TARGET still holds the BASE value, so
     // a value the user/app changed by hand is left alone.
-    let mut removed: Vec<Path> = Vec::new();
+    let mut removed: Vec<KeyPath> = Vec::new();
     if opts.prune {
         if let Some(base) = base {
-            let desired_leaves: HashSet<Path> = leaf_paths(desired).into_iter().collect();
+            let desired_leaves: HashSet<KeyPath> = leaf_paths(desired).into_iter().collect();
             removed = leaf_paths(base)
                 .into_iter()
                 .filter(|p| !desired_leaves.contains(p))
@@ -63,10 +99,10 @@ pub fn reconcile(target: &Node, desired: &Node, base: Option<&Node>, opts: &Opti
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
-        let mut ancestors: Vec<Path> = Vec::new();
+        let mut ancestors: Vec<KeyPath> = Vec::new();
         for p in &removed {
             for i in 1..p.len() {
-                ancestors.push(p[..i].to_vec());
+                ancestors.push(p.prefix(i));
             }
         }
         ancestors.sort();
@@ -84,14 +120,14 @@ pub fn reconcile(target: &Node, desired: &Node, base: Option<&Node>, opts: &Opti
 
 /// Managed leaf paths: descend only through objects, so arrays and scalars are
 /// atomic leaves.
-pub fn leaf_paths(v: &Node) -> Vec<Path> {
+pub fn leaf_paths(v: &Node) -> Vec<KeyPath> {
     let mut out = Vec::new();
-    let mut prefix = Vec::new();
+    let mut prefix = KeyPath::new();
     collect(v, &mut prefix, &mut out);
     out
 }
 
-fn collect(v: &Node, prefix: &mut Path, out: &mut Vec<Path>) {
+fn collect(v: &Node, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
     match v {
         Node::Map(map) => {
             for (k, val) in map {
@@ -556,9 +592,9 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                vec!["a".to_string()],
-                vec!["b".to_string(), "c".to_string()],
-                vec!["d".to_string()],
+                KeyPath(vec!["a".to_string()]),
+                KeyPath(vec!["b".to_string(), "c".to_string()]),
+                KeyPath(vec!["d".to_string()]),
             ]
         );
     }

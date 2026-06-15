@@ -11,7 +11,7 @@ mod reconcile;
 mod value;
 mod yaml_edit;
 use format::Format;
-use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, Options};
+use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
 use value::{Leaf, Node};
 
 /// Three-way reconcile for app-owned JSON or plist files: deep-merge DESIRED
@@ -196,9 +196,9 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 /// scalars are atomic leaves, matching the reconcile semantics.
 fn diff_text(old: &Node, new: &Node) -> String {
     use std::collections::HashSet;
-    let old_leaves: HashSet<Vec<String>> = leaf_paths(old).into_iter().collect();
-    let new_leaves: HashSet<Vec<String>> = leaf_paths(new).into_iter().collect();
-    let mut all: Vec<Vec<String>> = old_leaves.union(&new_leaves).cloned().collect();
+    let old_leaves: HashSet<KeyPath> = leaf_paths(old).into_iter().collect();
+    let new_leaves: HashSet<KeyPath> = leaf_paths(new).into_iter().collect();
+    let mut all: Vec<KeyPath> = old_leaves.union(&new_leaves).cloned().collect();
     all.sort();
 
     let mut lines = Vec::new();
