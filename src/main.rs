@@ -93,14 +93,10 @@ fn run(cli: &Cli) -> Result<Outcome, Error> {
         .format
         .unwrap_or_else(|| FormatKind::detect(&cli.target));
 
-    let desired = format::read_file(&cli.desired, kind).ok_or_else(|| Error::DesiredInvalid {
-        path: cli.desired.clone(),
-        format: kind,
-    })?;
+    let desired = format::read_file(&cli.desired, kind)
+        .ok_or_else(|| kind.invalid_desired(cli.desired.clone()))?;
     if !desired.is_map() {
-        return Err(Error::DesiredNotMapping {
-            path: cli.desired.clone(),
-        });
+        return Err(kind.desired_not_mapping(cli.desired.clone()));
     }
 
     // Missing/unparseable/non-map TARGET is treated as empty.

@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 use indexmap::IndexMap;
@@ -45,6 +45,25 @@ impl FormatKind {
             FormatKind::Json => &Json,
             FormatKind::Plist => &Plist,
             FormatKind::Yaml => &Yaml,
+        }
+    }
+
+    /// The format-specific error for DESIRED failing to parse.
+    pub fn invalid_desired(self, path: PathBuf) -> Error {
+        match self {
+            FormatKind::Json => Error::InvalidJson(path),
+            FormatKind::Plist => Error::InvalidPlist(path),
+            FormatKind::Yaml => Error::InvalidYaml(path),
+        }
+    }
+
+    /// The format-specific error for DESIRED's root not being this format's
+    /// object/dictionary/mapping type.
+    pub fn desired_not_mapping(self, path: PathBuf) -> Error {
+        match self {
+            FormatKind::Json => Error::NotJsonObject(path),
+            FormatKind::Plist => Error::NotPlistDictionary(path),
+            FormatKind::Yaml => Error::NotYamlMapping(path),
         }
     }
 }

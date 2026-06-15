@@ -4,15 +4,25 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::format::FormatKind;
-
 /// A reconcile run that failed (always maps to exit code 1).
+///
+/// DESIRED parse/shape failures are format-specific: each format reports the
+/// concrete thing it expected (a JSON object, a plist dictionary, a YAML
+/// mapping) rather than a generic catch-all.
 #[derive(Debug)]
 pub enum Error {
-    /// DESIRED did not parse as the resolved format.
-    DesiredInvalid { path: PathBuf, format: FormatKind },
-    /// DESIRED parsed but is not an object/dictionary/mapping.
-    DesiredNotMapping { path: PathBuf },
+    /// DESIRED did not parse as JSON.
+    InvalidJson(PathBuf),
+    /// DESIRED did not parse as a plist.
+    InvalidPlist(PathBuf),
+    /// DESIRED did not parse as YAML.
+    InvalidYaml(PathBuf),
+    /// DESIRED parsed but its root is not a JSON object.
+    NotJsonObject(PathBuf),
+    /// DESIRED parsed but its root is not a plist dictionary.
+    NotPlistDictionary(PathBuf),
+    /// DESIRED parsed but its root is not a YAML mapping.
+    NotYamlMapping(PathBuf),
     /// Writing the target failed.
     Write {
         path: PathBuf,
@@ -34,14 +44,16 @@ const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comment
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::DesiredInvalid { path, format } => {
-                write!(f, "DESIRED is not valid {format:?}: {}", path.display())
+            Error::InvalidJson(p) => write!(f, "DESIRED is not valid JSON: {}", p.display()),
+            Error::InvalidPlist(p) => write!(f, "DESIRED is not valid plist: {}", p.display()),
+            Error::InvalidYaml(p) => write!(f, "DESIRED is not valid YAML: {}", p.display()),
+            Error::NotJsonObject(p) => write!(f, "DESIRED must be a JSON object: {}", p.display()),
+            Error::NotPlistDictionary(p) => {
+                write!(f, "DESIRED must be a plist dictionary: {}", p.display())
             }
-            Error::DesiredNotMapping { path } => write!(
-                f,
-                "DESIRED must be a JSON object / plist dictionary / YAML mapping: {}",
-                path.display()
-            ),
+            Error::NotYamlMapping(p) => {
+                write!(f, "DESIRED must be a YAML mapping: {}", p.display())
+            }
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::PlistNotUtf8(e) => write!(f, "plist output was not UTF-8: {e}"),

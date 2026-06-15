@@ -982,3 +982,55 @@ fn preserves_existing_file_mode_yaml() {
     let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
+
+// ----- format-specific error messages -----
+
+fn stderr_of(args: &[&str]) -> String {
+    let out = run(args);
+    assert_eq!(out.status.code(), Some(1));
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn not_a_mapping_error_names_the_format() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // JSON: a top-level array is not an object.
+    let tj = dir.path().join("c.json");
+    let dj = dir.path().join("d.json");
+    fs::write(&dj, "[1,2,3]").unwrap();
+    let err = stderr_of(&[tj.to_str().unwrap(), dj.to_str().unwrap()]);
+    assert!(err.contains("must be a JSON object"), "got: {err}");
+
+    // plist: a top-level array is not a dictionary.
+    let tp = dir.path().join("c.plist");
+    let dp = dir.path().join("d.plist");
+    plist::Value::Array(vec![pint(1)]).to_file_xml(&dp).unwrap();
+    let err = stderr_of(&[tp.to_str().unwrap(), dp.to_str().unwrap()]);
+    assert!(err.contains("must be a plist dictionary"), "got: {err}");
+
+    // YAML: a sequence is not a mapping.
+    let ty = dir.path().join("c.yaml");
+    let dy = dir.path().join("d.yaml");
+    fs::write(&dy, "- 1\n- 2\n").unwrap();
+    let err = stderr_of(&[ty.to_str().unwrap(), dy.to_str().unwrap()]);
+    assert!(err.contains("must be a YAML mapping"), "got: {err}");
+}
+
+#[test]
+fn parse_failure_error_names_the_format() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let tj = dir.path().join("c.json");
+    let dj = dir.path().join("d.json");
+    fs::write(&dj, "not json {").unwrap();
+    let err = stderr_of(&[tj.to_str().unwrap(), dj.to_str().unwrap()]);
+    assert!(err.contains("not valid JSON"), "got: {err}");
+
+    // A non-string YAML key is refused at parse → "not valid YAML".
+    let ty = dir.path().join("c.yaml");
+    let dy = dir.path().join("d.yaml");
+    fs::write(&dy, "1: a\n").unwrap();
+    let err = stderr_of(&[ty.to_str().unwrap(), dy.to_str().unwrap()]);
+    assert!(err.contains("not valid YAML"), "got: {err}");
+}
