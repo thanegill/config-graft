@@ -92,7 +92,7 @@ fn run(cli: &Cli) -> Result<i32, String> {
         .ok_or_else(|| format!("DESIRED is not valid {fmt:?}: {}", cli.desired.display()))?;
     if !desired.is_map() {
         return Err(format!(
-            "DESIRED must be a JSON object / plist dictionary: {}",
+            "DESIRED must be a JSON object / plist dictionary / YAML mapping: {}",
             cli.desired.display()
         ));
     }

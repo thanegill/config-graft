@@ -9,6 +9,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use clap::ValueEnum;
+use saphyr::LoadableYamlNode;
 use serde::Serialize;
 
 use crate::value::Node;
@@ -18,14 +19,18 @@ use crate::value::Node;
 pub enum Format {
     Json,
     Plist,
+    Yaml,
 }
 
 impl Format {
-    /// Infer the format from a path's extension: `.plist` (any case) → plist,
-    /// everything else → json.
+    /// Infer the format from a path's extension: `.plist` → plist,
+    /// `.yaml`/`.yml` → yaml, everything else → json (all case-insensitive).
     pub fn detect(path: &Path) -> Format {
         match path.extension().and_then(|e| e.to_str()) {
             Some(ext) if ext.eq_ignore_ascii_case("plist") => Format::Plist,
+            Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
+                Format::Yaml
+            }
             _ => Format::Json,
         }
     }
@@ -44,6 +49,15 @@ pub fn read(path: &Path, fmt: Format) -> Option<Node> {
             let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;
             Some(Node::from_plist(value))
         }
+        Format::Yaml => {
+            let text = std::str::from_utf8(&bytes).ok()?;
+            let docs = saphyr::Yaml::load_from_str(text).ok()?;
+            // Single document only; a multi-doc stream is not reconcilable here.
+            let [doc] = docs.as_slice() else {
+                return None;
+            };
+            Node::from_yaml(doc)
+        }
     }
 }
 
@@ -53,6 +67,7 @@ pub fn write(node: &Node, fmt: Format, indent: &[u8]) -> Result<String, String> 
     match fmt {
         Format::Json => Ok(write_json(node, indent)),
         Format::Plist => write_plist(node),
+        Format::Yaml => Ok(write_yaml(node)),
     }
 }
 
@@ -78,4 +93,22 @@ fn write_plist(node: &Node) -> Result<String, String> {
     // consistent canonical form (matching the JSON path).
     out.push('\n');
     Ok(out)
+}
+
+/// Canonical YAML emission, used only when there is no original text to preserve
+/// (first apply / empty target). The comment-preserving path lives in
+/// `yaml_edit` and runs from `main` instead.
+fn write_yaml(node: &Node) -> String {
+    let doc = node.to_yaml();
+    let mut buf = String::new();
+    let mut emitter = saphyr::YamlEmitter::new(&mut buf);
+    emitter.dump(&doc).expect("emitting YAML");
+    // saphyr writes a leading `---\n` document marker and no trailing newline;
+    // drop the marker for clean config output and end with a single newline.
+    let body = buf.strip_prefix("---\n").unwrap_or(&buf);
+    let mut out = body.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }

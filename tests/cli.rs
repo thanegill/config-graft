@@ -594,3 +594,156 @@ fn diff_renders_plist_date_and_data_tokens() {
         "diff should show a data token, got:\n{stderr_and_out}"
     );
 }
+
+// ----- YAML format (canonical paths; comment preservation is its own section) -----
+
+/// Assert two YAML texts carry the same data, ignoring formatting/comments.
+fn assert_yaml_eq(actual: &str, expected: &str) {
+    use saphyr::LoadableYamlNode;
+    let a = saphyr::Yaml::load_from_str(actual).expect("parse actual YAML");
+    let e = saphyr::Yaml::load_from_str(expected).expect("parse expected YAML");
+    assert_eq!(
+        a, e,
+        "\n--- actual ---\n{actual}\n--- expected ---\n{expected}"
+    );
+}
+
+#[test]
+fn reconciles_in_place_three_way_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let base = dir.path().join("base.yaml");
+    fs::write(&target, "a: 1\nb: 5\napp: true\n").unwrap();
+    fs::write(&desired, "c: 3\n").unwrap();
+    fs::write(&base, "a: 1\nb: 2\n").unwrap();
+
+    let out = run(&[
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    // a pruned (==base); b kept (user-edited); app kept; c added.
+    assert_yaml_eq(
+        &fs::read_to_string(&target).unwrap(),
+        "b: 5\napp: true\nc: 3\n",
+    );
+}
+
+#[test]
+fn array_strategy_set_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    fs::write(&target, "tags:\n  - a\n  - b\n").unwrap();
+    fs::write(&desired, "tags:\n  - b\n  - c\n").unwrap();
+
+    let out = run(&[
+        "--array-strategy",
+        "set",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert_yaml_eq(
+        &fs::read_to_string(&target).unwrap(),
+        "tags:\n  - a\n  - b\n  - c\n",
+    );
+}
+
+#[test]
+fn no_prune_keeps_dropped_keys_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let base = dir.path().join("base.yaml");
+    fs::write(&target, "a: 1\nb: 2\n").unwrap();
+    fs::write(&desired, "a: 1\n").unwrap();
+    fs::write(&base, "a: 1\nb: 2\n").unwrap();
+
+    let out = run(&[
+        "--no-prune",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: 1\nb: 2\n");
+}
+
+#[test]
+fn yaml_null_is_a_value_not_a_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    fs::write(&target, "a: 1\n").unwrap();
+    fs::write(&desired, "a: null\n").unwrap();
+
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: null\n");
+}
+
+#[test]
+fn yml_extension_is_detected_as_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yml");
+    let desired = dir.path().join("desired.yml");
+    fs::write(&target, "a: 1\n").unwrap();
+    fs::write(&desired, "b: 2\n").unwrap();
+
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: 1\nb: 2\n");
+}
+
+#[test]
+fn format_flag_overrides_extension_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    // No YAML extension, so detection would pick JSON; --format forces YAML.
+    let target = dir.path().join("config");
+    let desired = dir.path().join("desired");
+    fs::write(&target, "a: 1\n").unwrap();
+    fs::write(&desired, "b: 2\n").unwrap();
+
+    let out = run(&[
+        "--format",
+        "yaml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: 1\nb: 2\n");
+}
+
+#[test]
+fn creates_missing_yaml_target_canonically() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("nested/dir/config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    fs::write(&desired, "a: 1\nb:\n  c: 2\n").unwrap();
+
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: 1\nb:\n  c: 2\n");
+}
+
+#[test]
+fn yaml_check_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    fs::write(&target, "a: 1\n").unwrap();
+    fs::write(&desired, "a: 2\n").unwrap();
+
+    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
+        .status
+        .success());
+    let out = run(&[
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+}

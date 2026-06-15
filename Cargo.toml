@@ -12,3 +12,4 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 indexmap = "2"
 plist = "1"
+saphyr = "0.0.6"
