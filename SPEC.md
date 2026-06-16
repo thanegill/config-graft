@@ -1,6 +1,6 @@
-# `config-graft` — three-way reconcile for app-owned JSON, plist, and YAML files
+# `config-graft` — three-way reconcile for app-owned JSON, plist, YAML, and TOML files
 
-Declaratively reconcile a managed *subset* of a JSON, plist, or YAML file into a
+Declaratively reconcile a managed *subset* of a JSON, plist, YAML, or TOML file into a
 file the application also writes to, using a last-applied snapshot as the merge
 base — i.e. `kubectl apply`'s three-way merge, scoped to a single local file. The
 merge engine is format-agnostic; see §5a for the supported formats.
@@ -42,7 +42,7 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 ### Arguments
 
 - `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent.
-- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping.
+- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping / TOML table.
 - `BASE` — path to the previous snapshot. Optional; absent/empty/invalid ⇒ no pruning (first-run behavior).
 
 ### Options
@@ -55,7 +55,7 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only** — passing it with another format is an error (exit 1).
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
 - `--array-strategy <replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `replace` (atomic, default), `concat` (append, keeping order and duplicates), or `set` (union, ignoring order and dropping duplicates).
-- `--format <json|plist|yaml>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, else json). Governs every file in the run (§5a).
+- `--format <json|plist|yaml|toml>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a).
 - `--plist-binary` — write plist output as binary instead of XML. **Plist only** — passing it with another format is an error (exit 1).
 
 ### Exit codes
@@ -90,7 +90,7 @@ Keys in `target` that were never in `base` or `desired` are always preserved.
 
   The strategy applies only when **both** sides are arrays; an array-vs-non-array always replaces. **Pruning is always atomic** — a managed array is removed or kept as one leaf regardless of strategy.
 - **Scalars** — DESIRED replaces.
-- **`null`** — a normal value, not a delete sentinel. Removal is driven by BASE↔DESIRED diffing, not by RFC 7386 null. (JSON only; plist has no null.)
+- **`null`** — a normal value, not a delete sentinel. Removal is driven by BASE↔DESIRED diffing, not by RFC 7386 null. (JSON/YAML have null; plist/TOML don't.)
 - **Type changes** (e.g. object→array at a key) — DESIRED's value replaces wholesale.
 
 ## 5a. Formats
@@ -99,8 +99,8 @@ The engine runs on an internal value model; each format has a codec that maps
 its native value type ⇄ that model. Reconciliation is **homogeneous** — one
 format governs TARGET, DESIRED, BASE, and output — so a run is never a
 cross-format conversion. The format is inferred from TARGET's extension
-(`.plist` → plist, `.yaml`/`.yml` → YAML, else JSON) and can be forced with
-`--format`.
+(`.plist` → plist, `.yaml`/`.yml` → YAML, `.toml` → TOML, else JSON) and can be
+forced with `--format`.
 
 - **JSON** — objects, arrays, strings, numbers, booleans, `null`. Output is
   pretty-printed per `--indent`, key order preserved (§8).
@@ -122,6 +122,16 @@ cross-format conversion. The format is inferred from TARGET's extension
   multi-document streams, non-string keys, or a non-mapping root; every write is
   verified to round-trip back to the reconciled result before it lands. `--indent`
   does not apply.
+- **TOML** (via `toml_edit`) — tables, arrays, strings, integers, floats,
+  booleans, and date-times (treated as atomic leaves, round-tripping losslessly);
+  TOML has no `null`. Like YAML, **an existing target is *not* normalized:**
+  config-graft mutates the original document in place, so **comments, blank lines,
+  and formatting are preserved** on every region it doesn't change. Only an
+  empty/first-apply target is written canonically (idiomatic `[section]` tables).
+  Every write is verified to round-trip back to the reconciled result and
+  **refuses (exit 1, file untouched) rather than risk corruption** on an edit it
+  can't make safely. A TOML document's root is always a table, so a desired TOML
+  file that parses is always a valid mapping. `--indent` does not apply.
 
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
@@ -136,7 +146,7 @@ ever pruned.
 
 ## 7. File handling & robustness
 
-- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary / YAML mapping. (Exception: a non-empty YAML target that can't be edited safely is **refused**, not overwritten — see §5a.)
+- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary / YAML mapping / TOML table. (Exception: a non-empty YAML or TOML target that can't be edited safely is **refused**, not overwritten — see §5a.)
 - **Missing/empty/unparseable/non-object BASE** ⇒ pruning disabled (first run).
 - **Invalid DESIRED** ⇒ hard error (exit 1); TARGET untouched.
 - Parent directories of TARGET created as needed.
@@ -152,9 +162,10 @@ ever pruned.
 
 - Not a general diff/patch tool (use `jd`).
 - Not RFC 7386 (no null-deletes) or RFC 6902.
-- No comment/formatting preservation for **JSON** (canonical pretty-print) or **plist** (canonical XML); JSONC/JSON5 out of scope. (**YAML does** preserve comments/formatting on untouched regions — see §5a.)
+- No comment/formatting preservation for **JSON** (canonical pretty-print) or **plist** (canonical XML); JSONC/JSON5 out of scope. (**YAML** and **TOML** do preserve comments/formatting on untouched regions — see §5a.)
 - **No cross-format conversion** (e.g. JSON in / plist out) — a run is homogeneous.
 - **YAML:** no editing of anchors/aliases, custom tags, multi-document streams, or non-string keys (refused, not converted); comments are preserved but not relocated when their key moves.
+- **TOML:** comments are preserved but not relocated when their key moves; an edit the in-place editor can't make so it round-trips is refused, not forced.
 - Does not manage the BASE snapshot lifecycle — the caller stores/rotates it.
 
 ## 10. Known trade-offs
@@ -208,21 +219,26 @@ Implemented in **Rust** (this repo):
   can't hold a plist `Date`, by construction.
 - `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
   unit-tested against §12. Managed key paths are a `KeyPath` newtype.
-- `src/format/` — one module per format (`json`/`plist`/`yaml`), each defining its
-  leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and `Format`
-  (parse/serialize). `mod.rs` holds those traits, the `FormatKind` selector,
-  `Indent`, and `read_file`. The node type varies per format, so dispatch is
-  **static**: `main` resolves the `FormatKind` and monomorphizes `run::<F>()`.
+- `src/format/` — one module per format (`json`/`plist`/`yaml`/`toml`), each
+  defining its leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and
+  `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind`
+  selector, `Indent`, and `read_file`. The node type varies per format, so
+  dispatch is **static**: `main` resolves the `FormatKind` and monomorphizes
+  `run::<F>()`.
 - `src/format/yaml_edit.rs` — the comment-preserving YAML writer: a structural
   diff of the original vs reconciled `Node<YamlLeaf>` trees drives minimal
   byte-span edits against the original text (spans from `saphyr`'s `MarkedYaml`),
   with a round-trip backstop that refuses any write that wouldn't reproduce the
   reconciled result.
+- `src/format/toml_edit_apply.rs` — the comment-preserving TOML writer: mutates
+  `toml_edit`'s format-preserving `DocumentMut` in place (touching only the keys
+  that changed), with the same round-trip backstop that refuses any write that
+  wouldn't reproduce the reconciled result.
 - `src/error.rs` — a typed `Error` enum (format-specific DESIRED errors) and an
   `Outcome`; `src/main.rs` maps these to exit codes.
 - `src/main.rs` — CLI (clap), I/O, atomic write, `--check`/`--diff`/`--stdout`/`--format`.
-- `tests/{json,plist,yaml}.rs` (+ `tests/common`) — per-format integration tests
-  exercising exit codes and file behavior.
+- `tests/{json,plist,yaml,toml}.rs` (+ `tests/common`) — per-format integration
+  tests exercising exit codes and file behavior.
 - Map nodes use `indexmap` (and the JSON codec keeps `serde_json`'s
   `preserve_order`) so TARGET key order is kept and new keys are appended.
 

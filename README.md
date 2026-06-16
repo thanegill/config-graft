@@ -1,6 +1,6 @@
 # config-graft
 
-Three-way reconcile for **app-owned JSON, plist, and YAML files**.
+Three-way reconcile for **app-owned JSON, plist, YAML, and TOML files**.
 
 It deep-merges a *managed subset* (DESIRED) into a file the application also
 writes to (TARGET), while:
@@ -25,6 +25,7 @@ config-graft --format plist config desired                  # force plist on any
 config-graft --plist-binary app.plist desired.plist         # write a binary plist
 
 config-graft config.yaml desired.yaml                       # YAML, keeping comments
+config-graft config.toml desired.toml                       # TOML, keeping comments
 ```
 
 By default arrays (and scalars) are **atomic**: a managed list is replaced
@@ -35,11 +36,11 @@ entirely by the BASE↔DESIRED diff.
 
 ## Formats
 
-The merge engine is format-agnostic; **JSON**, Apple **plist**, and **YAML** are
-supported. The format is inferred from TARGET's extension (`.plist` → plist,
-`.yaml`/`.yml` → YAML, else JSON) and governs every file in the run (TARGET,
-DESIRED, BASE, and output) — there is no cross-format conversion. Override
-detection with `--format json|plist|yaml`.
+The merge engine is format-agnostic; **JSON**, Apple **plist**, **YAML**, and
+**TOML** are supported. The format is inferred from TARGET's extension
+(`.plist` → plist, `.yaml`/`.yml` → YAML, `.toml` → TOML, else JSON) and governs
+every file in the run (TARGET, DESIRED, BASE, and output) — there is no
+cross-format conversion. Override detection with `--format json|plist|yaml|toml`.
 
 Plist notes:
 
@@ -59,6 +60,17 @@ YAML notes:
   Every write is verified to round-trip back to the intended result before it
   lands.
 - `--indent` is JSON-only; passing it with YAML is an error.
+
+TOML notes:
+
+- Like YAML, **comments, blank lines, and formatting are preserved** on the parts
+  config-graft doesn't change — it edits the existing document in place (via
+  `toml_edit`) rather than re-emitting it. Only an empty/first-apply target is
+  written canonically. Every write is verified to round-trip back to the intended
+  result before it lands, and **refuses (exit 1, leaving the file untouched)
+  rather than risk corruption** on an edit it can't make safely.
+- TOML date-times round-trip losslessly as atomic leaves; TOML has no `null`.
+- `--indent` is JSON-only; passing it with TOML is an error.
 
 ## Develop
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TOML** support alongside JSON, plist, and YAML. The format is inferred from
+  TARGET's extension (`.toml`) or forced with `--format toml`. Like YAML, an
+  existing TOML target is edited in place (via `toml_edit`) so **comments, blank
+  lines, and formatting are preserved** on the parts that don't change; only an
+  empty/first-apply target is written canonically. Every write is verified to
+  round-trip back to the intended result, refusing (and leaving the file
+  untouched) rather than risk corruption. Date-times round-trip as atomic leaves.
+
 ## [0.0.3] - 2026-06-16
 
 ### Added
