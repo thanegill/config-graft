@@ -18,7 +18,7 @@
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "json-apply";
-          version = "0.0.2";
+          version = "0.0.3";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           meta.mainProgram = "json-apply";
