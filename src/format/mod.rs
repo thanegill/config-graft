@@ -16,11 +16,14 @@ use crate::value::{Leaf, Node};
 
 pub(crate) mod json;
 pub(crate) mod plist;
+pub(crate) mod toml;
+mod toml_edit_apply;
 pub(crate) mod yaml;
 mod yaml_edit;
 
 pub use json::Json;
 pub use plist::Plist;
+pub use toml::Toml;
 pub use yaml::Yaml;
 
 /// Which file format a run uses — a selector parsed from `--format` or inferred
@@ -30,17 +33,20 @@ pub enum FormatKind {
     Json,
     Plist,
     Yaml,
+    Toml,
 }
 
 impl FormatKind {
     /// Infer the format from a path's extension: `.plist` → plist,
-    /// `.yaml`/`.yml` → yaml, everything else → json (all case-insensitive).
+    /// `.yaml`/`.yml` → yaml, `.toml` → toml, everything else → json (all
+    /// case-insensitive).
     pub fn detect(path: &Path) -> FormatKind {
         match path.extension().and_then(|e| e.to_str()) {
             Some(ext) if ext.eq_ignore_ascii_case("plist") => FormatKind::Plist,
             Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
                 FormatKind::Yaml
             }
+            Some(ext) if ext.eq_ignore_ascii_case("toml") => FormatKind::Toml,
             _ => FormatKind::Json,
         }
     }
@@ -51,6 +57,7 @@ impl FormatKind {
             FormatKind::Json => Error::InvalidJson(path),
             FormatKind::Plist => Error::InvalidPlist(path),
             FormatKind::Yaml => Error::InvalidYaml(path),
+            FormatKind::Toml => Error::InvalidToml(path),
         }
     }
 
@@ -61,6 +68,7 @@ impl FormatKind {
             FormatKind::Json => Error::NotJsonObject(path),
             FormatKind::Plist => Error::NotPlistDictionary(path),
             FormatKind::Yaml => Error::NotYamlMapping(path),
+            FormatKind::Toml => Error::NotTomlTable(path),
         }
     }
 }

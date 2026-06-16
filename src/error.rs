@@ -17,12 +17,18 @@ pub enum Error {
     InvalidPlist(PathBuf),
     /// DESIRED did not parse as YAML.
     InvalidYaml(PathBuf),
+    /// DESIRED did not parse as TOML.
+    InvalidToml(PathBuf),
     /// DESIRED parsed but its root is not a JSON object.
     NotJsonObject(PathBuf),
     /// DESIRED parsed but its root is not a plist dictionary.
     NotPlistDictionary(PathBuf),
     /// DESIRED parsed but its root is not a YAML mapping.
     NotYamlMapping(PathBuf),
+    /// DESIRED parsed but its root is not a TOML table. (Structurally
+    /// unreachable — a parsed TOML document always has a table root — but kept so
+    /// every format answers the same questions.)
+    NotTomlTable(PathBuf),
     /// Writing the target failed.
     Write {
         path: PathBuf,
@@ -33,6 +39,9 @@ pub enum Error {
     /// The YAML target can't be edited while preserving comments without risking
     /// corruption, so the write was refused.
     YamlUnsafe,
+    /// The TOML target can't be edited while preserving comments without risking
+    /// corruption, so the write was refused.
+    TomlUnsafe,
     /// A format-specific flag was passed with a format it doesn't apply to.
     IncompatibleFlag {
         flag: &'static str,
@@ -44,12 +53,17 @@ const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comment
     (unsupported construct, e.g. anchors/aliases, a non-mapping root, or an edit \
     that would not round-trip); aborting rather than risk corrupting the file";
 
+const TOML_UNSAFE: &str = "cannot safely edit this TOML while preserving comments \
+    (an edit that would not round-trip, e.g. a table-shape change the editor can't \
+    rewrite); aborting rather than risk corrupting the file";
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::InvalidJson(p) => write!(f, "DESIRED is not valid JSON: {}", p.display()),
             Error::InvalidPlist(p) => write!(f, "DESIRED is not valid plist: {}", p.display()),
             Error::InvalidYaml(p) => write!(f, "DESIRED is not valid YAML: {}", p.display()),
+            Error::InvalidToml(p) => write!(f, "DESIRED is not valid TOML: {}", p.display()),
             Error::NotJsonObject(p) => write!(f, "DESIRED must be a JSON object: {}", p.display()),
             Error::NotPlistDictionary(p) => {
                 write!(f, "DESIRED must be a plist dictionary: {}", p.display())
@@ -57,9 +71,13 @@ impl fmt::Display for Error {
             Error::NotYamlMapping(p) => {
                 write!(f, "DESIRED must be a YAML mapping: {}", p.display())
             }
+            Error::NotTomlTable(p) => {
+                write!(f, "DESIRED must be a TOML table: {}", p.display())
+            }
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
+            Error::TomlUnsafe => f.write_str(TOML_UNSAFE),
             Error::IncompatibleFlag { flag, only } => {
                 write!(f, "{flag} applies to {only} output only")
             }

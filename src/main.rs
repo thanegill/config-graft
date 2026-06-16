@@ -11,20 +11,22 @@ mod format;
 mod reconcile;
 mod value;
 use error::{Error, Outcome};
-use format::{Format, FormatKind, Indent, Json, Plist, WriteOpts, Yaml};
+use format::{Format, FormatKind, Indent, Json, Plist, Toml, WriteOpts, Yaml};
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
 use value::{Leaf, Node};
 
-/// Three-way reconcile for app-owned JSON or plist files: deep-merge DESIRED
-/// into TARGET while preserving keys the app wrote and pruning keys dropped from
-/// DESIRED (using BASE, the previously-applied snapshot, as the merge ancestor).
+/// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files:
+/// deep-merge DESIRED into TARGET while preserving keys the app wrote and pruning
+/// keys dropped from DESIRED (using BASE, the previously-applied snapshot, as the
+/// merge ancestor).
 #[derive(Parser)]
 #[command(name = "config-graft", version, about)]
 struct Cli {
     /// File to reconcile, in place (created with parents if missing).
     target: PathBuf,
 
-    /// Managed data to apply (must be a JSON object / plist dictionary).
+    /// Managed data to apply (must be a mapping: JSON object / plist dictionary /
+    /// YAML mapping / TOML table).
     desired: PathBuf,
 
     /// Previous snapshot (last applied); enables pruning. Optional. An empty
@@ -57,7 +59,8 @@ struct Cli {
     indent: Option<Indent>,
 
     /// Input/output format. Inferred from TARGET's extension when omitted
-    /// (.plist → plist, else json). One format governs TARGET, DESIRED, and BASE.
+    /// (.plist → plist, .yaml/.yml → yaml, .toml → toml, else json). One format
+    /// governs TARGET, DESIRED, and BASE.
     #[arg(long, value_name = "FORMAT")]
     format: Option<FormatKind>,
 
@@ -92,6 +95,7 @@ fn main() {
         FormatKind::Json => run::<Json>(&cli),
         FormatKind::Plist => run::<Plist>(&cli),
         FormatKind::Yaml => run::<Yaml>(&cli),
+        FormatKind::Toml => run::<Toml>(&cli),
     };
     match result {
         Ok(outcome) => process::exit(outcome.code()),
