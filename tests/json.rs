@@ -463,20 +463,22 @@ fn parse_failure_error_names_json() {
 }
 
 #[test]
-fn plist_binary_flag_is_a_noop_for_json() {
+fn plist_binary_flag_is_rejected_for_json() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
     fs::write(&target, r#"{"a":1}"#).unwrap();
     fs::write(&desired, r#"{"b":2}"#).unwrap();
 
-    let out = run(&[
+    // A plist-only flag with a JSON target is an error, not a silent no-op.
+    let err = stderr_of(&[
         "--plist-binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
-    assert!(out.status.success());
-    // Still ordinary JSON text — the flag is ignored for non-plist formats.
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
-    assert_eq!(v, serde_json::json!({"a":1,"b":2}));
+    assert!(
+        err.contains("--plist-binary applies to plist output only"),
+        "got: {err}"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#); // untouched
 }

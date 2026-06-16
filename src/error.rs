@@ -33,6 +33,11 @@ pub enum Error {
     /// The YAML target can't be edited while preserving comments without risking
     /// corruption, so the write was refused.
     YamlUnsafe,
+    /// A format-specific flag was passed with a format it doesn't apply to.
+    IncompatibleFlag {
+        flag: &'static str,
+        only: &'static str,
+    },
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
@@ -55,6 +60,9 @@ impl fmt::Display for Error {
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
+            Error::IncompatibleFlag { flag, only } => {
+                write!(f, "{flag} applies to {only} output only")
+            }
         }
     }
 }

@@ -243,3 +243,24 @@ fn stdout_plist_binary_writes_binary() {
     // --stdout leaves the target (still XML) untouched.
     assert!(fs::read(&target).unwrap().starts_with(b"<?xml"));
 }
+
+#[test]
+fn indent_flag_is_rejected_for_plist() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    // --indent is JSON-only; passing it with plist is an error.
+    let err = stderr_of(&[
+        "--indent",
+        "4",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(
+        err.contains("--indent applies to JSON output only"),
+        "got: {err}"
+    );
+}

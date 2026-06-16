@@ -51,17 +51,18 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
-    /// Output indentation: a number of spaces, or `tab`. JSON only; ignored for
-    /// plist (fixed-format XML) and YAML (edits preserve existing indentation).
-    #[arg(long, default_value = "2", value_name = "N|tab", value_parser = format::parse_indent)]
-    indent: Indent,
+    /// Output indentation: a number of spaces, or `tab` (default: 2 spaces). JSON
+    /// only — passing it with another format is an error.
+    #[arg(long, value_name = "N|tab", value_parser = format::parse_indent)]
+    indent: Option<Indent>,
 
     /// Input/output format. Inferred from TARGET's extension when omitted
     /// (.plist → plist, else json). One format governs TARGET, DESIRED, and BASE.
     #[arg(long, value_name = "FORMAT")]
     format: Option<FormatKind>,
 
-    /// Write plist output as binary instead of XML. Plist only; ignored otherwise.
+    /// Write plist output as binary instead of XML. Plist only — passing it with
+    /// another format is an error.
     #[arg(long = "plist-binary")]
     plist_binary: bool,
 
@@ -102,6 +103,21 @@ fn main() {
 }
 
 fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
+    // Format-specific flags must match the resolved format; passing one with an
+    // incompatible format is an error rather than a silent no-op.
+    if cli.indent.is_some() && F::KIND != FormatKind::Json {
+        return Err(Error::IncompatibleFlag {
+            flag: "--indent",
+            only: "JSON",
+        });
+    }
+    if cli.plist_binary && F::KIND != FormatKind::Plist {
+        return Err(Error::IncompatibleFlag {
+            flag: "--plist-binary",
+            only: "plist",
+        });
+    }
+
     let desired = format::read_file::<F>(&cli.desired)
         .ok_or_else(|| F::KIND.invalid_desired(cli.desired.clone()))?;
     if !desired.is_map() {
@@ -137,7 +153,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
     // (JSON/plist ignore it; YAML edits it in place or emits canonically).
     let current = fs::read(&cli.target).unwrap_or_default();
     let write_opts = WriteOpts {
-        indent: cli.indent,
+        indent: cli.indent.unwrap_or(Indent::Spaces(2)),
         plist_binary: cli.plist_binary,
     };
     let output = F::serialize(&result, &current, write_opts)?;
