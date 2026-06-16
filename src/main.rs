@@ -11,7 +11,7 @@ mod format;
 mod reconcile;
 mod value;
 use error::{Error, Outcome};
-use format::{FormatKind, Indent};
+use format::{Format, FormatKind, Indent, Json, Plist, Yaml};
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
 use value::{Leaf, Node};
 
@@ -77,7 +77,18 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    match run(&cli) {
+    // One format governs every file. Resolve it, then dispatch statically — the
+    // node type carries the format's leaf type, so each format is its own
+    // monomorphization of `run`.
+    let kind = cli
+        .format
+        .unwrap_or_else(|| FormatKind::detect(&cli.target));
+    let result = match kind {
+        FormatKind::Json => run::<Json>(&cli),
+        FormatKind::Plist => run::<Plist>(&cli),
+        FormatKind::Yaml => run::<Yaml>(&cli),
+    };
+    match result {
         Ok(outcome) => process::exit(outcome.code()),
         Err(e) => {
             eprintln!("json-apply: {e}");
@@ -86,20 +97,15 @@ fn main() {
     }
 }
 
-fn run(cli: &Cli) -> Result<Outcome, Error> {
-    // One format governs every file. Inferred from TARGET unless overridden.
-    let kind = cli
-        .format
-        .unwrap_or_else(|| FormatKind::detect(&cli.target));
-
-    let desired = format::read_file(&cli.desired, kind)
-        .ok_or_else(|| kind.invalid_desired(cli.desired.clone()))?;
+fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
+    let desired = format::read_file::<F>(&cli.desired)
+        .ok_or_else(|| F::KIND.invalid_desired(cli.desired.clone()))?;
     if !desired.is_map() {
-        return Err(kind.desired_not_mapping(cli.desired.clone()));
+        return Err(F::KIND.desired_not_mapping(cli.desired.clone()));
     }
 
     // Missing/unparseable/non-map TARGET is treated as empty.
-    let target = format::read_file(&cli.target, kind)
+    let target = format::read_file::<F>(&cli.target)
         .filter(Node::is_map)
         .unwrap_or_else(Node::empty_map);
 
@@ -110,7 +116,7 @@ fn run(cli: &Cli) -> Result<Outcome, Error> {
         .or(cli.base.as_deref())
         .filter(|p| !p.is_empty());
     let base = base_path
-        .and_then(|p| format::read_file(Path::new(p), kind))
+        .and_then(|p| format::read_file::<F>(Path::new(p)))
         .filter(Node::is_map);
 
     let opts = Options {
@@ -126,7 +132,7 @@ fn run(cli: &Cli) -> Result<Outcome, Error> {
     // as the basis for comment-preserving edits. The format decides how to use it
     // (JSON/plist ignore it; YAML edits it in place or emits canonically).
     let current = fs::read_to_string(&cli.target).unwrap_or_default();
-    let output = kind.format().write(&result, &current, cli.indent)?;
+    let output = F::serialize(&result, &current, cli.indent)?;
 
     if cli.diff {
         print!("{}", diff_text(&target, &result));
@@ -177,7 +183,7 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 
 /// A compact, leaf-level diff (`+` added, `-` removed, `~` changed). Arrays and
 /// scalars are atomic leaves, matching the reconcile semantics.
-fn diff_text(old: &Node, new: &Node) -> String {
+fn diff_text<L: Leaf>(old: &Node<L>, new: &Node<L>) -> String {
     use std::collections::HashSet;
     let old_leaves: HashSet<KeyPath> = leaf_paths(old).into_iter().collect();
     let new_leaves: HashSet<KeyPath> = leaf_paths(new).into_iter().collect();
@@ -206,7 +212,7 @@ fn diff_text(old: &Node, new: &Node) -> String {
 /// Render a node as a compact, single-line token for `--diff`. JSON-representable
 /// values match `serde_json`'s compact form; plist-only leaves get a readable
 /// `<date …>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
-fn compact(v: &Node) -> String {
+fn compact<L: Leaf>(v: &Node<L>) -> String {
     match v {
         Node::Map(m) => {
             let inner: Vec<String> = m
@@ -216,24 +222,10 @@ fn compact(v: &Node) -> String {
             format!("{{{}}}", inner.join(","))
         }
         Node::Array(a) => {
-            let inner: Vec<String> = a.iter().map(compact).collect();
+            let inner: Vec<String> = a.iter().map(|v| compact(v)).collect();
             format!("[{}]", inner.join(","))
         }
-        Node::Leaf(l) => compact_leaf(l),
-    }
-}
-
-fn compact_leaf(l: &Leaf) -> String {
-    match l {
-        Leaf::Null => "null".to_string(),
-        Leaf::Bool(b) => b.to_string(),
-        Leaf::Int(i) => i.to_string(),
-        Leaf::Uint(u) => u.to_string(),
-        Leaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
-        Leaf::String(s) => quote(s),
-        Leaf::Date(d) => format!("<date {}>", d.to_xml_format()),
-        Leaf::Data(bytes) => format!("<data {} bytes>", bytes.len()),
-        Leaf::Uid(u) => format!("<uid {u}>"),
+        Node::Leaf(l) => l.render(),
     }
 }
 

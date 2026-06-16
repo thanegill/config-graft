@@ -4,7 +4,7 @@
 //! what we applied last time). Arrays and scalars are atomic leaves, so a list
 //! is reconciled and pruned as a whole, never element-by-element.
 
-use crate::value::Node;
+use crate::value::{Leaf, Node};
 use clap::ValueEnum;
 use indexmap::IndexMap;
 use std::collections::HashSet;
@@ -68,7 +68,12 @@ pub struct Options {
 }
 
 /// Reconcile DESIRED into a clone of TARGET, using BASE as the merge ancestor.
-pub fn reconcile(target: &Node, desired: &Node, base: Option<&Node>, opts: &Options) -> Node {
+pub fn reconcile<L: Leaf>(
+    target: &Node<L>,
+    desired: &Node<L>,
+    base: Option<&Node<L>>,
+    opts: &Options,
+) -> Node<L> {
     let mut result = match target {
         Node::Map(_) => target.clone(),
         _ => Node::Map(IndexMap::new()),
@@ -120,14 +125,14 @@ pub fn reconcile(target: &Node, desired: &Node, base: Option<&Node>, opts: &Opti
 
 /// Managed leaf paths: descend only through objects, so arrays and scalars are
 /// atomic leaves.
-pub fn leaf_paths(v: &Node) -> Vec<KeyPath> {
+pub fn leaf_paths<L: Leaf>(v: &Node<L>) -> Vec<KeyPath> {
     let mut out = Vec::new();
     let mut prefix = KeyPath::new();
     collect(v, &mut prefix, &mut out);
     out
 }
 
-fn collect(v: &Node, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
+fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
     match v {
         Node::Map(map) => {
             for (k, val) in map {
@@ -141,7 +146,7 @@ fn collect(v: &Node, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
 }
 
 /// Value at an object path, if present.
-pub fn get_path<'a>(v: &'a Node, path: &[String]) -> Option<&'a Node> {
+pub fn get_path<'a, L: Leaf>(v: &'a Node<L>, path: &[String]) -> Option<&'a Node<L>> {
     let mut cur = v;
     for key in path {
         cur = cur.as_map()?.get(key)?;
@@ -149,7 +154,7 @@ pub fn get_path<'a>(v: &'a Node, path: &[String]) -> Option<&'a Node> {
     Some(cur)
 }
 
-fn del_path(v: &mut Node, path: &[String]) {
+fn del_path<L: Leaf>(v: &mut Node<L>, path: &[String]) {
     let Some((first, rest)) = path.split_first() else {
         return;
     };
@@ -167,7 +172,7 @@ fn del_path(v: &mut Node, path: &[String]) {
 /// arrays combine per `arrays` (replace / concat / set-union); every other
 /// case — scalars, type changes, array-vs-non-array — is replaced wholesale by
 /// `desired`.
-pub fn deep_merge(target: &mut Node, desired: &Node, arrays: ArrayStrategy) {
+pub fn deep_merge<L: Leaf>(target: &mut Node<L>, desired: &Node<L>, arrays: ArrayStrategy) {
     match desired {
         Node::Map(d) => {
             if let Node::Map(t) = target {
@@ -205,10 +210,10 @@ pub fn deep_merge(target: &mut Node, desired: &Node, arrays: ArrayStrategy) {
 }
 
 /// Recursively sort every object's keys (for `--sort-keys`).
-pub fn sort_keys(v: &Node) -> Node {
+pub fn sort_keys<L: Leaf>(v: &Node<L>) -> Node<L> {
     match v {
         Node::Map(map) => {
-            let mut entries: Vec<(&String, &Node)> = map.iter().collect();
+            let mut entries: Vec<(&String, &Node<L>)> = map.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
             let mut sorted = IndexMap::with_capacity(entries.len());
             for (k, val) in entries {
@@ -216,7 +221,7 @@ pub fn sort_keys(v: &Node) -> Node {
             }
             Node::Map(sorted)
         }
-        Node::Array(arr) => Node::Array(arr.iter().map(sort_keys).collect()),
+        Node::Array(arr) => Node::Array(arr.iter().map(|v| sort_keys(v)).collect()),
         other => other.clone(),
     }
 }
@@ -224,17 +229,18 @@ pub fn sort_keys(v: &Node) -> Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::json::JsonLeaf;
     use crate::format::{Json, ValueCodec};
     use serde_json::{json, Value};
 
     /// JSON value → `Node` (the JSON codec), so the tests can keep expressing
     /// inputs and expectations as readable `json!(...)` literals.
-    fn n(v: Value) -> Node {
+    fn n(v: Value) -> Node<JsonLeaf> {
         Json::decode(&v).unwrap()
     }
 
     /// `Node` → JSON value, for comparing results against `json!(...)`.
-    fn j(node: &Node) -> Value {
+    fn j(node: &Node<JsonLeaf>) -> Value {
         Json::encode(node)
     }
 

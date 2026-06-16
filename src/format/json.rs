@@ -1,19 +1,44 @@
-//! JSON codec and I/O.
+//! JSON codec, leaf type, and I/O.
 
 use indexmap::IndexMap;
 use serde::Serialize;
 
-use super::{Format, Indent, ValueCodec};
+use super::{Format, FormatKind, Indent, ValueCodec};
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
 /// JSON codec.
 pub struct Json;
 
+/// A JSON leaf value.
+#[derive(Clone, PartialEq, Debug)]
+pub enum JsonLeaf {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Uint(u64),
+    Float(f64),
+    String(String),
+}
+
+impl Leaf for JsonLeaf {
+    fn render(&self) -> String {
+        match self {
+            JsonLeaf::Null => "null".to_string(),
+            JsonLeaf::Bool(b) => b.to_string(),
+            JsonLeaf::Int(i) => i.to_string(),
+            JsonLeaf::Uint(u) => u.to_string(),
+            JsonLeaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
+            JsonLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
+        }
+    }
+}
+
 impl ValueCodec for Json {
+    type Leaf = JsonLeaf;
     type Value<'a> = serde_json::Value;
 
-    fn decode(value: &serde_json::Value) -> Option<Node> {
+    fn decode(value: &serde_json::Value) -> Option<Node<JsonLeaf>> {
         use serde_json::Value;
         Some(match value {
             Value::Object(m) => {
@@ -24,20 +49,20 @@ impl ValueCodec for Json {
                 Node::Map(map)
             }
             Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect::<Option<_>>()?),
-            Value::Null => Node::Leaf(Leaf::Null),
-            Value::Bool(b) => Node::Leaf(Leaf::Bool(*b)),
-            Value::String(s) => Node::Leaf(Leaf::String(s.clone())),
+            Value::Null => Node::Leaf(JsonLeaf::Null),
+            Value::Bool(b) => Node::Leaf(JsonLeaf::Bool(*b)),
+            Value::String(s) => Node::Leaf(JsonLeaf::String(s.clone())),
             Value::Number(num) => Node::Leaf(if let Some(i) = num.as_i64() {
-                Leaf::Int(i)
+                JsonLeaf::Int(i)
             } else if let Some(u) = num.as_u64() {
-                Leaf::Uint(u)
+                JsonLeaf::Uint(u)
             } else {
-                Leaf::Float(num.as_f64().expect("JSON number is i64, u64, or f64"))
+                JsonLeaf::Float(num.as_f64().expect("JSON number is i64, u64, or f64"))
             }),
         })
     }
 
-    fn encode(node: &Node) -> serde_json::Value {
+    fn encode(node: &Node<JsonLeaf>) -> serde_json::Value {
         use serde_json::Value;
         match node {
             Node::Map(m) => {
@@ -54,12 +79,14 @@ impl ValueCodec for Json {
 }
 
 impl Format for Json {
-    fn read(&self, bytes: &[u8]) -> Option<Node> {
+    const KIND: FormatKind = FormatKind::Json;
+
+    fn parse(bytes: &[u8]) -> Option<Node<JsonLeaf>> {
         let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
         Json::decode(&value)
     }
 
-    fn write(&self, node: &Node, _current: &str, indent: Indent) -> Result<String, Error> {
+    fn serialize(node: &Node<JsonLeaf>, _current: &str, indent: Indent) -> Result<String, Error> {
         let value = Json::encode(node);
         let bytes = indent.to_bytes();
         let mut buf = Vec::new();
@@ -72,21 +99,17 @@ impl Format for Json {
     }
 }
 
-fn leaf_to_json(l: &Leaf) -> serde_json::Value {
+fn leaf_to_json(l: &JsonLeaf) -> serde_json::Value {
     use serde_json::Value;
     match l {
-        Leaf::Null => Value::Null,
-        Leaf::Bool(b) => Value::Bool(*b),
-        Leaf::Int(i) => Value::Number((*i).into()),
-        Leaf::Uint(u) => Value::Number((*u).into()),
-        Leaf::Float(f) => serde_json::Number::from_f64(*f)
+        JsonLeaf::Null => Value::Null,
+        JsonLeaf::Bool(b) => Value::Bool(*b),
+        JsonLeaf::Int(i) => Value::Number((*i).into()),
+        JsonLeaf::Uint(u) => Value::Number((*u).into()),
+        JsonLeaf::Float(f) => serde_json::Number::from_f64(*f)
             .map(Value::Number)
             .unwrap_or(Value::Null),
-        Leaf::String(s) => Value::String(s.clone()),
-        // Plist-only leaves never reach JSON output.
-        Leaf::Date(_) | Leaf::Data(_) | Leaf::Uid(_) => {
-            unreachable!("plist-only leaf in JSON output")
-        }
+        JsonLeaf::String(s) => Value::String(s.clone()),
     }
 }
 
@@ -116,15 +139,15 @@ mod tests {
     fn distinguishes_signed_unsigned_and_float() {
         assert_eq!(
             Json::decode(&serde_json::json!(-1)),
-            Some(Node::Leaf(Leaf::Int(-1)))
+            Some(Node::Leaf(JsonLeaf::Int(-1)))
         );
         assert_eq!(
             Json::decode(&serde_json::json!(u64::MAX)),
-            Some(Node::Leaf(Leaf::Uint(u64::MAX)))
+            Some(Node::Leaf(JsonLeaf::Uint(u64::MAX)))
         );
         assert_eq!(
             Json::decode(&serde_json::json!(2.5)),
-            Some(Node::Leaf(Leaf::Float(2.5)))
+            Some(Node::Leaf(JsonLeaf::Float(2.5)))
         );
     }
 }

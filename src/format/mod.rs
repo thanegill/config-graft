@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use clap::ValueEnum;
 
 use crate::error::Error;
-use crate::value::Node;
+use crate::value::{Leaf, Node};
 
-mod json;
-mod plist;
-mod yaml;
+pub(crate) mod json;
+pub(crate) mod plist;
+pub(crate) mod yaml;
 mod yaml_edit;
 
 pub use json::Json;
@@ -45,15 +45,6 @@ impl FormatKind {
         }
     }
 
-    /// The codec/IO implementation for this format.
-    pub fn format(self) -> &'static dyn Format {
-        match self {
-            FormatKind::Json => &Json,
-            FormatKind::Plist => &Plist,
-            FormatKind::Yaml => &Yaml,
-        }
-    }
-
     /// The format-specific error for DESIRED failing to parse.
     pub fn invalid_desired(self, path: PathBuf) -> Error {
         match self {
@@ -74,28 +65,33 @@ impl FormatKind {
     }
 }
 
-/// A format's I/O boundary: parse bytes into a [`Node`] and serialize one back to
-/// text. Object-safe, so [`FormatKind::format`] can return `&dyn Format`.
-pub trait Format {
+/// A format's I/O boundary: parse bytes into a `Node` of this format's leaf type
+/// and serialize one back to text. Not object-safe (the node type varies per
+/// format), so dispatch is static — `main` monomorphizes `run::<F>()` per format.
+pub trait Format: ValueCodec {
+    /// The `FormatKind` this format corresponds to (for format-specific errors).
+    const KIND: FormatKind;
     /// Parse `bytes`, or `None` if they don't parse as this format.
-    fn read(&self, bytes: &[u8]) -> Option<Node>;
+    fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
     /// Serialize `node`. `current` is the target's existing on-disk text (used by
     /// YAML to preserve comments; ignored by JSON/plist). `indent` is JSON-only.
-    fn write(&self, node: &Node, current: &str, indent: Indent) -> Result<String, Error>;
+    fn serialize(node: &Node<Self::Leaf>, current: &str, indent: Indent) -> Result<String, Error>;
 }
 
 /// Conversion between a format's native value type and the internal `Node` model.
 ///
-/// `Value<'a>` is a GAT so saphyr's borrowed `Yaml<'a>` fits the same trait as
-/// the owning `serde_json::Value`/`plist::Value`. Implemented (statically) by the
-/// [`Json`]/[`Plist`]/[`Yaml`] marker types.
+/// Each format declares its own leaf type (`Leaf`), so a JSON node can't hold a
+/// plist `Date` and the encoders are total (no `unreachable!()`). `Value<'a>` is a
+/// GAT so saphyr's borrowed `Yaml<'a>` fits the same trait as the owning
+/// `serde_json::Value`/`plist::Value`.
 pub trait ValueCodec {
+    type Leaf: Leaf;
     type Value<'a>;
     /// Native → `Node`. `None` means "refuse" — only YAML produces it (for
     /// non-string keys, tags, etc.); JSON/plist are total.
-    fn decode(value: &Self::Value<'_>) -> Option<Node>;
+    fn decode(value: &Self::Value<'_>) -> Option<Node<Self::Leaf>>;
     /// `Node` → native.
-    fn encode(node: &Node) -> Self::Value<'static>;
+    fn encode(node: &Node<Self::Leaf>) -> Self::Value<'static>;
 }
 
 /// Output indentation for the JSON writer: a number of spaces, or a tab.
@@ -126,9 +122,9 @@ pub fn parse_indent(spec: &str) -> Result<Indent, String> {
         .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))
 }
 
-/// Read and parse `path` as `kind`. Returns `None` if the file is missing or does
-/// not parse as that format. Keeps file I/O out of the [`Format`] trait.
-pub fn read_file(path: &Path, kind: FormatKind) -> Option<Node> {
+/// Read and parse `path` with format `F`. Returns `None` if the file is missing or
+/// does not parse as that format. Keeps file I/O out of the [`Format`] trait.
+pub fn read_file<F: Format>(path: &Path) -> Option<Node<F::Leaf>> {
     let bytes = std::fs::read(path).ok()?;
-    kind.format().read(&bytes)
+    F::parse(&bytes)
 }

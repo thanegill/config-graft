@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, Yaml, YamlData};
 
+use super::yaml::YamlLeaf;
 use super::{ValueCodec, Yaml as YamlCodec};
 use crate::error::Error;
 use crate::value::Node;
@@ -22,7 +23,7 @@ use crate::value::Node;
 /// Apply `result` onto the original YAML `text`, preserving comments/formatting
 /// on untouched regions. Returns `Err(Error::YamlUnsafe)` (caller must not write)
 /// when the document can't be edited safely.
-pub fn apply(text: &str, result: &Node) -> Result<String, Error> {
+pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
     let result_map = result.as_map().ok_or(Error::YamlUnsafe)?;
 
     // Re-parse the original for both the structural tree (authoritative target)
@@ -60,7 +61,7 @@ struct Edit {
 }
 
 /// Parse a single YAML document into a `Node` (same rules as `format::read`).
-fn parse_node(text: &str) -> Option<Node> {
+fn parse_node(text: &str) -> Option<Node<YamlLeaf>> {
     let docs = Yaml::load_from_str(text).ok()?;
     let [doc] = docs.as_slice() else {
         return None;
@@ -89,8 +90,8 @@ fn marked_entries<'a>(
 /// Diff `tmap` → `rmap` for one mapping (whose marked node is `node`), pushing
 /// edits. Recurses into mappings present on both sides.
 fn diff_map(
-    tmap: &IndexMap<String, Node>,
-    rmap: &IndexMap<String, Node>,
+    tmap: &IndexMap<String, Node<YamlLeaf>>,
+    rmap: &IndexMap<String, Node<YamlLeaf>>,
     node: &MarkedYaml,
     src: &str,
     edits: &mut Vec<Edit>,
@@ -164,7 +165,7 @@ fn diff_map(
 }
 
 /// Render a single `key: value` entry as YAML, indented by `ind` spaces.
-fn emit_entry(key: &str, value: &Node, ind: usize) -> String {
+fn emit_entry(key: &str, value: &Node<YamlLeaf>, ind: usize) -> String {
     let mut m = saphyr::Mapping::new();
     m.insert(
         Yaml::Value(Scalar::String(Cow::Owned(key.to_string()))),
@@ -219,7 +220,7 @@ mod tests {
     use super::*;
 
     /// The reconciled result expressed directly as a YAML document.
-    fn result(yaml: &str) -> Node {
+    fn result(yaml: &str) -> Node<YamlLeaf> {
         parse_node(yaml).unwrap()
     }
 
