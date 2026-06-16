@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 
-use super::{Format, FormatKind, Indent, ValueCodec};
+use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
@@ -103,7 +103,11 @@ impl Format for Yaml {
         Yaml::decode(doc)
     }
 
-    fn serialize(node: &Node<YamlLeaf>, current: &[u8], _indent: Indent) -> Result<Vec<u8>, Error> {
+    fn serialize(
+        node: &Node<YamlLeaf>,
+        current: &[u8],
+        _opts: WriteOpts,
+    ) -> Result<Vec<u8>, Error> {
         // An existing target is edited in place to preserve comments; an empty /
         // first-apply (or non-UTF-8) target is emitted canonically.
         let current = std::str::from_utf8(current).unwrap_or("");

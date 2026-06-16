@@ -1,11 +1,11 @@
 //! Apple plist codec, leaf type, and I/O. Reads accept XML or binary; writes are
-//! always normalized XML.
+//! normalized XML by default, or binary with `--plist-binary`.
 
 use std::io::Cursor;
 
 use indexmap::IndexMap;
 
-use super::{Format, FormatKind, Indent, ValueCodec};
+use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
@@ -116,16 +116,23 @@ impl Format for Plist {
     fn serialize(
         node: &Node<PlistLeaf>,
         _current: &[u8],
-        _indent: Indent,
+        opts: WriteOpts,
     ) -> Result<Vec<u8>, Error> {
         let value = Plist::encode(node);
         let mut buf = Vec::new();
-        value
-            .to_writer_xml(&mut buf)
-            .map_err(Error::PlistSerialize)?;
-        // The writer ends at `</plist>` with no trailing newline; add one for a
-        // consistent canonical form (matching the JSON path).
-        buf.push(b'\n');
+        if opts.plist_binary {
+            value
+                .to_writer_binary(&mut buf)
+                .map_err(Error::PlistSerialize)?;
+        } else {
+            value
+                .to_writer_xml(&mut buf)
+                .map_err(Error::PlistSerialize)?;
+            // The XML writer ends at `</plist>` with no trailing newline; add one
+            // for a consistent canonical form (matching the JSON path). Binary
+            // output is left exactly as written.
+            buf.push(b'\n');
+        }
         Ok(buf)
     }
 }

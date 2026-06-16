@@ -3,7 +3,7 @@
 use indexmap::IndexMap;
 use serde::Serialize;
 
-use super::{Format, FormatKind, Indent, ValueCodec};
+use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
@@ -86,9 +86,13 @@ impl Format for Json {
         Json::decode(&value)
     }
 
-    fn serialize(node: &Node<JsonLeaf>, _current: &[u8], indent: Indent) -> Result<Vec<u8>, Error> {
+    fn serialize(
+        node: &Node<JsonLeaf>,
+        _current: &[u8],
+        opts: WriteOpts,
+    ) -> Result<Vec<u8>, Error> {
         let value = Json::encode(node);
-        let bytes = indent.to_bytes();
+        let bytes = opts.indent.to_bytes();
         let mut buf = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(&bytes);
         let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);

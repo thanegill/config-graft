@@ -461,3 +461,22 @@ fn parse_failure_error_names_json() {
     let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("not valid JSON"), "got: {err}");
 }
+
+#[test]
+fn plist_binary_flag_is_a_noop_for_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1}"#).unwrap();
+    fs::write(&desired, r#"{"b":2}"#).unwrap();
+
+    let out = run(&[
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    // Still ordinary JSON text — the flag is ignored for non-plist formats.
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"a":1,"b":2}));
+}

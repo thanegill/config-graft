@@ -11,7 +11,7 @@ mod format;
 mod reconcile;
 mod value;
 use error::{Error, Outcome};
-use format::{Format, FormatKind, Indent, Json, Plist, Yaml};
+use format::{Format, FormatKind, Indent, Json, Plist, WriteOpts, Yaml};
 use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
 use value::{Leaf, Node};
 
@@ -60,6 +60,10 @@ struct Cli {
     /// (.plist → plist, else json). One format governs TARGET, DESIRED, and BASE.
     #[arg(long, value_name = "FORMAT")]
     format: Option<FormatKind>,
+
+    /// Write plist output as binary instead of XML. Plist only; ignored otherwise.
+    #[arg(long = "plist-binary")]
+    plist_binary: bool,
 
     /// Sort every object's keys in the output.
     #[arg(long = "sort-keys")]
@@ -132,7 +136,11 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
     // as the basis for comment-preserving edits. The format decides how to use it
     // (JSON/plist ignore it; YAML edits it in place or emits canonically).
     let current = fs::read(&cli.target).unwrap_or_default();
-    let output = F::serialize(&result, &current, cli.indent)?;
+    let write_opts = WriteOpts {
+        indent: cli.indent,
+        plist_binary: cli.plist_binary,
+    };
+    let output = F::serialize(&result, &current, write_opts)?;
 
     if cli.diff {
         print!("{}", diff_text(&target, &result));

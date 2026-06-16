@@ -163,3 +163,83 @@ fn not_a_mapping_error_names_plist() {
     let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("must be a plist dictionary"), "got: {err}");
 }
+
+// ----- binary output (--plist-binary) -----
+
+#[test]
+fn plist_binary_output_is_binary_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a", pint(1)), ("keep", plist::Value::Boolean(true))])
+        .to_file_xml(&target)
+        .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&[
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+
+    // The file is now a binary plist (`bplist00` magic) ...
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"bplist00"),
+        "expected binary plist output"
+    );
+    // ... and round-trips to the reconciled value (read accepts binary).
+    assert_eq!(
+        read_plist(&target),
+        pdict(vec![("a", pint(2)), ("keep", plist::Value::Boolean(true))])
+    );
+}
+
+#[test]
+fn plist_binary_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    // First binary apply changes the file; a second --check is a no-op (exit 0),
+    // which only holds if the binary writer is deterministic.
+    assert!(run(&[
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap()
+    ])
+    .status
+    .success());
+    let out = run(&[
+        "--check",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn stdout_plist_binary_writes_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&[
+        "--stdout",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(
+        out.stdout.starts_with(b"bplist00"),
+        "stdout should be binary"
+    );
+    // --stdout leaves the target (still XML) untouched.
+    assert!(fs::read(&target).unwrap().starts_with(b"<?xml"));
+}
