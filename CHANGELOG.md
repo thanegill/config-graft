@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **YAML** support alongside JSON and plist. The format is inferred from TARGET's
+  extension (`.yaml`/`.yml`) or forced with `--format yaml`. Unlike JSON/plist,
+  an existing YAML target is edited in place so **comments, blank lines, and
+  formatting are preserved** on the parts that don't change. Constructs that can't
+  be edited safely — anchors/aliases, tags, multi-document streams, non-string
+  keys — are refused (the file is left untouched) rather than risk corruption.
+
+### Changed
+
+- DESIRED parse/shape errors now name the specific format (e.g. "DESIRED must be
+  a YAML mapping") instead of a generic message.
+- An invalid `--indent` value is now a usage error (exit 2) rather than a runtime
+  error (exit 1).
+
 ## [0.0.2] - 2026-06-15
 
 ### Added
