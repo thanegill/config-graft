@@ -1,7 +1,6 @@
 # json-apply
 
-Three-way reconcile for **app-owned JSON, plist, and YAML files** — `kubectl
-apply`'s merge semantics scoped to a single local file.
+Three-way reconcile for **app-owned JSON, plist, and YAML files**.
 
 It deep-merges a *managed subset* (DESIRED) into a file the application also
 writes to (TARGET), while:
@@ -10,8 +9,6 @@ writes to (TARGET), while:
 - **pruning** keys you used to manage but dropped — but only if the user hasn't
   changed them, using a **BASE** snapshot (the previously-applied config) as the
   merge ancestor.
-
-See [`SPEC.md`](SPEC.md) for the full specification.
 
 ## Usage
 
@@ -80,3 +77,10 @@ Or build/test hermetically through Nix (runs the test suite in `checkPhase`):
 nix build            # ./result/bin/json-apply
 nix run . -- --help
 ```
+
+## Related
+
+- Modeled on `kubectl apply`'s three-way merge (against its
+  `last-applied-configuration`), scoped to a single local file rather than a
+  cluster object.
+- [`SPEC.md`](SPEC.md) — the full specification: semantics, exit codes, edge cases.
