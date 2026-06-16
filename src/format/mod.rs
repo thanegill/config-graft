@@ -73,9 +73,11 @@ pub trait Format: ValueCodec {
     const KIND: FormatKind;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
-    /// Serialize `node`. `current` is the target's existing on-disk text (used by
-    /// YAML to preserve comments; ignored by JSON/plist). `indent` is JSON-only.
-    fn serialize(node: &Node<Self::Leaf>, current: &str, indent: Indent) -> Result<String, Error>;
+    /// Serialize `node` to bytes. `current` is the target's existing on-disk bytes
+    /// (used by YAML to preserve comments; ignored by JSON/plist). `indent` is
+    /// JSON-only. Output is bytes (not text) so plist can write binary.
+    fn serialize(node: &Node<Self::Leaf>, current: &[u8], indent: Indent)
+        -> Result<Vec<u8>, Error>;
 }
 
 /// Conversion between a format's native value type and the internal `Node` model.

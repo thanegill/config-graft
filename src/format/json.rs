@@ -86,16 +86,15 @@ impl Format for Json {
         Json::decode(&value)
     }
 
-    fn serialize(node: &Node<JsonLeaf>, _current: &str, indent: Indent) -> Result<String, Error> {
+    fn serialize(node: &Node<JsonLeaf>, _current: &[u8], indent: Indent) -> Result<Vec<u8>, Error> {
         let value = Json::encode(node);
         let bytes = indent.to_bytes();
         let mut buf = Vec::new();
         let formatter = serde_json::ser::PrettyFormatter::with_indent(&bytes);
         let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
         value.serialize(&mut ser).expect("serializing JSON");
-        let mut out = String::from_utf8(buf).expect("UTF-8 JSON");
-        out.push('\n');
-        Ok(out)
+        buf.push(b'\n');
+        Ok(buf)
     }
 }
 

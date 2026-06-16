@@ -103,13 +103,14 @@ impl Format for Yaml {
         Yaml::decode(doc)
     }
 
-    fn serialize(node: &Node<YamlLeaf>, current: &str, _indent: Indent) -> Result<String, Error> {
+    fn serialize(node: &Node<YamlLeaf>, current: &[u8], _indent: Indent) -> Result<Vec<u8>, Error> {
         // An existing target is edited in place to preserve comments; an empty /
-        // first-apply target is emitted canonically.
+        // first-apply (or non-UTF-8) target is emitted canonically.
+        let current = std::str::from_utf8(current).unwrap_or("");
         if current.trim().is_empty() {
-            Ok(write_canonical(node))
+            Ok(write_canonical(node).into_bytes())
         } else {
-            super::yaml_edit::apply(current, node)
+            super::yaml_edit::apply(current, node).map(String::into_bytes)
         }
     }
 }

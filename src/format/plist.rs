@@ -113,17 +113,20 @@ impl Format for Plist {
         Plist::decode(&value)
     }
 
-    fn serialize(node: &Node<PlistLeaf>, _current: &str, _indent: Indent) -> Result<String, Error> {
+    fn serialize(
+        node: &Node<PlistLeaf>,
+        _current: &[u8],
+        _indent: Indent,
+    ) -> Result<Vec<u8>, Error> {
         let value = Plist::encode(node);
         let mut buf = Vec::new();
         value
             .to_writer_xml(&mut buf)
             .map_err(Error::PlistSerialize)?;
-        let mut out = String::from_utf8(buf).map_err(Error::PlistNotUtf8)?;
         // The writer ends at `</plist>` with no trailing newline; add one for a
         // consistent canonical form (matching the JSON path).
-        out.push('\n');
-        Ok(out)
+        buf.push(b'\n');
+        Ok(buf)
     }
 }
 

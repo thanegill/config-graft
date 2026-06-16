@@ -131,7 +131,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
     // The current on-disk text, used for the idempotence check and — for YAML —
     // as the basis for comment-preserving edits. The format decides how to use it
     // (JSON/plist ignore it; YAML edits it in place or emits canonically).
-    let current = fs::read_to_string(&cli.target).unwrap_or_default();
+    let current = fs::read(&cli.target).unwrap_or_default();
     let output = F::serialize(&result, &current, cli.indent)?;
 
     if cli.diff {
@@ -148,7 +148,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
         });
     }
     if cli.stdout {
-        print!("{output}");
+        let _ = std::io::stdout().write_all(&output);
         return Ok(Outcome::Applied);
     }
     if changed {
@@ -162,7 +162,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
 
 /// Atomic in-place write: temp file in the same dir, fsync, then rename over the
 /// target. Preserves the target's existing mode (0644 for new files).
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -173,7 +173,7 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
         .map(|m| m.permissions().mode() & 0o777);
 
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
-    tmp.write_all(content.as_bytes())?;
+    tmp.write_all(content)?;
     tmp.as_file().sync_all()?;
     tmp.as_file()
         .set_permissions(fs::Permissions::from_mode(mode.unwrap_or(0o644)))?;

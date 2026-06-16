@@ -30,8 +30,6 @@ pub enum Error {
     },
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
-    /// The plist serializer produced non-UTF-8 bytes (should not happen for XML).
-    PlistNotUtf8(std::string::FromUtf8Error),
     /// The YAML target can't be edited while preserving comments without risking
     /// corruption, so the write was refused.
     YamlUnsafe,
@@ -56,7 +54,6 @@ impl fmt::Display for Error {
             }
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
-            Error::PlistNotUtf8(e) => write!(f, "plist output was not UTF-8: {e}"),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
         }
     }
@@ -67,7 +64,6 @@ impl std::error::Error for Error {
         match self {
             Error::Write { source, .. } => Some(source),
             Error::PlistSerialize(e) => Some(e),
-            Error::PlistNotUtf8(e) => Some(e),
             _ => None,
         }
     }
