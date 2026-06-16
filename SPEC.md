@@ -201,17 +201,27 @@ output; `--diff` add/remove/change lines; file mode preserved.
 
 Implemented in **Rust** (this repo):
 
-- `src/value.rs` — the internal `Node` value model the engine runs on, plus the
-  per-format codecs (`Node` ⇄ `serde_json::Value`, `Node` ⇄ `plist::Value`,
-  `Node` ⇄ `saphyr::Yaml`).
-- `src/reconcile.rs` — the pure algorithm (no I/O) over `Node`, unit-tested against §12.
-- `src/format.rs` — format detection and the read/write boundary (JSON pretty-print, plist XML, canonical YAML).
-- `src/yaml_edit.rs` — the comment-preserving YAML writer: a structural diff of the
-  original vs reconciled `Node` trees drives minimal byte-span edits against the
-  original text (spans from `saphyr`'s `MarkedYaml`), with a round-trip backstop
-  that refuses any write that wouldn't reproduce the reconciled result.
+- `src/value.rs` — the internal value model: a `Leaf` trait and a `Node<L>`
+  generic over it. Each format supplies **its own** leaf type (no single enum
+  mixing every format's value space), so the encoders are total — a JSON node
+  can't hold a plist `Date`, by construction.
+- `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
+  unit-tested against §12. Managed key paths are a `KeyPath` newtype.
+- `src/format/` — one module per format (`json`/`plist`/`yaml`), each defining its
+  leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and `Format`
+  (parse/serialize). `mod.rs` holds those traits, the `FormatKind` selector,
+  `Indent`, and `read_file`. The node type varies per format, so dispatch is
+  **static**: `main` resolves the `FormatKind` and monomorphizes `run::<F>()`.
+- `src/format/yaml_edit.rs` — the comment-preserving YAML writer: a structural
+  diff of the original vs reconciled `Node<YamlLeaf>` trees drives minimal
+  byte-span edits against the original text (spans from `saphyr`'s `MarkedYaml`),
+  with a round-trip backstop that refuses any write that wouldn't reproduce the
+  reconciled result.
+- `src/error.rs` — a typed `Error` enum (format-specific DESIRED errors) and an
+  `Outcome`; `src/main.rs` maps these to exit codes.
 - `src/main.rs` — CLI (clap), I/O, atomic write, `--check`/`--diff`/`--stdout`/`--format`.
-- `tests/cli.rs` — integration tests exercising exit codes and file behavior, for every format.
+- `tests/{json,plist,yaml}.rs` (+ `tests/common`) — per-format integration tests
+  exercising exit codes and file behavior.
 - Map nodes use `indexmap` (and the JSON codec keeps `serde_json`'s
   `preserve_order`) so TARGET key order is kept and new keys are appended.
 
