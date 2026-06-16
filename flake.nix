@@ -17,11 +17,11 @@
     {
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
-          pname = "json-apply";
+          pname = "config-graft";
           version = "0.0.3";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          meta.mainProgram = "json-apply";
+          meta.mainProgram = "config-graft";
         };
       });
 

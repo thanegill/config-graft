@@ -1,5 +1,5 @@
 [package]
-name = "json-apply"
+name = "config-graft"
 version = "0.0.3"
 edition = "2021"
 description = "Three-way reconcile for app-owned JSON, plist, and YAML files"

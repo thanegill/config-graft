@@ -1,4 +1,4 @@
-# `json-apply` — three-way reconcile for app-owned JSON, plist, and YAML files
+# `config-graft` — three-way reconcile for app-owned JSON, plist, and YAML files
 
 Declaratively reconcile a managed *subset* of a JSON, plist, or YAML file into a
 file the application also writes to, using a last-applied snapshot as the merge
@@ -12,7 +12,7 @@ merge engine is format-agnostic; see §5a for the supported formats.
 Config files like `claude_desktop_config.json` are **co-owned**: a tool
 (Nix/home-manager) wants to declare some keys, while the app itself writes others
 (auth tokens, UI state). A plain overwrite destroys the app's keys; a plain
-deep-merge can never *remove* a key the declarer stopped managing. `json-apply`
+deep-merge can never *remove* a key the declarer stopped managing. `config-graft`
 solves both by doing a three-way merge against a stored snapshot of "what we
 declared last time."
 
@@ -35,8 +35,8 @@ previous generation). The tool only reads it.
 ### Synopsis
 
 ```
-json-apply [OPTIONS] <TARGET> <DESIRED> [BASE]
-json-apply [OPTIONS] --base <BASE> <TARGET> <DESIRED>
+config-graft [OPTIONS] <TARGET> <DESIRED> [BASE]
+config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 ```
 
 ### Arguments
@@ -114,7 +114,7 @@ cross-format conversion. The format is inferred from TARGET's extension
   `--plist-binary`. plist has no `null`.
 - **YAML** (1.2, via `saphyr`) — mappings, sequences, strings, integers, floats,
   booleans, `null`. **Unlike JSON/plist, an existing target is *not* normalized:**
-  json-apply edits the original file text in place, so **comments, blank lines,
+  config-graft edits the original file text in place, so **comments, blank lines,
   quoting, and indentation are preserved** on every region it doesn't change.
   Only an empty/first-apply target is written canonically. To guarantee this is
   safe, it edits only the well-behaved subset and **refuses (exit 1, file
@@ -166,13 +166,13 @@ ever pruned.
 
 ```sh
 # First apply (no base): TARGET gets DESIRED's keys, app keys preserved.
-json-apply config.json desired.json
+config-graft config.json desired.json
 
 # Subsequent apply with snapshot: prunes keys we dropped, keeps user edits.
-json-apply config.json desired.json .state/last-applied.json
+config-graft config.json desired.json .state/last-applied.json
 
 # Dry-run drift check in CI:
-json-apply --check config.json desired.json .state/last-applied.json || echo "would change"
+config-graft --check config.json desired.json .state/last-applied.json || echo "would change"
 ```
 
 Reconcile example (`a` dropped from DESIRED, `b` user-edited, `appOnly` untouched):

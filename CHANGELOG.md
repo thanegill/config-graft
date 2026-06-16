@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Renamed the project to `config-graft`** (was `json-apply`) to reflect that
+  the merge engine is multi-format (JSON, plist, YAML), not JSON-specific. The
+  crate, binary, and command are all now `config-graft`.
 - DESIRED parse/shape errors now name the specific format (e.g. "DESIRED must be
   a YAML mapping") instead of a generic message.
 - An invalid `--indent` value is now a usage error (exit 2) rather than a runtime
@@ -56,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--check`, `--stdout`, and `--diff` modes; `--indent` control.
 - An empty BASE argument is treated as no base.
 
-[Unreleased]: https://github.com/thanegill/json-apply/compare/v0.0.3...HEAD
-[0.0.3]: https://github.com/thanegill/json-apply/compare/v0.0.2...v0.0.3
-[0.0.2]: https://github.com/thanegill/json-apply/compare/v0.0.1...v0.0.2
-[0.0.1]: https://github.com/thanegill/json-apply/releases/tag/v0.0.1
+[Unreleased]: https://github.com/thanegill/config-graft/compare/v0.0.3...HEAD
+[0.0.3]: https://github.com/thanegill/config-graft/compare/v0.0.2...v0.0.3
+[0.0.2]: https://github.com/thanegill/config-graft/compare/v0.0.1...v0.0.2
+[0.0.1]: https://github.com/thanegill/config-graft/releases/tag/v0.0.1

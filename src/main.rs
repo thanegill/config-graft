@@ -19,7 +19,7 @@ use value::{Leaf, Node};
 /// into TARGET while preserving keys the app wrote and pruning keys dropped from
 /// DESIRED (using BASE, the previously-applied snapshot, as the merge ancestor).
 #[derive(Parser)]
-#[command(name = "json-apply", version, about)]
+#[command(name = "config-graft", version, about)]
 struct Cli {
     /// File to reconcile, in place (created with parents if missing).
     target: PathBuf,
@@ -96,7 +96,7 @@ fn main() {
     match result {
         Ok(outcome) => process::exit(outcome.code()),
         Err(e) => {
-            eprintln!("json-apply: {e}");
+            eprintln!("config-graft: {e}");
             process::exit(1);
         }
     }

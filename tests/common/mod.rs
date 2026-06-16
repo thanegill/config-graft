@@ -3,14 +3,14 @@
 
 use std::process::Command;
 
-pub const BIN: &str = env!("CARGO_BIN_EXE_json-apply");
+pub const BIN: &str = env!("CARGO_BIN_EXE_config-graft");
 
-/// Run json-apply with `args` and capture its output.
+/// Run config-graft with `args` and capture its output.
 pub fn run(args: &[&str]) -> std::process::Output {
     Command::new(BIN)
         .args(args)
         .output()
-        .expect("run json-apply")
+        .expect("run config-graft")
 }
 
 /// Run, assert it failed with exit code 1, and return its stderr.

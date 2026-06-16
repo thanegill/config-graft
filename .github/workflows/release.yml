@@ -30,13 +30,13 @@ jobs:
 
       - name: Package
         run: |
-          tar -czf "json-apply-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
-            -C result/bin json-apply
+          tar -czf "config-graft-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz" \
+            -C result/bin config-graft
 
       - uses: actions/upload-artifact@v4
         with:
-          name: json-apply-${{ matrix.target }}
-          path: json-apply-*.tar.gz
+          name: config-graft-${{ matrix.target }}
+          path: config-graft-*.tar.gz
 
   release:
     needs: build

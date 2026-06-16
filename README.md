@@ -1,4 +1,4 @@
-# json-apply
+# config-graft
 
 Three-way reconcile for **app-owned JSON, plist, and YAML files**.
 
@@ -13,18 +13,18 @@ writes to (TARGET), while:
 ## Usage
 
 ```sh
-json-apply <TARGET> <DESIRED> [BASE]
+config-graft <TARGET> <DESIRED> [BASE]
 
-json-apply config.json desired.json .state/last-applied.json
-json-apply --check config.json desired.json base.json    # exit 3 if it would change
-json-apply --stdout --diff config.json desired.json       # preview without writing
-json-apply --array-strategy set config.json desired.json  # union lists, ignoring order
+config-graft config.json desired.json .state/last-applied.json
+config-graft --check config.json desired.json base.json    # exit 3 if it would change
+config-graft --stdout --diff config.json desired.json       # preview without writing
+config-graft --array-strategy set config.json desired.json  # union lists, ignoring order
 
-json-apply app.plist desired.plist base.plist             # same merge, plist files
-json-apply --format plist config desired                  # force plist on any name
-json-apply --plist-binary app.plist desired.plist         # write a binary plist
+config-graft app.plist desired.plist base.plist             # same merge, plist files
+config-graft --format plist config desired                  # force plist on any name
+config-graft --plist-binary app.plist desired.plist         # write a binary plist
 
-json-apply config.yaml desired.yaml                       # YAML, keeping comments
+config-graft config.yaml desired.yaml                       # YAML, keeping comments
 ```
 
 By default arrays (and scalars) are **atomic**: a managed list is replaced
@@ -51,7 +51,7 @@ Plist notes:
 YAML notes:
 
 - **Comments, blank lines, and formatting are preserved** on the parts of the
-  file json-apply doesn't change — it edits the existing text in place rather
+  file config-graft doesn't change — it edits the existing text in place rather
   than re-emitting it. Only an empty/first-apply target is written canonically.
 - For safety it edits only the well-behaved subset of YAML and **refuses (exit 1,
   leaving the file untouched) rather than risk corruption** on anchors/aliases,
@@ -74,7 +74,7 @@ cargo llvm-cov       # source-based coverage (LLVM_COV/PROFDATA preset by the sh
 Or build/test hermetically through Nix (runs the test suite in `checkPhase`):
 
 ```sh
-nix build            # ./result/bin/json-apply
+nix build            # ./result/bin/config-graft
 nix run . -- --help
 ```
 

@@ -1,4 +1,4 @@
-# json-apply
+# config-graft
 
 Three-way reconcile (kubectl-apply-style) for app-owned **JSON / plist / YAML**
 config files. `SPEC.md` is the source of truth for merge semantics; this file is
