@@ -52,10 +52,11 @@ json-apply [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--stdout` — write the result to stdout; do not modify TARGET.
 - `--diff` — print a human-readable, leaf-level diff of the changes.
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
-- `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only**; ignored for plist (fixed-format XML) and YAML (edits preserve existing indentation).
+- `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only** — passing it with another format is an error (exit 1).
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
 - `--array-strategy <replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `replace` (atomic, default), `concat` (append, keeping order and duplicates), or `set` (union, ignoring order and dropping duplicates).
 - `--format <json|plist|yaml>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, else json). Governs every file in the run (§5a).
+- `--plist-binary` — write plist output as binary instead of XML. **Plist only** — passing it with another format is an error (exit 1).
 
 ### Exit codes
 
@@ -107,9 +108,10 @@ cross-format conversion. The format is inferred from TARGET's extension
   plist-only scalars **`Date`**, **`Data`**, and **`Uid`**. The engine treats
   every non-dictionary value as an atomic leaf, so these exotic scalars
   **round-trip losslessly** without the engine understanding them. Reads accept
-  **both XML and binary** plist; output is always normalized **XML** (a binary or
-  differently-formatted target is rewritten as canonical XML on first apply —
-  the same normalize-on-write behavior JSON has). plist has no `null`.
+  **both XML and binary** plist; output is normalized **XML by default** (a binary
+  or differently-formatted target is rewritten as canonical XML on first apply —
+  the same normalize-on-write behavior JSON has), or **binary** with
+  `--plist-binary`. plist has no `null`.
 - **YAML** (1.2, via `saphyr`) — mappings, sequences, strings, integers, floats,
   booleans, `null`. **Unlike JSON/plist, an existing target is *not* normalized:**
   json-apply edits the original file text in place, so **comments, blank lines,
@@ -152,7 +154,6 @@ ever pruned.
 - Not RFC 7386 (no null-deletes) or RFC 6902.
 - No comment/formatting preservation for **JSON** (canonical pretty-print) or **plist** (canonical XML); JSONC/JSON5 out of scope. (**YAML does** preserve comments/formatting on untouched regions — see §5a.)
 - **No cross-format conversion** (e.g. JSON in / plist out) — a run is homogeneous.
-- **No binary plist output**; plist always writes XML.
 - **YAML:** no editing of anchors/aliases, custom tags, multi-document streams, or non-string keys (refused, not converted); comments are preserved but not relocated when their key moves.
 - Does not manage the BASE snapshot lifecycle — the caller stores/rotates it.
 

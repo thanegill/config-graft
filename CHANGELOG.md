@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formatting are preserved** on the parts that don't change. Constructs that can't
   be edited safely — anchors/aliases, tags, multi-document streams, non-string
   keys — are refused (the file is left untouched) rather than risk corruption.
+- `--plist-binary` to write binary plist output instead of XML (plist reads
+  already accept either).
 
 ### Changed
 
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a YAML mapping") instead of a generic message.
 - An invalid `--indent` value is now a usage error (exit 2) rather than a runtime
   error (exit 1).
+- Format-specific flags (`--indent`, `--plist-binary`) now error and exit when
+  passed with a format they don't apply to, instead of being silently ignored.
 
 ## [0.0.2] - 2026-06-15
 

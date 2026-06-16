@@ -22,6 +22,7 @@ json-apply --array-strategy set config.json desired.json  # union lists, ignorin
 
 json-apply app.plist desired.plist base.plist             # same merge, plist files
 json-apply --format plist config desired                  # force plist on any name
+json-apply --plist-binary app.plist desired.plist         # write a binary plist
 
 json-apply config.yaml desired.yaml                       # YAML, keeping comments
 ```
@@ -42,11 +43,10 @@ detection with `--format json|plist|yaml`.
 
 Plist notes:
 
-- Reads accept **both** XML and binary plist; output is always normalized **XML**
-  (a binary target is rewritten as XML on first apply).
+- Reads accept **both** XML and binary plist. Output is normalized **XML by
+  default**; pass `--plist-binary` to write a binary plist instead.
 - plist's `Date`/`Data`/`Uid` scalars are atomic leaves and round-trip losslessly.
-- plist has no `null`; `--indent` is JSON-only (the plist XML writer has fixed
-  formatting) and is ignored for plist.
+- plist has no `null`. `--indent` is JSON-only; passing it with plist is an error.
 
 YAML notes:
 
@@ -58,7 +58,7 @@ YAML notes:
   custom tags, multi-document streams, non-string keys, or a non-mapping root.
   Every write is verified to round-trip back to the intended result before it
   lands.
-- `--indent` is ignored for YAML.
+- `--indent` is JSON-only; passing it with YAML is an error.
 
 ## Develop
 
