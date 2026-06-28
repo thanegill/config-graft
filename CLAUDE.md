@@ -34,17 +34,20 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
 - `src/error.rs` — typed `Error` (format-specific) + `Outcome`; `main` maps to
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
 - `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
-  `nixos`/`darwinModules` + `overlays.default`). One generic engine per file
-  declares `managed{Json,Plist,Yaml,Toml}` over a static `specs` list:
-  `managed.nix` is `home.managed*`, `managed-system.nix` is
-  `environment.managed*` (parameterized by a `"nixos"`/`"darwin"` platform
-  string). **Both keep the four format options in one module** — don't split per
-  format. **`pkgs`/`config` must stay out of `imports` and out of anything that
-  decides which config *keys* exist** (e.g. the platform branch takes a static
-  arg, not `pkgs.stdenv`), or the module system recurses through
-  `_module.freeformType`. Pruning uses the previous generation as BASE: HM via
-  `$oldGenPath/home-files/<snap>`, system via `/run/current-system/<snap>`
-  embedded with `system.systemBuilderCommands`.
+  `nixos`/`darwinModules` + `overlays.default`). `lib.nix` is the **shared
+  engine**: `mkModule "<home|nixos|darwin>"` declares `managed{Json,Plist,Yaml,
+  Toml}` over a static `specs` list, parameterized by a per-engine record (option
+  parent, target, snapshot, activation). The three wrappers are one-liners —
+  `managed.nix` = `(import ./lib.nix).mkModule "home"`, `managed-system.nix` takes
+  a `"nixos"`/`"darwin"` platform arg. Two recursion traps the module system
+  punishes via `_module.freeformType`, both avoided here: (1) the engine is picked
+  by a **static** name, never `pkgs.stdenv`, so config *keys* never depend on
+  `pkgs`; (2) every config fragment uses a **static top-level key** whose value
+  aggregates over `active` (e.g. `home.file = mapAttrs' … active`), so the `mkIf`
+  body shape is fixed and `active` (hence `config`) isn't forced while keys are
+  determined — never `mkMerge (mapAttrsToList … active)` at the top. Pruning uses
+  the previous generation as BASE: HM via `$oldGenPath/home-files/<snap>`, system
+  via `/run/current-system/<snap>` embedded with `system.systemBuilderCommands`.
 
 ## Gotchas
 
