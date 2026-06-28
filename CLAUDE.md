@@ -33,6 +33,18 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   (saphyr `MarkedYaml`); TOML mutates `toml_edit`'s format-preserving `DocumentMut`.
 - `src/error.rs` — typed `Error` (format-specific) + `Outcome`; `main` maps to
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
+- `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
+  `nixos`/`darwinModules` + `overlays.default`). One generic engine per file
+  declares `managed{Json,Plist,Yaml,Toml}` over a static `specs` list:
+  `managed.nix` is `home.managed*`, `managed-system.nix` is
+  `environment.managed*` (parameterized by a `"nixos"`/`"darwin"` platform
+  string). **Both keep the four format options in one module** — don't split per
+  format. **`pkgs`/`config` must stay out of `imports` and out of anything that
+  decides which config *keys* exist** (e.g. the platform branch takes a static
+  arg, not `pkgs.stdenv`), or the module system recurses through
+  `_module.freeformType`. Pruning uses the previous generation as BASE: HM via
+  `$oldGenPath/home-files/<snap>`, system via `/run/current-system/<snap>`
+  embedded with `system.systemBuilderCommands`.
 
 ## Gotchas
 

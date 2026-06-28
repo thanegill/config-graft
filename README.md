@@ -122,6 +122,53 @@ TOML notes:
 - TOML date-times round-trip losslessly as atomic leaves; TOML has no `null`.
 - `--indent` is JSON-only; passing it with TOML is an error.
 
+## Nix modules
+
+The flake ships declarative wrappers so you rarely call the CLI by hand. Each
+**format** gets a `managed<Format>` option whose entries reconcile their
+`settings` into a live file on every activation — keeping the app's own keys and
+pruning keys you drop, with the previous generation as the BASE snapshot.
+
+- `homeManagerModules.default` — `home.managed{Json,Plist,Yaml,Toml}` (targets
+  relative to `$HOME`). The plist option also takes a `cfprefsdDomain` for macOS
+  preference domains.
+- `nixosModules.default` / `darwinModules.default` — `environment.managed{Json,Plist,Yaml,Toml}`
+  (absolute targets, reconciled during system activation).
+- `overlays.default` — adds `config-graft` to `pkgs`, which the modules use by
+  default (or set each entry's `package`).
+
+```nix
+{
+  inputs.config-graft.url = "github:thanegill/config-graft";
+
+  # NixOS / nix-darwin: apply the overlay so the modules find the binary.
+  nixpkgs.overlays = [ inputs.config-graft.overlays.default ];
+}
+```
+
+```nix
+# home-manager: graft a few keys into a file the app keeps rewriting.
+{
+  imports = [ inputs.config-graft.homeManagerModules.default ];
+
+  home.managedJson.claude-code = {
+    target = ".claude/settings.json";
+    settings.permissions.ask = [ "Bash(git push)" ];
+  };
+
+  home.managedYaml.app = {
+    target = ".config/app/config.yaml";   # comments in the live file are preserved
+    settings.theme = "dark";
+  };
+}
+```
+
+An entry with empty `settings` is inert. Freeform formats (JSON/YAML/TOML) accept
+a `format` override (any `pkgs.formats`-style generator) for schema-checked
+output. See [`modules/managed.nix`](modules/managed.nix) and
+[`modules/managed-system.nix`](modules/managed-system.nix) for the option docs
+and the snapshot/prune rationale.
+
 ## Develop
 
 All tooling comes from the flake:
