@@ -165,9 +165,11 @@ pruning keys you drop, with the previous generation as the BASE snapshot.
 
 An entry with empty `settings` is inert. Freeform formats (JSON/YAML/TOML) accept
 a `format` override (any `pkgs.formats`-style generator) for schema-checked
-output. All three modules share one engine in
-[`modules/lib.nix`](modules/lib.nix) (the `managed*.nix` files are thin
-wrappers) — see it for the option docs and the snapshot/prune rationale.
+output. There's a module per platform — [`managed.nix`](modules/managed.nix),
+[`managed-nixos.nix`](modules/managed-nixos.nix),
+[`managed-darwin.nix`](modules/managed-darwin.nix) — sharing the per-format specs
+and assembly in [`lib.nix`](modules/lib.nix); see them for the option docs and the
+snapshot/prune rationale.
 
 ## Develop
 

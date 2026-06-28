@@ -34,20 +34,23 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
 - `src/error.rs` — typed `Error` (format-specific) + `Outcome`; `main` maps to
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
 - `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
-  `nixos`/`darwinModules` + `overlays.default`). `lib.nix` is the **shared
-  engine**: `mkModule "<home|nixos|darwin>"` declares `managed{Json,Plist,Yaml,
-  Toml}` over a static `specs` list, parameterized by a per-engine record (option
-  parent, target, snapshot, activation). The three wrappers are one-liners —
-  `managed.nix` = `(import ./lib.nix).mkModule "home"`, `managed-system.nix` takes
-  a `"nixos"`/`"darwin"` platform arg. Two recursion traps the module system
-  punishes via `_module.freeformType`, both avoided here: (1) the engine is picked
-  by a **static** name, never `pkgs.stdenv`, so config *keys* never depend on
-  `pkgs`; (2) every config fragment uses a **static top-level key** whose value
-  aggregates over `active` (e.g. `home.file = mapAttrs' … active`), so the `mkIf`
-  body shape is fixed and `active` (hence `config`) isn't forced while keys are
-  determined — never `mkMerge (mapAttrsToList … active)` at the top. Pruning uses
-  the previous generation as BASE: HM via `$oldGenPath/home-files/<snap>`, system
-  via `/run/current-system/<snap>` embedded with `system.systemBuilderCommands`.
+  `nixos`/`darwinModules` + `overlays.default`). **Three separate module files**,
+  one per platform: `managed.nix` (`home.managed*`), `managed-nixos.nix` and
+  `managed-darwin.nix` (`environment.managed*`). Each is a normal
+  `{ config, lib, pkgs, ... }:` module that builds an *engine* record and calls
+  `lib.nix`'s `build`; there is **no dispatch on module type**. `lib.nix` holds
+  only the shared attributes: the static `specs` list, the format option/DESIRED
+  helpers + `build` (used by all three), and `systemEngine` (the engine common to
+  the two system files; they differ only in `wireActivation`). Two recursion traps
+  the module system punishes via `_module.freeformType`, both avoided by
+  construction: (1) the engine is chosen by the *file*, never `pkgs.stdenv`, so
+  config *keys* never depend on `pkgs`; (2) every engine config fragment uses a
+  **static top-level key** whose value aggregates over `active` (e.g.
+  `home.file = listToAttrs … entries`), so the `mkIf` body shape is fixed and
+  `active` (hence `config`) isn't forced while keys are determined — never
+  `mkMerge (mapAttrsToList … active)` at the top. Pruning uses the previous
+  generation as BASE: HM via `$oldGenPath/home-files/<snap>`, system via
+  `/run/current-system/<snap>` embedded with `system.systemBuilderCommands`.
 
 ## Gotchas
 

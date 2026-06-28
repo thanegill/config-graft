@@ -31,17 +31,14 @@
         config-graft = self.packages.${final.stdenv.hostPlatform.system}.default;
       };
 
-      # Single home-manager module exposing `home.managed{Json,Plist,Yaml,Toml}`
-      # -- one declarative wrapper per format config-graft reconciles. Needs
-      # `config-graft` on PATH: apply `overlays.default`, or set each entry's
-      # `package`.
+      # Declarative wrappers exposing `managed{Json,Plist,Yaml,Toml}` -- one per
+      # format config-graft reconciles. `home.*` for home-manager,
+      # `environment.*` for NixOS / nix-darwin. The three modules share one engine
+      # (modules/lib.nix). All need `config-graft` on PATH: apply
+      # `overlays.default`, or set each entry's `package`.
       homeManagerModules.default = ./modules/managed.nix;
-
-      # System analogue, shared by both: `environment.managed{Json,Plist,Yaml,Toml}`
-      # for NixOS and nix-darwin. One module file, parameterized by platform (the
-      # activation wiring differs). Same `package`/`overlays.default` requirement.
-      nixosModules.default = import ./modules/managed-system.nix "nixos";
-      darwinModules.default = import ./modules/managed-system.nix "darwin";
+      nixosModules.default = ./modules/managed-nixos.nix;
+      darwinModules.default = ./modules/managed-darwin.nix;
 
       # All the tools needed to build, test, lint, and format the crate.
       devShells = forAllSystems (pkgs: {
