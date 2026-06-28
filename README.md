@@ -137,6 +137,9 @@ pruning keys you drop, with the previous generation as the BASE snapshot.
 - `overlays.default` — adds `config-graft` to `pkgs`, which the modules use by
   default (or set each entry's `package`).
 
+Each module is also exposed under the name `config-graft` (e.g.
+`homeManagerModules.config-graft`), identical to `default`.
+
 ```nix
 {
   inputs.config-graft.url = "github:thanegill/config-graft";

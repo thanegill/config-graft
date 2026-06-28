@@ -35,10 +35,20 @@
       # format config-graft reconciles. `home.*` for home-manager,
       # `environment.*` for NixOS / nix-darwin. The three modules share one engine
       # (modules/lib.nix). All need `config-graft` on PATH: apply
-      # `overlays.default`, or set each entry's `package`.
-      homeManagerModules.default = ./modules/managed.nix;
-      nixosModules.default = ./modules/managed-nixos.nix;
-      darwinModules.default = ./modules/managed-darwin.nix;
+      # `overlays.default`, or set each entry's `package`. Each is exposed under
+      # both `default` and the named `config-graft` attribute.
+      homeManagerModules = {
+        config-graft = ./modules/managed.nix;
+        default = ./modules/managed.nix;
+      };
+      nixosModules = {
+        config-graft = ./modules/managed-nixos.nix;
+        default = ./modules/managed-nixos.nix;
+      };
+      darwinModules = {
+        config-graft = ./modules/managed-darwin.nix;
+        default = ./modules/managed-darwin.nix;
+      };
 
       # All the tools needed to build, test, lint, and format the crate.
       devShells = forAllSystems (pkgs: {
