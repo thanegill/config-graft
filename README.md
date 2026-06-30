@@ -95,4 +95,9 @@ nix run . -- --help
 - Modeled on `kubectl apply`'s three-way merge (against its
   `last-applied-configuration`), scoped to a single local file rather than a
   cluster object.
+- The three-way merge of **ordered arrays** draws on Schwägerl, Uhrig &
+  Westfechtel, "A graph-based algorithm for three-way merging of ordered
+  collections in EMF models," *Science of Computer Programming* 113 (2015),
+  pp. 51–81, [doi:10.1016/j.scico.2015.02.010](https://doi.org/10.1016/j.scico.2015.02.010)
+  ([open-access conference version](https://www.scitepress.org/papers/2014/47021/47021.pdf)).
 - [`SPEC.md`](SPEC.md) — the full specification: semantics, exit codes, edge cases.
