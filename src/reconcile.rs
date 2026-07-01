@@ -59,9 +59,11 @@ pub enum ArrayStrategy {
     Concat,
     /// Union of both arrays, ignoring order and dropping duplicates.
     Set,
-    /// Three-way membership merge against BASE: keep elements present on either
-    /// side, prune a BASE element dropped from DESIRED (unless the user removed
-    /// it from TARGET first). Membership by value; duplicates collapse.
+    /// Three-way merge against BASE: keep elements present on either side, prune
+    /// a BASE element dropped from DESIRED (unless the user removed it from TARGET
+    /// first), and order the survivors move-aware so a reordering on either side
+    /// is preserved (via a generalized topological sort). Membership by value;
+    /// duplicates collapse.
     Merge,
 }
 
@@ -756,6 +758,81 @@ mod tests {
                 ArrayStrategy::Merge
             ),
             json!({"z":9})
+        );
+    }
+
+    // ----- move-aware ordering (`merge`, GTS) -----
+
+    #[test]
+    fn merge_preserves_a_target_move() {
+        // BASE [a,b,c]; the user moved a to the end in TARGET; DESIRED unchanged.
+        // The move is the only change, so it wins.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["b","c","a"]}),
+                json!({"l":["a","b","c"]}),
+                Some(json!({"l":["a","b","c"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["b","c","a"]})
+        );
+    }
+
+    #[test]
+    fn merge_preserves_a_desired_move() {
+        // Symmetric: DESIRED moves c to the front, TARGET unchanged -> move wins.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["a","b","c"]}),
+                json!({"l":["c","a","b"]}),
+                Some(json!({"l":["a","b","c"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["c","a","b"]})
+        );
+    }
+
+    #[test]
+    fn merge_move_and_insert_combine() {
+        // BASE [a,b,c]; TARGET moves c to the front; DESIRED inserts x between a
+        // and b. Both non-conflicting changes land: c leads, x sits between a
+        // and b.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["c","a","b"]}),
+                json!({"l":["a","x","b","c"]}),
+                Some(json!({"l":["a","b","c"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["c","a","x","b"]})
+        );
+    }
+
+    #[test]
+    fn merge_is_idempotent_under_moves() {
+        // Re-applying the reconciled result (same DESIRED/BASE) is a fixpoint.
+        let t = json!({"l":["a","b","c"]});
+        let d = json!({"l":["c","a","b"]});
+        let b = json!({"l":["a","b","c"]});
+        let once = reconciled_arrays_base(t, d.clone(), Some(b.clone()), ArrayStrategy::Merge);
+        let twice = reconciled_arrays_base(once.clone(), d, Some(b), ArrayStrategy::Merge);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn merge_worked_example() {
+        // A full worked example: BASE TKQNFBP, TARGET KQTNJPFS, DESIRED TKMNPJFX.
+        // Q and B are deleted on one branch (pruned); J/P form a contradictory-move
+        // cycle. Expected linearization K{TM}N{JP}F{XS} -- our fixed tie-break
+        // (TARGET before DESIRED) resolves the arbitrary pairs to KTMNJPFSX.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["K", "Q", "T", "N", "J", "P", "F", "S"]}),
+                json!({"l":["T", "K", "M", "N", "P", "J", "F", "X"]}),
+                Some(json!({"l":["T", "K", "Q", "N", "F", "B", "P"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["K", "T", "M", "N", "J", "P", "F", "S", "X"]})
         );
     }
 
