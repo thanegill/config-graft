@@ -38,8 +38,8 @@
       # `overlays.default`, or set each entry's `package`. Each is exposed under
       # both `default` and the named `config-graft` attribute.
       homeManagerModules = {
-        config-graft = ./modules/managed.nix;
-        default = ./modules/managed.nix;
+        config-graft = ./modules/managed-hm.nix;
+        default = ./modules/managed-hm.nix;
       };
       nixosModules = {
         config-graft = ./modules/managed-nixos.nix;

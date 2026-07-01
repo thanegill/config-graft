@@ -35,13 +35,13 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
 - `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
   `nixos`/`darwinModules` + `overlays.default`). **Three separate module files**,
-  one per platform: `managed.nix` (`home.managed*`), `managed-nixos.nix` and
-  `managed-darwin.nix` (`environment.managed*`). Each is a normal
-  `{ config, lib, pkgs, ... }:` module that builds an *engine* record and calls
-  `lib.nix`'s `build`; there is **no dispatch on module type**. `lib.nix` holds
-  only the shared attributes: the static `specs` list, the format option/DESIRED
-  helpers + `build` (used by all three), and `systemEngine` (the engine common to
-  the two system files; they differ only in `wireActivation`). Two recursion traps
+  one per platform: `managed-hm.nix` (`home.managed*`), `managed-nixos.nix` and
+  `managed-darwin.nix` (`environment.managed*`). Each is a thin normal
+  `{ config, lib, pkgs, ... }:` module that picks an *engine* record from `lib.nix`
+  and calls its `build`; there is **no dispatch on module type**. `lib.nix` holds
+  the static `specs` list, the format option/DESIRED helpers + `build` (used by
+  all three), and the engine records: `homeEngine`, and `systemEngine` (shared by
+  the two system files, which differ only in `wireActivation`). Two recursion traps
   the module system punishes via `_module.freeformType`, both avoided by
   construction: (1) the engine is chosen by the *file*, never `pkgs.stdenv`, so
   config *keys* never depend on `pkgs`; (2) every engine config fragment uses a
