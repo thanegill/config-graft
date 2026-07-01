@@ -54,7 +54,7 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
 - `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only** — passing it with another format is an error (exit 1).
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
-- `--array-strategy <replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `replace` (atomic, default), `concat` (append, keeping order and duplicates), or `set` (union, ignoring order and dropping duplicates).
+- `--array-strategy <merge|replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `merge` (three-way, move-aware against BASE; **the default**), `replace` (atomic), `concat` (append, keeping order and duplicates), or `set` (two-way union, ignoring order and dropping duplicates).
 - `--format <json|plist|yaml|toml>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a).
 - `--plist-binary` — write plist output as binary instead of XML. **Plist only** — passing it with another format is an error (exit 1).
 
@@ -84,11 +84,12 @@ Keys in `target` that were never in `base` or `desired` are always preserved.
 
 - **Objects** — merged recursively (the only container that merges).
 - **Arrays** — combine per `--array-strategy`:
-  - `replace` (default) — **atomic**: DESIRED's array replaces TARGET's wholesale; no element-wise merge, even for arrays of objects. *Rationale: positional element-merge is ambiguous and index-shift-prone; matches kubectl's "atomic list" default.*
+  - `replace` — **atomic**: DESIRED's array replaces TARGET's wholesale; no element-wise merge, even for arrays of objects. The right choice when you own the whole list, or when its elements are structurally anonymous objects that `merge` can't match. (This is kubectl's "atomic list" behavior, which config-graft used as its default before `merge` existed.)
   - `concat` — DESIRED's elements are appended to TARGET's, preserving order and duplicates.
-  - `set` — union of both arrays, ignoring order and dropping duplicate values (membership by deep equality). Idempotent: re-applying a DESIRED already contained in TARGET is a no-op.
+  - `set` — *two-way* union of both arrays, ignoring order and dropping duplicate values (membership by deep equality). Idempotent: re-applying a DESIRED already contained in TARGET is a no-op. BASE is not consulted, so an element dropped from DESIRED is **not** removed.
+  - `merge` (**the default**) — *three-way* reconciliation using BASE, in two parts. **Membership**: an element survives iff it is present in TARGET or DESIRED and was deleted on **neither** branch relative to BASE — a BASE element dropped from DESIRED is pruned; a BASE element the user removed from TARGET stays removed; an insertion on either side is kept (membership by deep equality; duplicate values collapse, so it is an ordered set, not a bag). **Ordering**: survivors are ordered *move-aware* by a generalized topological sort (GTS) — a relative order that BASE and a branch agree on is preserved even when an element was moved, and a contradictory cross-over move (each side reorders the other's pair) is broken consistently with one input rather than by inventing a new order. Every non-deterministic choice takes a fixed tie-break — earliest position in TARGET, then DESIRED, then insertion order — so output is deterministic and idempotent. With no BASE every element is an insertion, so `merge` degenerates to `set` (TARGET order, then DESIRED-only insertions appended). Well-defined only for arrays of uniquely-valued elements; arrays of structurally anonymous objects (no stable identity) have no meaningful element matching — use `replace`. Algorithm: Schwagerl, Uhrig & Westfechtel, *Sci. Comput. Program.* 113 (2015), [doi:10.1016/j.scico.2015.02.010](https://doi.org/10.1016/j.scico.2015.02.010).
 
-  The strategy applies only when **both** sides are arrays; an array-vs-non-array always replaces. **Pruning is always atomic** — a managed array is removed or kept as one leaf regardless of strategy.
+  The strategy applies only when **both** sides are arrays; an array-vs-non-array always replaces. **Pruning is always atomic** — a managed array dropped wholesale from DESIRED is removed or kept as one leaf regardless of strategy (only `merge`/`set` reconcile *within* an array still present on both sides).
 - **Scalars** — DESIRED replaces.
 - **`null`** — a normal value, not a delete sentinel. Removal is driven by BASE↔DESIRED diffing, not by RFC 7386 null. (JSON/YAML have null; plist/TOML don't.)
 - **Type changes** (e.g. object→array at a key) — DESIRED's value replaces wholesale.
@@ -202,8 +203,13 @@ Deep-merge wins; target-only keys survive; deeply nested merge; type changes
 user-edited scalar; **array replaced wholesale**; **array-of-objects atomic**;
 **prune dropped list (atomic, no index-shift)**; **prune list empties parent**;
 **keep user-edited list**; **arrays concat (order + dups kept)**; **arrays set
-(union, order-independent, deduped)**; **set idempotent on subset**; **strategy
-applies only when both are arrays**; `null` is a value not a delete;
+(union, order-independent, deduped)**; **set idempotent on subset**; **arrays
+merge (three-way: prune BASE element dropped from DESIRED, keep unmanaged TARGET
+element, append DESIRED insertion, respect user deletion, dedupe, no-BASE ==
+set)**; **arrays merge move-aware (preserve a TARGET move, preserve a DESIRED
+move, combine move + insert, idempotent under moves, GTS worked example)**;
+**default array-strategy is `merge`**; **strategy applies only when both are
+arrays**; `null` is a value not a delete;
 non-object/missing/invalid TARGET coerced to empty; missing/invalid BASE (no
 prune); usage error exit 2; invalid `--array-strategy` exit 2; `--check`
 idempotence; `--stdout` leaves TARGET untouched; `--sort-keys`/`--indent`

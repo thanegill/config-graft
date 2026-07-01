@@ -73,11 +73,12 @@ struct Cli {
     #[arg(long = "sort-keys")]
     sort_keys: bool,
 
-    /// How DESIRED arrays combine with TARGET arrays: replace (atomic, default),
-    /// concat (append), or set (union, ignoring order and duplicates).
+    /// How DESIRED arrays combine with TARGET arrays: merge (three-way,
+    /// move-aware against BASE; the default), replace (atomic), concat (append),
+    /// or set (two-way union, ignoring order and duplicates).
     #[arg(
         long = "array-strategy",
-        default_value = "replace",
+        default_value = "merge",
         value_name = "STRATEGY"
     )]
     array_strategy: ArrayStrategy,

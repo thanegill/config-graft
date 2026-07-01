@@ -18,7 +18,7 @@ config-graft <TARGET> <DESIRED> [BASE]
 config-graft config.json desired.json .state/last-applied.json
 config-graft --check config.json desired.json base.json    # exit 3 if it would change
 config-graft --stdout --diff config.json desired.json       # preview without writing
-config-graft --array-strategy set config.json desired.json  # union lists, ignoring order
+config-graft --array-strategy replace config.json desired.json  # own the list wholesale
 
 config-graft app.plist desired.plist base.plist             # same merge, plist files
 config-graft --format plist config desired                  # force plist on any name
@@ -28,11 +28,15 @@ config-graft config.yaml desired.yaml                       # YAML, keeping comm
 config-graft config.toml desired.toml                       # TOML, keeping comments
 ```
 
-By default arrays (and scalars) are **atomic**: a managed list is replaced
-wholesale. `--array-strategy` changes how two arrays combine — `concat` appends
-(keeping order and duplicates) or `set` unions them ignoring order and dropping
-duplicates. `null` is a real value, not a delete sentinel — deletion is driven
-entirely by the BASE↔DESIRED diff.
+By default (`--array-strategy merge`) two arrays are reconciled three-way against
+BASE, move-aware: keep what either side has, prune a BASE element DESIRED dropped,
+respect a BASE element the user deleted from TARGET, and preserve a reordering
+made on either side. The other strategies are `replace` (**atomic** — DESIRED's
+list wins wholesale; the right choice when you own the whole list, or when its
+elements are structurally anonymous objects `merge` can't match by value),
+`concat` (append, keeping order and duplicates), and `set` (two-way union,
+ignoring order and BASE). Scalars are always replaced. `null` is a real value,
+not a delete sentinel — deletion is driven entirely by the BASE↔DESIRED diff.
 
 ## Formats
 
@@ -95,4 +99,9 @@ nix run . -- --help
 - Modeled on `kubectl apply`'s three-way merge (against its
   `last-applied-configuration`), scoped to a single local file rather than a
   cluster object.
+- The three-way merge of **ordered arrays** draws on Schwägerl, Uhrig &
+  Westfechtel, "A graph-based algorithm for three-way merging of ordered
+  collections in EMF models," *Science of Computer Programming* 113 (2015),
+  pp. 51–81, [doi:10.1016/j.scico.2015.02.010](https://doi.org/10.1016/j.scico.2015.02.010)
+  ([open-access conference version](https://www.scitepress.org/papers/2014/47021/47021.pdf)).
 - [`SPEC.md`](SPEC.md) — the full specification: semantics, exit codes, edge cases.

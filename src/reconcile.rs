@@ -9,6 +9,8 @@ use clap::ValueEnum;
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
+mod arrays;
+
 /// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
 /// leaves). Distinct from `std::path::Path` — this addresses keys, not files.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -57,6 +59,12 @@ pub enum ArrayStrategy {
     Concat,
     /// Union of both arrays, ignoring order and dropping duplicates.
     Set,
+    /// Three-way merge against BASE: keep elements present on either side, prune
+    /// a BASE element dropped from DESIRED (unless the user removed it from TARGET
+    /// first), and order the survivors move-aware so a reordering on either side
+    /// is preserved (via a generalized topological sort). Membership by value;
+    /// duplicates collapse.
+    Merge,
 }
 
 /// Options controlling reconciliation.
@@ -99,8 +107,9 @@ pub fn reconcile<L: Leaf>(
         }
     }
 
-    // 4: deep-merge DESIRED (DESIRED wins leaf conflicts).
-    deep_merge(&mut result, desired, opts.arrays);
+    // 4: deep-merge DESIRED (DESIRED wins leaf conflicts). BASE is threaded
+    // alongside so the three-way `Merge` array strategy can see it.
+    deep_merge(&mut result, desired, base, opts.arrays);
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
@@ -168,17 +177,24 @@ fn del_path<L: Leaf>(v: &mut Node<L>, path: &[String]) {
     }
 }
 
-/// Deep-merge `desired` into `target`: objects always merge recursively. Two
-/// arrays combine per `arrays` (replace / concat / set-union); every other
-/// case — scalars, type changes, array-vs-non-array — is replaced wholesale by
-/// `desired`.
-pub fn deep_merge<L: Leaf>(target: &mut Node<L>, desired: &Node<L>, arrays: ArrayStrategy) {
+/// Deep-merge `desired` into `target`, with `base` as the merge ancestor at the
+/// same path (for the three-way `Merge` strategy; ignored by the others).
+/// Objects always merge recursively. Two arrays combine per `arrays` (replace /
+/// concat / set-union / three-way merge); every other case — scalars, type
+/// changes, array-vs-non-array — is replaced wholesale by `desired`.
+pub fn deep_merge<L: Leaf>(
+    target: &mut Node<L>,
+    desired: &Node<L>,
+    base: Option<&Node<L>>,
+    arrays: ArrayStrategy,
+) {
     match desired {
         Node::Map(d) => {
             if let Node::Map(t) = target {
                 for (k, dv) in d {
+                    let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
                     if let Some(tv) = t.get_mut(k) {
-                        deep_merge(tv, dv, arrays);
+                        deep_merge(tv, dv, bv, arrays);
                     } else {
                         t.insert(k.clone(), dv.clone());
                     }
@@ -186,21 +202,9 @@ pub fn deep_merge<L: Leaf>(target: &mut Node<L>, desired: &Node<L>, arrays: Arra
                 return;
             }
         }
-        Node::Array(d) if arrays == ArrayStrategy::Concat => {
+        Node::Array(d) => {
             if let Node::Array(t) = target {
-                t.extend(d.iter().cloned());
-                return;
-            }
-        }
-        Node::Array(d) if arrays == ArrayStrategy::Set => {
-            if let Node::Array(t) = target {
-                // Union ignoring order: keep TARGET's elements, append any
-                // DESIRED element not already present (dedup by value).
-                for e in d {
-                    if !t.contains(e) {
-                        t.push(e.clone());
-                    }
-                }
+                *t = arrays::combine(t, d, base, arrays);
                 return;
             }
         }
@@ -261,6 +265,23 @@ mod tests {
             &n(t),
             &n(d),
             None,
+            &Options {
+                prune: true,
+                arrays,
+            },
+        ))
+    }
+
+    fn reconciled_arrays_base(
+        t: Value,
+        d: Value,
+        b: Option<Value>,
+        arrays: ArrayStrategy,
+    ) -> Value {
+        j(&reconcile(
+            &n(t),
+            &n(d),
+            b.map(n).as_ref(),
             &Options {
                 prune: true,
                 arrays,
@@ -492,7 +513,7 @@ mod tests {
     // ----- array strategies -----
 
     #[test]
-    fn arrays_replace_by_default() {
+    fn arrays_replace_strategy_is_wholesale() {
         assert_eq!(
             reconciled_arrays(
                 json!({"a":[1,2,3]}),
@@ -590,6 +611,229 @@ mod tests {
             },
         ));
         assert_eq!(result, json!({"z":9}));
+    }
+
+    // ----- three-way membership merge (`merge`) -----
+
+    #[test]
+    fn merge_prunes_base_element_dropped_from_desired() {
+        // The headline gap: BASE had [a,b], DESIRED drops to [a], TARGET still
+        // holds both unchanged -> b is pruned (set would keep it).
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":["x","y"]}),
+                json!({"a":["x"]}),
+                Some(json!({"a":["x","y"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"a":["x"]})
+        );
+    }
+
+    #[test]
+    fn merge_keeps_unmanaged_target_element() {
+        // "z" is in TARGET but never in BASE/DESIRED (app/user wrote it) -> kept.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":["x","z"]}),
+                json!({"a":["x"]}),
+                Some(json!({"a":["x"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"a":["x","z"]})
+        );
+    }
+
+    #[test]
+    fn merge_appends_desired_insertion() {
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":["x"]}),
+                json!({"a":["x","y"]}),
+                Some(json!({"a":["x"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"a":["x","y"]})
+        );
+    }
+
+    #[test]
+    fn merge_respects_user_deletion_of_base_element() {
+        // BASE [x,y], the user deleted y from TARGET; DESIRED still lists it,
+        // but a user-removed managed element stays removed.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":["x"]}),
+                json!({"a":["x","y"]}),
+                Some(json!({"a":["x","y"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"a":["x"]})
+        );
+    }
+
+    #[test]
+    fn merge_without_base_is_union() {
+        // No BASE -> every element is an insertion -> same as `set`.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":[1, 2, 3]}),
+                json!({"a":[3, 2, 4]}),
+                None,
+                ArrayStrategy::Merge
+            ),
+            json!({"a":[1, 2, 3, 4]})
+        );
+    }
+
+    #[test]
+    fn merge_is_idempotent_on_a_settled_list() {
+        // TARGET already equals DESIRED with BASE matching -> no change.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":["x","y"]}),
+                json!({"a":["x","y"]}),
+                Some(json!({"a":["x","y"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"a":["x","y"]})
+        );
+    }
+
+    #[test]
+    fn merge_combines_both_sides_changes() {
+        // BASE [a,b,c]; DESIRED drops c and adds d; TARGET kept its own e and
+        // dropped b. Result: a (kept), b pruned (DESIRED... no, TARGET removed
+        // b -> stays gone), c pruned (DESIRED dropped), e kept (unmanaged), d
+        // appended.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":["a","c","e"]}),
+                json!({"a":["a","b","d"]}),
+                Some(json!({"a":["a","b","c"]})),
+                ArrayStrategy::Merge
+            ),
+            // a: in both, kept. c: BASE elem dropped from DESIRED -> pruned.
+            // e: unmanaged TARGET elem -> kept. b: BASE elem the user removed
+            // from TARGET -> stays removed. d: DESIRED insertion -> appended.
+            json!({"a":["a","e","d"]})
+        );
+    }
+
+    #[test]
+    fn merge_dedups_by_value() {
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":[1, 1, 2]}),
+                json!({"a":[2, 3, 3]}),
+                None,
+                ArrayStrategy::Merge
+            ),
+            json!({"a":[1, 2, 3]})
+        );
+    }
+
+    #[test]
+    fn merge_array_replaces_when_target_not_array() {
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":5}),
+                json!({"a":[1, 2]}),
+                Some(json!({"a":[1, 2]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"a":[1, 2]})
+        );
+    }
+
+    #[test]
+    fn merge_managed_list_dropped_whole_is_pruned_atomically() {
+        // Whole-array drop from DESIRED is still the atomic prune path, even
+        // under Merge (arrays are atomic leaf paths for pruning).
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"a":[1, 2],"z":9}),
+                json!({}),
+                Some(json!({"a":[1, 2]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"z":9})
+        );
+    }
+
+    // ----- move-aware ordering (`merge`, GTS) -----
+
+    #[test]
+    fn merge_preserves_a_target_move() {
+        // BASE [a,b,c]; the user moved a to the end in TARGET; DESIRED unchanged.
+        // The move is the only change, so it wins.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["b","c","a"]}),
+                json!({"l":["a","b","c"]}),
+                Some(json!({"l":["a","b","c"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["b","c","a"]})
+        );
+    }
+
+    #[test]
+    fn merge_preserves_a_desired_move() {
+        // Symmetric: DESIRED moves c to the front, TARGET unchanged -> move wins.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["a","b","c"]}),
+                json!({"l":["c","a","b"]}),
+                Some(json!({"l":["a","b","c"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["c","a","b"]})
+        );
+    }
+
+    #[test]
+    fn merge_move_and_insert_combine() {
+        // BASE [a,b,c]; TARGET moves c to the front; DESIRED inserts x between a
+        // and b. Both non-conflicting changes land: c leads, x sits between a
+        // and b.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["c","a","b"]}),
+                json!({"l":["a","x","b","c"]}),
+                Some(json!({"l":["a","b","c"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["c","a","x","b"]})
+        );
+    }
+
+    #[test]
+    fn merge_is_idempotent_under_moves() {
+        // Re-applying the reconciled result (same DESIRED/BASE) is a fixpoint.
+        let t = json!({"l":["a","b","c"]});
+        let d = json!({"l":["c","a","b"]});
+        let b = json!({"l":["a","b","c"]});
+        let once = reconciled_arrays_base(t, d.clone(), Some(b.clone()), ArrayStrategy::Merge);
+        let twice = reconciled_arrays_base(once.clone(), d, Some(b), ArrayStrategy::Merge);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn merge_worked_example() {
+        // A full worked example: BASE TKQNFBP, TARGET KQTNJPFS, DESIRED TKMNPJFX.
+        // Q and B are deleted on one branch (pruned); J/P form a contradictory-move
+        // cycle. Expected linearization K{TM}N{JP}F{XS} -- our fixed tie-break
+        // (TARGET before DESIRED) resolves the arbitrary pairs to KTMNJPFSX.
+        assert_eq!(
+            reconciled_arrays_base(
+                json!({"l":["K", "Q", "T", "N", "J", "P", "F", "S"]}),
+                json!({"l":["T", "K", "M", "N", "P", "J", "F", "X"]}),
+                Some(json!({"l":["T", "K", "Q", "N", "F", "B", "P"]})),
+                ArrayStrategy::Merge
+            ),
+            json!({"l":["K", "T", "M", "N", "J", "P", "F", "S", "X"]})
+        );
     }
 
     // ----- helper-level unit tests -----
