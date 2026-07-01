@@ -513,7 +513,7 @@ mod tests {
     // ----- array strategies -----
 
     #[test]
-    fn arrays_replace_by_default() {
+    fn arrays_replace_strategy_is_wholesale() {
         assert_eq!(
             reconciled_arrays(
                 json!({"a":[1,2,3]}),

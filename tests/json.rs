@@ -190,17 +190,19 @@ fn array_strategy_concat_appends() {
 }
 
 #[test]
-fn array_strategy_default_replaces() {
+fn array_strategy_default_is_merge() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
     fs::write(&target, r#"{"a":[1,2,3]}"#).unwrap();
     fs::write(&desired, r#"{"a":[9]}"#).unwrap();
 
+    // No --array-strategy: the default is `merge`. With no BASE it reconciles as a
+    // union (keeping TARGET's elements, appending DESIRED's) rather than replacing.
     let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
-    assert_eq!(v, serde_json::json!({"a":[9]}));
+    assert_eq!(v, serde_json::json!({"a":[1, 2, 3, 9]}));
 }
 
 #[test]
