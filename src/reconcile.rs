@@ -9,6 +9,8 @@ use clap::ValueEnum;
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
+mod arrays;
+
 /// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
 /// leaves). Distinct from `std::path::Path` — this addresses keys, not files.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -186,21 +188,9 @@ pub fn deep_merge<L: Leaf>(target: &mut Node<L>, desired: &Node<L>, arrays: Arra
                 return;
             }
         }
-        Node::Array(d) if arrays == ArrayStrategy::Concat => {
+        Node::Array(d) => {
             if let Node::Array(t) = target {
-                t.extend(d.iter().cloned());
-                return;
-            }
-        }
-        Node::Array(d) if arrays == ArrayStrategy::Set => {
-            if let Node::Array(t) = target {
-                // Union ignoring order: keep TARGET's elements, append any
-                // DESIRED element not already present (dedup by value).
-                for e in d {
-                    if !t.contains(e) {
-                        t.push(e.clone());
-                    }
-                }
+                *t = arrays::combine(t, d, arrays);
                 return;
             }
         }
