@@ -229,7 +229,7 @@ mod tests {
         base.insert("b".to_string(), pint(2));
         let base = Plist::decode(&plist::Value::Dictionary(base)).unwrap();
 
-        let merged = reconcile(
+        let (merged, _) = reconcile(
             &target,
             &desired,
             Some(&base),

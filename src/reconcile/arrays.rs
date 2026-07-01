@@ -4,26 +4,29 @@
 //! whether DESIRED's list replaces, appends to, or unions with TARGET's — or, for
 //! `Merge`, reconciles element membership three-way against BASE.
 
-use super::ArrayStrategy;
+use super::{ArrayStrategy, NodeList};
 use crate::value::{Leaf, Node};
 use std::collections::HashSet;
 
 /// Combine a TARGET array with a DESIRED array per `strategy`, returning the new
-/// element list. `base` is the merge ancestor at this path (used only by `Merge`).
+/// element list and, when a `merge` hit a *conflict*, the elements reordered
+/// contradictorily (`Some`) or `None`. `base` is the merge ancestor at this path
+/// (used only by `Merge`); only `Merge` can conflict, so every other strategy
+/// returns `None`.
 pub(super) fn combine<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: Option<&Node<L>>,
     strategy: ArrayStrategy,
-) -> Vec<Node<L>> {
+) -> (NodeList<L>, Option<NodeList<L>>) {
     match strategy {
         // Atomic: DESIRED's array wins wholesale.
-        ArrayStrategy::Replace => desired.to_vec(),
+        ArrayStrategy::Replace => (desired.to_vec(), None),
         // Append DESIRED onto TARGET, keeping order and duplicates.
         ArrayStrategy::Concat => {
             let mut out = target.to_vec();
             out.extend(desired.iter().cloned());
-            out
+            (out, None)
         }
         // Union ignoring order: keep TARGET's elements, append any DESIRED
         // element not already present (dedup by value).
@@ -34,11 +37,13 @@ pub(super) fn combine<L: Leaf>(
                     out.push(e.clone());
                 }
             }
-            out
+            (out, None)
         }
-        // Three-way, move-aware merge against BASE. BASE elements only matter
-        // when BASE is itself an array here; anything else (absent / type change)
-        // leaves membership a plain two-way union, matching `Set`.
+        // Three-way, move-aware merge against BASE — the *only* strategy that can
+        // conflict, so the other arms return `None`. BASE elements only matter when
+        // BASE is itself an array here; anything else (absent / type change) leaves
+        // membership a plain two-way union, matching `Set`. `ordered_merge` reports
+        // `Some(elements)` when a contradictory cross-over move formed a cycle.
         ArrayStrategy::Merge => {
             let base_arr: &[Node<L>] = match base {
                 Some(Node::Array(b)) => b,
@@ -94,16 +99,22 @@ fn membership_merge<L: Leaf>(
 /// fixed tie-break — earliest position in TARGET, then DESIRED, then insertion
 /// order — so the result is deterministic and idempotent (required for `--check`
 /// and re-apply no-ops).
+///
+/// Returns the ordered list and, on *conflict*, the elements involved: a
+/// contradictory cross-over move forms a cycle (an SCC of size > 1) that the
+/// tie-break had to break arbitrarily, and `Some(cycle_elements)` names them so a
+/// caller can surface that the ordering was resolved, not agreed. `None` when the
+/// merge was clean.
 fn ordered_merge<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
-) -> Vec<Node<L>> {
+) -> (NodeList<L>, Option<NodeList<L>>) {
     // Step 1: the surviving vertex set (deduped, membership-correct).
     let verts = membership_merge(target, desired, base);
     let n = verts.len();
     if n <= 1 {
-        return verts;
+        return (verts, None);
     }
     let id = |e: &Node<L>| verts.iter().position(|v| v == e);
 
@@ -250,6 +261,24 @@ fn ordered_merge<L: Leaf>(
     for (v, &c) in comp.iter().enumerate() {
         members[c].push(v);
     }
+    // A component with more than one vertex is a cycle: TARGET and DESIRED
+    // reordered those elements contradictorily (a cross-over move). Collect those
+    // elements (in membership order) as the reported conflict; the tie-break below
+    // still resolves the order deterministically.
+    let conflict: Option<NodeList<L>> = {
+        let mut cycle_ids: Vec<usize> = members
+            .iter()
+            .filter(|m| m.len() > 1)
+            .flatten()
+            .copied()
+            .collect();
+        if cycle_ids.is_empty() {
+            None
+        } else {
+            cycle_ids.sort_unstable();
+            Some(cycle_ids.into_iter().map(|i| verts[i].clone()).collect())
+        }
+    };
     let mut cadj: Vec<Vec<usize>> = vec![Vec::new(); ncomp];
     let mut cindeg = vec![0usize; ncomp];
     for &(a, b) in &edges {
@@ -290,7 +319,7 @@ fn ordered_merge<L: Leaf>(
             cindeg[d] -= 1;
         }
     }
-    out
+    (out, conflict)
 }
 
 /// Serialize the vertices of one strongly connected component. A trivial (size-1)

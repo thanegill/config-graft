@@ -171,6 +171,41 @@ fn array_strategy_merge_is_three_way_against_base() {
 }
 
 #[test]
+fn merge_conflict_warns_on_stderr_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // TARGET and DESIRED reorder the same elements oppositely -> a contradiction
+    // the tie-break must resolve. `merge` is the default strategy.
+    fs::write(&target, r#"{"l":["x","y"]}"#).unwrap();
+    fs::write(&desired, r#"{"l":["y","x"]}"#).unwrap();
+
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success()); // conflicts warn but don't change the exit code
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("contradictory reorder"), "stderr was: {err}");
+    assert!(err.contains("`l`"), "stderr was: {err}");
+    // names the conflicting elements
+    assert!(err.contains(r#"["x", "y"]"#), "stderr was: {err}");
+    // and a deterministic result is still written
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"l":["x","y"]}));
+}
+
+#[test]
+fn clean_merge_does_not_warn() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"l":["a","b"]}"#).unwrap();
+    fs::write(&desired, r#"{"l":["a","b","c"]}"#).unwrap();
+
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(out.stderr.is_empty(), "unexpected stderr");
+}
+
+#[test]
 fn array_strategy_concat_appends() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
