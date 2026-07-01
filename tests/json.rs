@@ -146,6 +146,31 @@ fn array_strategy_set_merges_ignoring_order() {
 }
 
 #[test]
+fn array_strategy_merge_is_three_way_against_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    // BASE managed [a,b]; DESIRED drops b and adds c; TARGET still has [a,b] plus
+    // its own unmanaged z. Expect: a kept, b pruned (dropped from DESIRED), z
+    // kept (unmanaged), c appended.
+    fs::write(&target, r#"{"tags":["a","b","z"]}"#).unwrap();
+    fs::write(&desired, r#"{"tags":["a","c"]}"#).unwrap();
+    fs::write(&base, r#"{"tags":["a","b"]}"#).unwrap();
+
+    let out = run(&[
+        "--array-strategy",
+        "merge",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"tags":["a","z","c"]}));
+}
+
+#[test]
 fn array_strategy_concat_appends() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");

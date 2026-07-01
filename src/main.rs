@@ -74,7 +74,8 @@ struct Cli {
     sort_keys: bool,
 
     /// How DESIRED arrays combine with TARGET arrays: replace (atomic, default),
-    /// concat (append), or set (union, ignoring order and duplicates).
+    /// concat (append), set (union, ignoring order and duplicates), or merge
+    /// (three-way membership against BASE).
     #[arg(
         long = "array-strategy",
         default_value = "replace",

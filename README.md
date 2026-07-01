@@ -30,9 +30,11 @@ config-graft config.toml desired.toml                       # TOML, keeping comm
 
 By default arrays (and scalars) are **atomic**: a managed list is replaced
 wholesale. `--array-strategy` changes how two arrays combine — `concat` appends
-(keeping order and duplicates) or `set` unions them ignoring order and dropping
-duplicates. `null` is a real value, not a delete sentinel — deletion is driven
-entirely by the BASE↔DESIRED diff.
+(keeping order and duplicates), `set` two-way-unions them ignoring order and
+dropping duplicates, or `merge` does a three-way membership reconcile against
+BASE (keep what either side has, prune a BASE element DESIRED dropped, respect a
+BASE element the user deleted from TARGET). `null` is a real value, not a delete
+sentinel — deletion is driven entirely by the BASE↔DESIRED diff.
 
 ## Formats
 
