@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stderr, naming the array's path and the elements involved. Diagnostic only — the
   result stays deterministic (TARGET order preferred) and the exit code is
   unchanged.
+- **Keyed matching** for `merge` via `--merge-key`: identify object-array elements
+  by a field so keyed records are merged in place (their fields reconciled
+  three-way) instead of matched by whole value — a managed field can change while
+  an app-added field survives, with no duplicate entry. `FIELD` (or `f1,f2`
+  candidates) applies to any object-array; `KEY=FIELD` scopes it to arrays under
+  object key `KEY`. Falls back to value matching when a key doesn't resolve or not
+  every element carries it; arrays of anonymous objects stay atomic (`replace`).
 
 ### Changed
 

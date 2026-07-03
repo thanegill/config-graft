@@ -12,7 +12,9 @@ mod reconcile;
 mod value;
 use error::{Error, Outcome};
 use format::{Format, FormatKind, Indent, Json, Plist, Toml, WriteOpts, Yaml};
-use reconcile::{get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, Options};
+use reconcile::{
+    get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, MergeKeys, Options,
+};
 use value::{Leaf, Node};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files:
@@ -82,6 +84,40 @@ struct Cli {
         value_name = "STRATEGY"
     )]
     array_strategy: ArrayStrategy,
+
+    /// Identify object-array elements by a field so `merge` matches keyed records
+    /// (and merges their fields) instead of by whole value. `FIELD` (or
+    /// `f1,f2`) applies to any object-array; `KEY=FIELD` scopes it to arrays under
+    /// object key `KEY`. Repeatable. Example: `--merge-key name --merge-key
+    /// routes=id`.
+    #[arg(long = "merge-key", value_name = "[KEY=]FIELD")]
+    merge_key: Vec<String>,
+}
+
+/// Parse `--merge-key` specs into [`MergeKeys`]. Each spec is `FIELD` / `f1,f2`
+/// (global candidates) or `KEY=FIELD` / `KEY=f1,f2` (scoped to object key `KEY`).
+fn parse_merge_keys(specs: &[String]) -> MergeKeys {
+    let mut mk = MergeKeys::default();
+    for spec in specs {
+        let (scope, fields) = match spec.split_once('=') {
+            Some((k, f)) => (Some(k.trim()), f),
+            None => (None, spec.as_str()),
+        };
+        let fields: Vec<String> = fields
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        if fields.is_empty() {
+            continue;
+        }
+        match scope {
+            Some(k) if !k.is_empty() => mk.scoped.entry(k.to_string()).or_default().extend(fields),
+            _ => mk.global.extend(fields),
+        }
+    }
+    mk
 }
 
 fn main() {
@@ -147,6 +183,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
     let opts = Options {
         prune: !cli.no_prune,
         arrays: cli.array_strategy,
+        merge_keys: parse_merge_keys(&cli.merge_key),
     };
     let (mut result, conflicts) = reconcile(&target, &desired, base.as_ref(), &opts);
     // A `merge` array where TARGET and DESIRED reorder the same elements
