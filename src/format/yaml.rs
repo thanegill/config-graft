@@ -92,6 +92,7 @@ impl ValueCodec for Yaml {
 
 impl Format for Yaml {
     const KIND: FormatKind = FormatKind::Yaml;
+    const PATH_SEP: &'static str = ".";
 
     fn parse(bytes: &[u8]) -> Option<Node<YamlLeaf>> {
         let text = std::str::from_utf8(bytes).ok()?;

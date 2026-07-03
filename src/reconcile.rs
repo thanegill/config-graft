@@ -47,9 +47,14 @@ impl KeyPath {
         KeyPath(self.0[..n].to_vec())
     }
 
-    /// Render as a dotted string (for diffs).
-    pub fn join(&self, sep: &str) -> String {
-        self.0.join(sep)
+    /// Render as a user-facing string: segments joined by `sep`, or `<root>` for
+    /// the empty path. `sep` is format-specific.
+    pub fn render(&self, sep: &str) -> String {
+        if self.0.is_empty() {
+            "<root>".to_string()
+        } else {
+            self.0.join(sep)
+        }
     }
 }
 
@@ -57,17 +62,6 @@ impl std::ops::Deref for KeyPath {
     type Target = [String];
     fn deref(&self) -> &[String] {
         &self.0
-    }
-}
-
-/// User-facing rendering: dotted (`a.b.c`), or `<root>` for the empty path.
-impl std::fmt::Display for KeyPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0.is_empty() {
-            f.write_str("<root>")
-        } else {
-            write!(f, "{}", self.0.join("."))
-        }
     }
 }
 
@@ -906,7 +900,17 @@ mod tests {
                 arrays,
             },
         );
-        conflicts.iter().map(|c| c.path.join(".")).collect()
+        conflicts.iter().map(|c| c.path.render(".")).collect()
+    }
+
+    #[test]
+    fn keypath_render_uses_the_given_separator() {
+        let mut p = KeyPath::new();
+        p.push("a".to_string());
+        p.push("b".to_string());
+        assert_eq!(p.render("."), "a.b");
+        assert_eq!(p.render(":"), "a:b");
+        assert_eq!(KeyPath::new().render(":"), "<root>"); // empty path
     }
 
     #[test]

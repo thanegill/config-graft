@@ -79,6 +79,9 @@ impl FormatKind {
 pub trait Format: ValueCodec {
     /// The `FormatKind` this format corresponds to (for format-specific errors).
     const KIND: FormatKind;
+    /// Separator between key-path segments in user-facing diagnostics (`--diff`,
+    /// conflict warnings).
+    const PATH_SEP: &'static str;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
     /// Serialize `node` to bytes. `current` is the target's existing on-disk bytes

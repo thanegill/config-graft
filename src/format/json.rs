@@ -80,6 +80,7 @@ impl ValueCodec for Json {
 
 impl Format for Json {
     const KIND: FormatKind = FormatKind::Json;
+    const PATH_SEP: &'static str = ".";
 
     fn parse(bytes: &[u8]) -> Option<Node<JsonLeaf>> {
         let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
