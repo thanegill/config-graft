@@ -291,3 +291,31 @@ fn indent_flag_is_rejected_for_plist() {
         "got: {err}"
     );
 }
+
+#[test]
+fn merge_key_scoped_path_uses_the_plist_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let item = |x: &str| pdict(vec![("id", pint(1)), ("x", plist::Value::String(x.into()))]);
+    let doc = |x: &str| {
+        pdict(vec![(
+            "a",
+            pdict(vec![("items", plist::Value::Array(vec![item(x)]))]),
+        )])
+    };
+    doc("old").to_file_xml(&target).unwrap();
+    doc("new").to_file_xml(&desired).unwrap();
+
+    // plist path segments are joined by `:` (PlistBuddy-style), the same separator
+    // the tool prints elsewhere.
+    let out = run(&[
+        "--merge-key",
+        "a:items=id",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    // Keyed by `id` -> one merged record with the updated field, not two entries.
+    assert_eq!(read_plist(&target), doc("new"));
+}
