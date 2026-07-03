@@ -16,6 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty/first-apply target is written canonically. Every write is verified to
   round-trip back to the intended result, refusing (and leaving the file
   untouched) rather than risk corruption. Date-times round-trip as atomic leaves.
+- **Move-aware three-way array merge** via `--array-strategy merge`: reconciles
+  array element membership against BASE (prune a BASE element dropped from
+  DESIRED, keep insertions on either side, respect a user's deletion) and orders
+  the survivors so a reordering on either side is preserved, breaking a
+  contradictory cross-over move deterministically (generalized topological sort).
+  Well-defined for arrays of uniquely-valued elements; use `replace` for arrays of
+  structurally anonymous objects.
+- **Conflict warnings** for `merge`: when TARGET and DESIRED reorder the same
+  elements contradictorily, the resolved-but-arbitrary reorder is reported on
+  stderr, naming the array's path and the elements involved. Diagnostic only — the
+  result stays deterministic (TARGET order preferred) and the exit code is
+  unchanged.
+
+### Changed
+
+- **Default `--array-strategy` is now `merge`** (was `replace`): arrays are
+  reconciled element-wise against BASE by default. Use `replace` to own a list
+  wholesale, or for arrays of structurally anonymous objects that `merge` can't
+  match by value.
 
 ## [0.0.3] - 2026-06-16
 
