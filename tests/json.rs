@@ -250,6 +250,31 @@ fn merge_key_matches_objects_by_field() {
 }
 
 #[test]
+fn merge_key_nested_conflict_warns_with_element_selector() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // The `web` record (keyed by name) has a `tags` array reordered oppositely on
+    // each side -> a conflict inside the record; the warning locates down to it.
+    fs::write(&target, r#"{"servers":[{"name":"web","tags":["x","y"]}]}"#).unwrap();
+    fs::write(&desired, r#"{"servers":[{"name":"web","tags":["y","x"]}]}"#).unwrap();
+
+    let out = run(&[
+        "--merge-key",
+        "name",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success()); // conflicts warn but don't change the exit code
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("contradictory reorder"), "stderr was: {err}");
+    assert!(
+        err.contains(r#"servers[name="web"].tags"#),
+        "stderr was: {err}"
+    );
+}
+
+#[test]
 fn merge_key_scoped_to_object_key() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");

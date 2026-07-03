@@ -17,6 +17,10 @@ pub type NodeList<L> = Vec<Node<L>>;
 
 /// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
 /// leaves). Distinct from `std::path::Path` — this addresses keys, not files.
+///
+/// Pruning only ever builds key segments. A conflict path may additionally carry a
+/// `[field=value]` element-selector segment naming a keyed-array record it points
+/// into; such paths are used only for rendering, never for pruning lookups.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct KeyPath(Vec<String>);
 
@@ -47,14 +51,22 @@ impl KeyPath {
         KeyPath(self.0[..n].to_vec())
     }
 
-    /// Render as a user-facing string: segments joined by `sep`, or `<root>` for
-    /// the empty path. `sep` is format-specific.
+    /// Render as a user-facing string: key segments joined by `sep`, or `<root>`
+    /// for the empty path. `sep` is format-specific. An element selector segment
+    /// (`[field=value]`, in a conflict path pointing into a keyed record) attaches
+    /// directly to the preceding key with no separator, e.g. `servers[name="web"]`.
     pub fn render(&self, sep: &str) -> String {
         if self.0.is_empty() {
-            "<root>".to_string()
-        } else {
-            self.0.join(sep)
+            return "<root>".to_string();
         }
+        let mut out = String::new();
+        for (i, seg) in self.0.iter().enumerate() {
+            if i > 0 && !seg.starts_with('[') {
+                out.push_str(sep);
+            }
+            out.push_str(seg);
+        }
+        out
     }
 }
 
@@ -276,15 +288,13 @@ pub fn deep_merge<L: Leaf>(
         }
         Node::Array(d) => {
             if let Node::Array(t) = target {
-                let (combined, conflict) = arrays::combine(t, d, base, opts, parent_key);
+                let (combined, conflicts) = arrays::combine(t, d, base, opts, parent_key);
                 *t = combined;
-                return conflict
-                    .map(|elements| Conflict {
-                        path: KeyPath::new(),
-                        elements,
-                    })
-                    .into_iter()
-                    .collect();
+                // Conflicts arrive with paths relative to this array (empty for a
+                // reorder of the array itself, a `[field=value]` selector + subpath
+                // for one nested in a keyed record); the Map arm above prepends this
+                // array's own key as they bubble further up.
+                return conflicts;
             }
         }
         _ => {}
@@ -1058,6 +1068,28 @@ mod tests {
         conflicts.iter().map(|c| c.path.render(".")).collect()
     }
 
+    fn keyed_conflict_paths(
+        target: Value,
+        desired: Value,
+        base: Option<Value>,
+        global_keys: &[&str],
+    ) -> Vec<String> {
+        let (_result, conflicts) = reconcile(
+            &n(target),
+            &n(desired),
+            base.map(n).as_ref(),
+            &Options {
+                prune: true,
+                arrays: ArrayStrategy::Merge,
+                merge_keys: MergeKeys {
+                    global: global_keys.iter().map(|s| s.to_string()).collect(),
+                    scoped: HashMap::new(),
+                },
+            },
+        );
+        conflicts.iter().map(|c| c.path.render(".")).collect()
+    }
+
     #[test]
     fn keypath_render_uses_the_given_separator() {
         let mut p = KeyPath::new();
@@ -1139,6 +1171,46 @@ mod tests {
             ArrayStrategy::Replace
         )
         .is_empty());
+    }
+
+    #[test]
+    fn keypath_render_attaches_element_selector_to_the_preceding_key() {
+        let mut p = KeyPath::new();
+        p.push("servers".to_string());
+        p.push("[name=\"web\"]".to_string()); // an element selector, no sep before it
+        p.push("tags".to_string());
+        assert_eq!(p.render("."), "servers[name=\"web\"].tags");
+        assert_eq!(p.render(":"), "servers[name=\"web\"]:tags");
+    }
+
+    #[test]
+    fn keyed_conflict_inside_a_record_points_into_it() {
+        // A keyed `servers` list where the `web` record's nested `tags` array is
+        // reordered contradictorily -> the conflict locates down to the record.
+        assert_eq!(
+            keyed_conflict_paths(
+                json!({"servers": [{"name": "web", "tags": ["x", "y"]}]}),
+                json!({"servers": [{"name": "web", "tags": ["y", "x"]}]}),
+                None,
+                &["name"],
+            ),
+            vec!["servers[name=\"web\"].tags"]
+        );
+    }
+
+    #[test]
+    fn keyed_record_reorder_conflict_reports_at_the_array() {
+        // Reordering the keyed records themselves contradictorily is an ordering
+        // conflict of the array -> reported at `servers`, with no element selector.
+        assert_eq!(
+            keyed_conflict_paths(
+                json!({"servers": [{"name": "a"}, {"name": "b"}]}),
+                json!({"servers": [{"name": "b"}, {"name": "a"}]}),
+                None,
+                &["name"],
+            ),
+            vec!["servers"]
+        );
     }
 
     // ----- helper-level unit tests -----
