@@ -11,6 +11,10 @@ use std::collections::HashSet;
 
 mod arrays;
 
+/// A list of array elements — the payload of a `Node::Array`. It's what the
+/// array-combining strategies produce, and (on a `merge` conflict) report.
+pub type NodeList<L> = Vec<Node<L>>;
+
 /// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
 /// leaves). Distinct from `std::path::Path` — this addresses keys, not files.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -32,6 +36,12 @@ impl KeyPath {
         self.0.pop();
     }
 
+    /// Prepend a key segment — used as a conflict bubbles up out of a subtree,
+    /// gaining its parent key at each level.
+    fn prepend(&mut self, seg: String) {
+        self.0.insert(0, seg);
+    }
+
     /// The path of the first `n` segments (a proper ancestor when `n < len`).
     fn prefix(&self, n: usize) -> KeyPath {
         KeyPath(self.0[..n].to_vec())
@@ -47,6 +57,17 @@ impl std::ops::Deref for KeyPath {
     type Target = [String];
     fn deref(&self) -> &[String] {
         &self.0
+    }
+}
+
+/// User-facing rendering: dotted (`a.b.c`), or `<root>` for the empty path.
+impl std::fmt::Display for KeyPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("<root>")
+        } else {
+            write!(f, "{}", self.0.join("."))
+        }
     }
 }
 
@@ -75,13 +96,28 @@ pub struct Options {
     pub arrays: ArrayStrategy,
 }
 
+/// A `merge` array conflict: at `path`, TARGET and DESIRED reordered `elements`
+/// contradictorily (a cross-over move). The reconcile still resolves the order
+/// deterministically; this records where and what so a caller can surface it.
+pub struct Conflict<L> {
+    /// The object path of the conflicted array.
+    pub path: KeyPath,
+    /// The elements caught in the contradictory reorder (in membership order).
+    pub elements: NodeList<L>,
+}
+
 /// Reconcile DESIRED into a clone of TARGET, using BASE as the merge ancestor.
+/// Returns the reconciled value plus any [`Conflict`]s where the `merge` strategy
+/// hit a contradictory cross-over reorder (TARGET and DESIRED order the same
+/// elements oppositely) that the tie-break had to resolve arbitrarily. The result
+/// is still deterministic; the conflicts let a caller surface that the order was
+/// resolved, not agreed.
 pub fn reconcile<L: Leaf>(
     target: &Node<L>,
     desired: &Node<L>,
     base: Option<&Node<L>>,
     opts: &Options,
-) -> Node<L> {
+) -> (Node<L>, Vec<Conflict<L>>) {
     let mut result = match target {
         Node::Map(_) => target.clone(),
         _ => Node::Map(IndexMap::new()),
@@ -108,8 +144,10 @@ pub fn reconcile<L: Leaf>(
     }
 
     // 4: deep-merge DESIRED (DESIRED wins leaf conflicts). BASE is threaded
-    // alongside so the three-way `Merge` array strategy can see it.
-    deep_merge(&mut result, desired, base, opts.arrays);
+    // alongside so the three-way `Merge` array strategy can see it. Array
+    // conflicts bubble up as `deep_merge`'s return, gaining a path segment at each
+    // level, so a location is built only for the (rare) conflicts.
+    let conflicts = deep_merge(&mut result, desired, base, opts.arrays);
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
@@ -129,7 +167,7 @@ pub fn reconcile<L: Leaf>(
         }
     }
 
-    result
+    (result, conflicts)
 }
 
 /// Managed leaf paths: descend only through objects, so arrays and scalars are
@@ -182,35 +220,51 @@ fn del_path<L: Leaf>(v: &mut Node<L>, path: &[String]) {
 /// Objects always merge recursively. Two arrays combine per `arrays` (replace /
 /// concat / set-union / three-way merge); every other case — scalars, type
 /// changes, array-vs-non-array — is replaced wholesale by `desired`.
+///
+/// Returns any `merge` [`Conflict`]s found, each with a path *relative to*
+/// `target`. Callers prepend their own key as the conflicts bubble up, so a
+/// location is built only for the (rare) conflicts, never for clean subtrees.
 pub fn deep_merge<L: Leaf>(
     target: &mut Node<L>,
     desired: &Node<L>,
     base: Option<&Node<L>>,
     arrays: ArrayStrategy,
-) {
+) -> Vec<Conflict<L>> {
     match desired {
         Node::Map(d) => {
             if let Node::Map(t) = target {
+                let mut conflicts = Vec::new();
                 for (k, dv) in d {
                     let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
                     if let Some(tv) = t.get_mut(k) {
-                        deep_merge(tv, dv, bv, arrays);
+                        for mut c in deep_merge(tv, dv, bv, arrays) {
+                            c.path.prepend(k.clone());
+                            conflicts.push(c);
+                        }
                     } else {
                         t.insert(k.clone(), dv.clone());
                     }
                 }
-                return;
+                return conflicts;
             }
         }
         Node::Array(d) => {
             if let Node::Array(t) = target {
-                *t = arrays::combine(t, d, base, arrays);
-                return;
+                let (combined, conflict) = arrays::combine(t, d, base, arrays);
+                *t = combined;
+                return conflict
+                    .map(|elements| Conflict {
+                        path: KeyPath::new(),
+                        elements,
+                    })
+                    .into_iter()
+                    .collect();
             }
         }
         _ => {}
     }
     *target = desired.clone();
+    Vec::new()
 }
 
 /// Recursively sort every object's keys (for `--sort-keys`).
@@ -257,7 +311,8 @@ mod tests {
                 prune,
                 arrays: ArrayStrategy::Replace,
             },
-        ))
+        )
+        .0)
     }
 
     fn reconciled_arrays(t: Value, d: Value, arrays: ArrayStrategy) -> Value {
@@ -269,7 +324,8 @@ mod tests {
                 prune: true,
                 arrays,
             },
-        ))
+        )
+        .0)
     }
 
     fn reconciled_arrays_base(
@@ -286,7 +342,8 @@ mod tests {
                 prune: true,
                 arrays,
             },
-        ))
+        )
+        .0)
     }
 
     #[test]
@@ -609,7 +666,8 @@ mod tests {
                 prune: true,
                 arrays: ArrayStrategy::Set,
             },
-        ));
+        )
+        .0);
         assert_eq!(result, json!({"z":9}));
     }
 
@@ -834,6 +892,93 @@ mod tests {
             ),
             json!({"l":["K", "T", "M", "N", "J", "P", "F", "S", "X"]})
         );
+    }
+
+    // ----- conflict surfacing -----
+
+    fn conflict_paths(t: Value, d: Value, b: Option<Value>, arrays: ArrayStrategy) -> Vec<String> {
+        let (_result, conflicts) = reconcile(
+            &n(t),
+            &n(d),
+            b.map(n).as_ref(),
+            &Options {
+                prune: true,
+                arrays,
+            },
+        );
+        conflicts.iter().map(|c| c.path.join(".")).collect()
+    }
+
+    #[test]
+    fn merge_conflict_names_the_conflicting_elements() {
+        // The conflict carries the elements caught in the contradictory reorder.
+        let (_result, conflicts) = reconcile(
+            &n(json!({"l": ["x", "y"]})),
+            &n(json!({"l": ["y", "x"]})),
+            None,
+            &Options {
+                prune: true,
+                arrays: ArrayStrategy::Merge,
+            },
+        );
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(
+            j(&Node::Array(conflicts[0].elements.clone())),
+            json!(["x", "y"])
+        );
+    }
+
+    #[test]
+    fn merge_reports_contradictory_reorder() {
+        // TARGET and DESIRED order the same two elements oppositely, with no BASE
+        // to arbitrate -> a cross-over cycle -> a conflict at path `l`.
+        assert_eq!(
+            conflict_paths(
+                json!({"l": ["x", "y"]}),
+                json!({"l": ["y", "x"]}),
+                None,
+                ArrayStrategy::Merge
+            ),
+            vec!["l"]
+        );
+    }
+
+    #[test]
+    fn merge_conflict_path_is_nested_and_dotted() {
+        assert_eq!(
+            conflict_paths(
+                json!({"a": {"b": {"tags": ["x", "y"]}}}),
+                json!({"a": {"b": {"tags": ["y", "x"]}}}),
+                None,
+                ArrayStrategy::Merge
+            ),
+            vec!["a.b.tags"]
+        );
+    }
+
+    #[test]
+    fn merge_clean_reorder_is_not_a_conflict() {
+        // Only DESIRED moves an element; TARGET agrees with BASE -> no contradiction.
+        assert!(conflict_paths(
+            json!({"l": ["a", "b", "c"]}),
+            json!({"l": ["c", "a", "b"]}),
+            Some(json!({"l": ["a", "b", "c"]})),
+            ArrayStrategy::Merge
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn non_merge_strategies_never_conflict() {
+        // The same contradictory input under `replace` is not a conflict — only
+        // `merge` reconciles element order, so only it can conflict.
+        assert!(conflict_paths(
+            json!({"l": ["x", "y"]}),
+            json!({"l": ["y", "x"]}),
+            None,
+            ArrayStrategy::Replace
+        )
+        .is_empty());
     }
 
     // ----- helper-level unit tests -----

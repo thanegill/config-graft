@@ -31,7 +31,10 @@ config-graft config.toml desired.toml                       # TOML, keeping comm
 By default (`--array-strategy merge`) two arrays are reconciled three-way against
 BASE, move-aware: keep what either side has, prune a BASE element DESIRED dropped,
 respect a BASE element the user deleted from TARGET, and preserve a reordering
-made on either side. The other strategies are `replace` (**atomic** — DESIRED's
+made on either side. If TARGET and DESIRED reorder the same elements
+*contradictorily*, that's a conflict: it's still resolved deterministically
+(TARGET order preferred), but config-graft prints a warning to stderr naming the
+array and the conflicting elements (the exit code is unchanged). The other strategies are `replace` (**atomic** — DESIRED's
 list wins wholesale; the right choice when you own the whole list, or when its
 elements are structurally anonymous objects `merge` can't match by value),
 `concat` (append, keeping order and duplicates), and `set` (two-way union,

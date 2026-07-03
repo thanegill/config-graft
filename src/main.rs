@@ -148,7 +148,20 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
         prune: !cli.no_prune,
         arrays: cli.array_strategy,
     };
-    let mut result = reconcile(&target, &desired, base.as_ref(), &opts);
+    let (mut result, conflicts) = reconcile(&target, &desired, base.as_ref(), &opts);
+    // A `merge` array where TARGET and DESIRED reorder the same elements
+    // contradictorily is resolved deterministically (TARGET order preferred), but
+    // we warn so the reorder isn't applied silently. Diagnostics only — the exit
+    // code is unaffected.
+    for c in &conflicts {
+        let elements: Vec<String> = c.elements.iter().map(compact).collect();
+        eprintln!(
+            "config-graft: warning: array `{}` had a contradictory reorder of [{}] \
+             between TARGET and DESIRED; resolved deterministically (TARGET order preferred)",
+            c.path,
+            elements.join(", ")
+        );
+    }
     if cli.sort_keys {
         result = sort_keys(&result);
     }
