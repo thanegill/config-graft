@@ -7,30 +7,32 @@
 //! every element of both sides is an object carrying it — by that key, deep-merging
 //! the matched records.
 
-use super::{reconcile, ArrayStrategy, NodeList, Options};
+use super::{reconcile, ArrayStrategy, Conflict, KeyPath, NodeList, Options};
 use crate::value::{Leaf, Node};
 use std::collections::HashSet;
 
 /// Combine a TARGET array with a DESIRED array per `opts.arrays`, returning the
-/// new element list and, when a `merge` hit a *conflict*, the elements reordered
-/// contradictorily (`Some`) or `None`. `base` is the merge ancestor at this path
-/// (used only by `Merge`); only `Merge` can conflict. `parent_key` is the object
-/// key holding this array — used to resolve per-key merge keys.
+/// new element list and any `merge` [`Conflict`]s (each with a path *relative to*
+/// this array — empty for a cross-over reorder of the array itself, a
+/// `[field=value]` element selector for a conflict nested inside a keyed record).
+/// `base` is the merge ancestor at this path (used only by `Merge`); only `Merge`
+/// can conflict. `parent_key` is the object key holding this array — used to
+/// resolve per-key merge keys.
 pub(super) fn combine<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: Option<&Node<L>>,
     opts: &Options,
     parent_key: Option<&str>,
-) -> (NodeList<L>, Option<NodeList<L>>) {
+) -> (NodeList<L>, Vec<Conflict<L>>) {
     match opts.arrays {
         // Atomic: DESIRED's array wins wholesale.
-        ArrayStrategy::Replace => (desired.to_vec(), None),
+        ArrayStrategy::Replace => (desired.to_vec(), Vec::new()),
         // Append DESIRED onto TARGET, keeping order and duplicates.
         ArrayStrategy::Concat => {
             let mut out = target.to_vec();
             out.extend(desired.iter().cloned());
-            (out, None)
+            (out, Vec::new())
         }
         // Union ignoring order: keep TARGET's elements, append any DESIRED
         // element not already present (dedup by value).
@@ -41,7 +43,7 @@ pub(super) fn combine<L: Leaf>(
                     out.push(e.clone());
                 }
             }
-            (out, None)
+            (out, Vec::new())
         }
         // Three-way, move-aware merge against BASE — the only strategy that can
         // conflict. BASE elements only matter when BASE is itself an array here;
@@ -68,15 +70,16 @@ pub(super) fn combine<L: Leaf>(
 /// when `keys` names candidate fields and every element of both sides is an object
 /// carrying one, by that key field (a keyed record). Matched keyed records are
 /// three-way *merged* (fields reconciled); value-matched elements are taken as-is.
-/// Returns the ordered survivors and, on a contradictory cross-over cycle, the
-/// elements involved.
+/// Returns the ordered survivors and any [`Conflict`]s (a contradictory cross-over
+/// cycle at this array, plus, in keyed mode, conflicts nested inside a merged
+/// record).
 fn ordered_merge<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
     opts: &Options,
     keys: &[String],
-) -> (NodeList<L>, Option<NodeList<L>>) {
+) -> (NodeList<L>, Vec<Conflict<L>>) {
     if !keys.is_empty() && all_keyed(target, keys) && all_keyed(desired, keys) {
         keyed_merge(target, desired, base, opts, keys)
     } else {
@@ -85,12 +88,13 @@ fn ordered_merge<L: Leaf>(
 }
 
 /// Value-identity merge: survivors are the membership set (by value); each is
-/// emitted as-is.
+/// emitted as-is. Elements are whole values (no recursion), so the only possible
+/// conflict is a cross-over reorder of the array itself.
 fn value_merge<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
-) -> (NodeList<L>, Option<NodeList<L>>) {
+) -> (NodeList<L>, Vec<Conflict<L>>) {
     let verts = membership_merge(target, desired, base);
     let id_of = |e: &Node<L>| verts.iter().position(|v| v == e);
     assemble(verts.len(), id_of, &verts, target, desired, base)
@@ -99,15 +103,16 @@ fn value_merge<L: Leaf>(
 /// Key-identity merge: elements are matched by the first present `keys` field.
 /// Survivors are the membership set of *keys*; each survivor's value is the
 /// three-way merge of the matched objects (or the lone side's object when present
-/// on only one branch). Nested conflicts from those merges are not surfaced —
-/// arrays aren't addressable in `KeyPath` (see the module note).
+/// on only one branch). A conflict *inside* a merged record is surfaced too, with
+/// a `[field=value]` element selector prepended to its path so it locates down to
+/// the record (e.g. `[name="web"].tags`).
 fn keyed_merge<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
     opts: &Options,
     keys: &[String],
-) -> (NodeList<L>, Option<NodeList<L>>) {
+) -> (NodeList<L>, Vec<Conflict<L>>) {
     let key = |e: &Node<L>| identity(e, keys);
     let has = |seq: &[Node<L>], k: &Ident<L>| seq.iter().any(|e| key(e).as_ref() == Some(k));
 
@@ -128,26 +133,63 @@ fn keyed_merge<L: Leaf>(
         }
     }
 
-    // Merged value per survivor key.
+    // Merged value per survivor key. When a survivor is present on both sides its
+    // fields are reconciled recursively; any conflict from that merge is kept,
+    // tagged with the record's `[field=value]` selector so it locates inside the
+    // array.
     let find =
         |seq: &[Node<L>], k: &Ident<L>| seq.iter().find(|e| key(e).as_ref() == Some(k)).cloned();
-    let merged: NodeList<L> = survivors
-        .iter()
-        .map(|k| match (find(target, k), find(desired, k)) {
-            (Some(t), Some(d)) => reconcile(&t, &d, find(base, k).as_ref(), opts).0,
+    let mut merged: NodeList<L> = Vec::with_capacity(survivors.len());
+    let mut nested: Vec<Conflict<L>> = Vec::new();
+    for k in &survivors {
+        let value = match (find(target, k), find(desired, k)) {
+            (Some(t), Some(d)) => {
+                let (m, conflicts) = reconcile(&t, &d, find(base, k).as_ref(), opts);
+                let (field, key_value) = k;
+                let selector = format!("[{field}={}]", render_value(key_value));
+                for mut c in conflicts {
+                    c.path.prepend(selector.clone());
+                    nested.push(c);
+                }
+                m
+            }
             (Some(t), None) => t,
             (None, Some(d)) => d,
             (None, None) => unreachable!("a survivor key comes from target or desired"),
-        })
-        .collect();
+        };
+        merged.push(value);
+    }
 
     let id_of = |e: &Node<L>| key(e).and_then(|k| survivors.iter().position(|s| *s == k));
-    assemble(survivors.len(), id_of, &merged, target, desired, base)
+    let (out, mut conflicts) = assemble(survivors.len(), id_of, &merged, target, desired, base);
+    conflicts.append(&mut nested);
+    (out, conflicts)
+}
+
+/// Render a keyed record's identity value for an element selector. Key fields are
+/// scalars in practice (`Leaf::render`, which quotes strings); the composite arms
+/// are a deterministic fallback for the degenerate non-scalar-key case.
+fn render_value<L: Leaf>(v: &Node<L>) -> String {
+    match v {
+        Node::Leaf(l) => l.render(),
+        Node::Array(a) => {
+            let inner: Vec<String> = a.iter().map(render_value).collect();
+            format!("[{}]", inner.join(","))
+        }
+        Node::Map(m) => {
+            let inner: Vec<String> = m
+                .iter()
+                .map(|(k, val)| format!("{k}={}", render_value(val)))
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+    }
 }
 
 /// Shared GTS assembly: given the survivor count `n`, a map from an input element
 /// to its survivor index (`id_of`), and the output value per survivor (`merged`),
-/// order the survivors move-aware and report any cross-over cycle.
+/// order the survivors move-aware and report any cross-over cycle as a single
+/// [`Conflict`] at this array (empty path — callers prepend the array's own key).
 fn assemble<L: Leaf>(
     n: usize,
     id_of: impl Fn(&Node<L>) -> Option<usize>,
@@ -155,9 +197,9 @@ fn assemble<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
-) -> (NodeList<L>, Option<NodeList<L>>) {
+) -> (NodeList<L>, Vec<Conflict<L>>) {
     if n <= 1 {
-        return (merged.to_vec(), None);
+        return (merged.to_vec(), Vec::new());
     }
     // Restrict each input to the survivors, in its own order (deduped), as an
     // index sequence.
@@ -175,12 +217,15 @@ fn assemble<L: Leaf>(
     let (order, conflict_ids) =
         gts_order(n, &restrict(target), &restrict(desired), &restrict(base));
     let out: NodeList<L> = order.iter().map(|&i| merged[i].clone()).collect();
-    let conflict = if conflict_ids.is_empty() {
-        None
+    let conflicts = if conflict_ids.is_empty() {
+        Vec::new()
     } else {
-        Some(conflict_ids.iter().map(|&i| merged[i].clone()).collect())
+        vec![Conflict {
+            path: KeyPath::new(),
+            elements: conflict_ids.iter().map(|&i| merged[i].clone()).collect(),
+        }]
     };
-    (out, conflict)
+    (out, conflicts)
 }
 
 /// The index-only generalized topological sort over `n` vertices, given the three

@@ -34,7 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an app-added field survives, with no duplicate entry. `FIELD` (or `f1,f2`
   candidates) applies to any object-array; `KEY=FIELD` scopes it to arrays under
   object key `KEY`. Falls back to value matching when a key doesn't resolve or not
-  every element carries it; arrays of anonymous objects stay atomic (`replace`).
+  every element carries it; arrays of anonymous objects stay atomic (`replace`). A
+  contradictory reorder *inside* a matched record (one of its nested arrays) is
+  surfaced too, its warning locating it with a `[field=value]` element selector on
+  the array key — `servers[name="web"].tags` (`servers[name="web"]:tags` for plist).
 
 ### Changed
 
