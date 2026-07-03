@@ -342,27 +342,10 @@ fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<
     Ok(())
 }
 
-/// Atomic in-place write that *streams* the file at `source` into a temp file in
-/// the destination dir (never buffering it in memory), fsyncs, sets `mode`, then
-/// renames over `path`. The directory writer uses this so a managed file's bytes
-/// never live in the value tree — they go straight from disk to disk.
-pub fn write_atomic_from(path: &Path, source: &Path, mode: u32) -> std::io::Result<()> {
-    let dir = dest_dir(path);
-    fs::create_dir_all(&dir)?;
-
-    let mut src = fs::File::open(source)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
-    std::io::copy(&mut src, tmp.as_file_mut())?;
-    tmp.as_file().sync_all()?;
-    tmp.as_file()
-        .set_permissions(fs::Permissions::from_mode(mode))?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
-}
-
 /// The directory an atomic write stages its temp file in: the target's parent, or
-/// the current directory for a bare filename.
-fn dest_dir(path: &Path) -> PathBuf {
+/// the current directory for a bare filename. Shared with the directory backend's
+/// streaming writer.
+pub fn dest_dir(path: &Path) -> PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),

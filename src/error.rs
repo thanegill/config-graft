@@ -61,6 +61,9 @@ pub enum Error {
     /// `--stdout` was passed with `--format directory` (a tree has no single
     /// byte stream to emit).
     StdoutUnsupportedForDirectory,
+    /// A directory-mode file attribute (mode/uid/gid) held a value that could not
+    /// be parsed back to a number.
+    InvalidAttribute(String),
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
@@ -105,6 +108,7 @@ impl fmt::Display for Error {
             Error::StdoutUnsupportedForDirectory => {
                 f.write_str("--stdout is not supported with --format directory")
             }
+            Error::InvalidAttribute(key) => write!(f, "invalid {key} attribute value"),
         }
     }
 }

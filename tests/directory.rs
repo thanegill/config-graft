@@ -359,14 +359,16 @@ fn diff_reports_added_removed_changed_with_slash_paths() {
         desired.to_str().unwrap(),
         base.to_str().unwrap(),
     ]);
+    // The owner (uid:gid) suffix varies by machine, so match the stable prefix.
     let diff = String::from_utf8(out.stdout).unwrap();
-    assert!(diff.contains("- gone.txt = file(1 bytes, 0644)"), "{diff}");
+    assert!(diff.contains("- gone.txt = file(1 bytes, 0644,"), "{diff}");
     assert!(
-        diff.contains("~ change.txt: file(1 bytes, 0644) => file(2 bytes, 0644)"),
+        diff.contains("~ change.txt: file(1 bytes, 0644,")
+            && diff.contains("=> file(2 bytes, 0644,"),
         "{diff}"
     );
     assert!(
-        diff.contains("+ sub/new.txt = file(1 bytes, 0644)"),
+        diff.contains("+ sub/new.txt = file(1 bytes, 0644,"),
         "{diff}"
     );
 }

@@ -16,9 +16,10 @@
 //! multi-file apply is best-effort, not one transaction (a partial apply is
 //! completed by a re-run, which is idempotent).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{fchown, symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -31,16 +32,22 @@ use crate::value::{Leaf, Node};
 /// regular file or a symlink. Directories are `Node::Map`, never a leaf.
 ///
 /// A file is stored as a **content handle**, not its bytes. The engine only needs
-/// a file's *identity* — to compare it for pruning and change detection — plus its
-/// length and mode for `--diff`; it never needs the bytes themselves, which are
-/// streamed straight from `source` to the destination when a file is actually
-/// written. So the whole tree costs O(number of files), not O(total bytes).
+/// a file's *identity* — to compare it for pruning and change detection — plus a
+/// summary for `--diff`; it never needs the bytes themselves, which are streamed
+/// straight from `source` to the destination when a file is actually written. So
+/// the whole tree costs O(number of files), not O(total bytes).
 ///
-/// Equality is `(len, mode, digest)` and deliberately ignores `source`: a file is
-/// equal to any file with the same contents and mode wherever it lives, which is
-/// exactly what makes re-applying an unchanged tree a no-op. A mode-only change is
-/// still a changed leaf. Symlinks carry no mode (symlink permission bits are not
-/// portably settable and are semantically the target's).
+/// File metadata lives in a generic, filesystem-agnostic [`BTreeMap`] of
+/// `attribute name -> raw value` rather than a fixed set of fields, so new
+/// attribute kinds can be tracked without changing the type. Well-known keys:
+/// `mode` (octal permission bits), `uid`, `gid` (decimal), and `xattr:<name>`
+/// (an extended attribute's raw value). The map is ordered, so equality, diffing,
+/// and rendering are deterministic.
+///
+/// Equality is `(len, digest, attrs)` and deliberately ignores `source`: a file
+/// is equal to any file with the same contents and attributes wherever it lives,
+/// which is exactly what makes re-applying an unchanged tree a no-op. Symlinks
+/// carry no attributes (symlink metadata is niche and not portably settable).
 #[derive(Clone, Debug)]
 pub enum DirLeaf {
     File {
@@ -48,9 +55,10 @@ pub enum DirLeaf {
         /// part of identity.
         source: PathBuf,
         len: u64,
-        mode: u32,
         /// SHA-256 of the contents, computed by streaming at read time.
         digest: [u8; 32],
+        /// Filesystem-agnostic metadata (see the type docs for well-known keys).
+        attrs: BTreeMap<String, Vec<u8>>,
     },
     Symlink {
         target: PathBuf,
@@ -63,17 +71,17 @@ impl PartialEq for DirLeaf {
             (
                 DirLeaf::File {
                     len: l1,
-                    mode: m1,
                     digest: d1,
+                    attrs: a1,
                     ..
                 },
                 DirLeaf::File {
                     len: l2,
-                    mode: m2,
                     digest: d2,
+                    attrs: a2,
                     ..
                 },
-            ) => l1 == l2 && m1 == m2 && d1 == d2,
+            ) => l1 == l2 && d1 == d2 && a1 == a2,
             (DirLeaf::Symlink { target: t1 }, DirLeaf::Symlink { target: t2 }) => t1 == t2,
             _ => false,
         }
@@ -82,10 +90,31 @@ impl PartialEq for DirLeaf {
 
 impl Leaf for DirLeaf {
     /// Compact `--diff` rendering. Never dumps contents (files may be huge or
-    /// binary): a file shows its length and mode, a symlink its target.
+    /// binary): a file shows its length, mode, owner, and extended-attribute
+    /// count; a symlink its target.
     fn render(&self) -> String {
         match self {
-            DirLeaf::File { len, mode, .. } => format!("file({len} bytes, {:04o})", mode & 0o7777),
+            DirLeaf::File { len, attrs, .. } => {
+                let mode = attrs
+                    .get("mode")
+                    .and_then(|b| std::str::from_utf8(b).ok())
+                    .and_then(|s| u32::from_str_radix(s, 8).ok())
+                    .map(|m| format!("{:04o}", m & 0o7777))
+                    .unwrap_or_else(|| "?".into());
+                let num = |k: &str| {
+                    attrs
+                        .get(k)
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_else(|| "?".into())
+                };
+                let xattrs = attrs.keys().filter(|k| k.starts_with("xattr:")).count();
+                let mut out = format!("file({len} bytes, {mode}, {}:{}", num("uid"), num("gid"));
+                if xattrs > 0 {
+                    out.push_str(&format!(", +{xattrs} xattr"));
+                }
+                out.push(')');
+                out
+            }
             DirLeaf::Symlink { target } => format!("-> {}", target.display()),
         }
     }
@@ -155,16 +184,43 @@ fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
     } else if ft.is_dir() {
         read_dir(path)
     } else if ft.is_file() {
-        let mode = meta.permissions().mode() & 0o7777;
         Ok(Node::Leaf(DirLeaf::File {
             source: path.to_path_buf(),
             len: meta.len(),
-            mode,
             digest: hash_file(path)?,
+            attrs: read_attrs(path, &meta),
         }))
     } else {
         Err(Error::UnsupportedFileType(path.to_path_buf()))
     }
+}
+
+/// Collect a file's tracked metadata into the generic attribute map: permission
+/// mode, owner (uid/gid), and every extended attribute the OS reports.
+///
+/// Reading extended attributes is best-effort and **filesystem-agnostic**: a
+/// filesystem that doesn't support them (so `listxattr` fails) simply contributes
+/// no `xattr:*` entries. (Applying them, by contrast, is strict — see
+/// [`apply_attrs`].)
+fn read_attrs(path: &Path, meta: &fs::Metadata) -> BTreeMap<String, Vec<u8>> {
+    let mut attrs = BTreeMap::new();
+    attrs.insert(
+        "mode".to_string(),
+        format!("{:o}", meta.permissions().mode() & 0o7777).into_bytes(),
+    );
+    attrs.insert("uid".to_string(), meta.uid().to_string().into_bytes());
+    attrs.insert("gid".to_string(), meta.gid().to_string().into_bytes());
+    if let Ok(names) = xattr::list(path) {
+        for name in names {
+            // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
+            if let Some(name) = name.to_str() {
+                if let Ok(Some(value)) = xattr::get(path, name) {
+                    attrs.insert(format!("xattr:{name}"), value);
+                }
+            }
+        }
+    }
+    attrs
 }
 
 /// Stream `path` through SHA-256, returning its content digest without ever
@@ -284,10 +340,68 @@ fn apply_node(
 /// file/symlink is there.
 fn write_leaf(path: &Path, leaf: &DirLeaf) -> Result<(), Error> {
     match leaf {
-        DirLeaf::File { source, mode, .. } => {
-            crate::write_atomic_from(path, source, *mode).map_err(|e| write_err(path, e))
-        }
+        DirLeaf::File { source, attrs, .. } => write_file(path, source, attrs),
         DirLeaf::Symlink { target } => atomic_symlink(path, target).map_err(|e| write_err(path, e)),
+    }
+}
+
+/// Atomically write a file at `dest`, streaming its bytes from `source` (never
+/// buffering them) and applying `attrs` to the temp file **before** the rename,
+/// so a failure to set any attribute leaves nothing on disk.
+fn write_file(dest: &Path, source: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<(), Error> {
+    let dir = crate::dest_dir(dest);
+    fs::create_dir_all(&dir).map_err(|e| write_err(&dir, e))?;
+    let mut src = fs::File::open(source).map_err(|e| read_err(source, e))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| write_err(dest, e))?;
+    io::copy(&mut src, tmp.as_file_mut()).map_err(|e| write_err(dest, e))?;
+    tmp.as_file().sync_all().map_err(|e| write_err(dest, e))?;
+    apply_attrs(&tmp, attrs)?;
+    tmp.persist(dest).map_err(|e| write_err(dest, e.error))?;
+    Ok(())
+}
+
+/// Apply `attrs` to the freshly written temp file. Extended attributes first,
+/// then ownership, then mode last (chown(2) clears the setuid/setgid bits, so
+/// mode must follow it). Any failure is propagated so the caller refuses rather
+/// than landing a half-attributed file.
+fn apply_attrs(
+    tmp: &tempfile::NamedTempFile,
+    attrs: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), Error> {
+    let path = tmp.path();
+    for (key, value) in attrs {
+        if let Some(name) = key.strip_prefix("xattr:") {
+            xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
+        }
+    }
+    let uid = attr_num(attrs, "uid", 10)?;
+    let gid = attr_num(attrs, "gid", 10)?;
+    if uid.is_some() || gid.is_some() {
+        fchown(tmp.as_file(), uid, gid).map_err(|e| write_err(path, e))?;
+    }
+    if let Some(mode) = attr_num(attrs, "mode", 8)? {
+        tmp.as_file()
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(|e| write_err(path, e))?;
+    }
+    Ok(())
+}
+
+/// Parse a numeric attribute (`mode` in octal, `uid`/`gid` in decimal) from the
+/// map, if present. These are our own canonical encodings, so a parse failure is
+/// a corrupt/handmade leaf and surfaces as [`Error::InvalidAttribute`].
+fn attr_num(
+    attrs: &BTreeMap<String, Vec<u8>>,
+    key: &str,
+    radix: u32,
+) -> Result<Option<u32>, Error> {
+    match attrs.get(key) {
+        None => Ok(None),
+        Some(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|s| u32::from_str_radix(s, radix).ok())
+            .map(Some)
+            .ok_or_else(|| Error::InvalidAttribute(key.to_string())),
     }
 }
 
@@ -295,10 +409,7 @@ fn write_leaf(path: &Path, leaf: &DirLeaf) -> Result<(), Error> {
 /// directory, then rename over `path` (rename atomically replaces a file/symlink,
 /// but not a non-empty directory — callers handle that type change separately).
 fn atomic_symlink(path: &Path, target: &Path) -> io::Result<()> {
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
+    let dir = crate::dest_dir(path);
     fs::create_dir_all(&dir)?;
     let base = path
         .file_name()
@@ -362,10 +473,18 @@ fn remove_node(path: &Path, node: &Node<DirLeaf>) -> Result<bool, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::os::unix::fs::MetadataExt;
 
+    fn attrs(pairs: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
+            .collect()
+    }
+
     /// A synthetic file leaf (no file on disk) for the pure render/equality tests.
-    fn leaf(source: &str, contents: &str, mode: u32) -> DirLeaf {
+    fn leaf(source: &str, contents: &str, attrs: BTreeMap<String, Vec<u8>>) -> DirLeaf {
         let mut hasher = Sha256::new();
         hasher.update(contents.as_bytes());
         let mut digest = [0u8; 32];
@@ -373,8 +492,8 @@ mod tests {
         DirLeaf::File {
             source: PathBuf::from(source),
             len: contents.len() as u64,
-            mode,
             digest,
+            attrs,
         }
     }
 
@@ -392,9 +511,24 @@ mod tests {
 
     #[test]
     fn render_never_dumps_contents() {
+        let owner = || attrs(&[("mode", "755"), ("uid", "501"), ("gid", "20")]);
         assert_eq!(
-            leaf("/x", "hello world", 0o755).render(),
-            "file(11 bytes, 0755)"
+            leaf("/x", "hello world", owner()).render(),
+            "file(11 bytes, 0755, 501:20)"
+        );
+        assert_eq!(
+            leaf(
+                "/x",
+                "hi",
+                attrs(&[
+                    ("mode", "644"),
+                    ("uid", "0"),
+                    ("gid", "0"),
+                    ("xattr:user.k", "v")
+                ]),
+            )
+            .render(),
+            "file(2 bytes, 0644, 0:0, +1 xattr)"
         );
         assert_eq!(
             DirLeaf::Symlink {
@@ -406,13 +540,35 @@ mod tests {
     }
 
     #[test]
-    fn equality_is_content_and_mode_but_not_path() {
-        // Same contents + mode at different paths are equal (keeps re-apply a no-op).
-        assert_eq!(leaf("/a", "x", 0o644), leaf("/b", "x", 0o644));
+    fn equality_is_content_and_attrs_but_not_path() {
+        let base = || attrs(&[("mode", "644"), ("uid", "501"), ("gid", "20")]);
+        // Same contents + attributes at different paths are equal (re-apply no-op).
+        assert_eq!(leaf("/a", "x", base()), leaf("/b", "x", base()));
         // Mode-only difference is a change.
-        assert_ne!(leaf("/a", "x", 0o644), leaf("/a", "x", 0o755));
+        assert_ne!(
+            leaf("/a", "x", base()),
+            leaf(
+                "/a",
+                "x",
+                attrs(&[("mode", "755"), ("uid", "501"), ("gid", "20")])
+            )
+        );
         // Content difference (same length) is a change.
-        assert_ne!(leaf("/a", "x", 0o644), leaf("/a", "y", 0o644));
+        assert_ne!(leaf("/a", "x", base()), leaf("/a", "y", base()));
+        // An extra extended attribute is a change.
+        assert_ne!(
+            leaf("/a", "x", base()),
+            leaf(
+                "/a",
+                "x",
+                attrs(&[
+                    ("mode", "644"),
+                    ("uid", "501"),
+                    ("gid", "20"),
+                    ("xattr:user.k", "v")
+                ]),
+            )
+        );
     }
 
     #[test]
@@ -506,5 +662,31 @@ mod tests {
 
         assert!(root.join("p").is_dir());
         assert_eq!(fs::read_to_string(root.join("p/inner.txt")).unwrap(), "x");
+    }
+
+    #[test]
+    fn reconciles_extended_attributes() {
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("f.txt");
+        fs::write(&f, "hi").unwrap();
+        // Skip gracefully on a filesystem that doesn't support extended attributes.
+        if xattr::set(&f, "user.cg_test", b"v1").is_err() {
+            eprintln!("skipping reconciles_extended_attributes: xattrs unsupported here");
+            return;
+        }
+        let want = read_tree(src.path()).unwrap().unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let root = dst.path().join("out");
+        apply_tree(&root, None, &want).unwrap();
+        assert_eq!(
+            xattr::get(root.join("f.txt"), "user.cg_test")
+                .unwrap()
+                .as_deref(),
+            Some(&b"v1"[..])
+        );
+        // Idempotent: the reapplied tree carries the same attribute, so no rewrite.
+        let cur = read_tree(&root).unwrap().unwrap();
+        assert!(!apply_tree(&root, Some(&cur), &want).unwrap());
     }
 }

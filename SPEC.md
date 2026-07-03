@@ -143,12 +143,30 @@ three-way merge, one filesystem level up. It is opt-in (`--format directory` is
 never inferred). The tree maps onto the same value model as every other format:
 
 - a **directory** is the map/object shape (the container that merges);
-- a **regular file** is an atomic leaf carrying its whole contents **and unix
-  mode** — config-graft never merges *within* a file, and a mode-only change
-  counts as a change;
+- a **regular file** is an atomic leaf carrying its whole contents **and its
+  metadata** (see below) — config-graft never merges *within* a file, and a
+  metadata-only change counts as a change;
 - a **symlink** is an atomic leaf carrying its target; it is **never followed**
   (a symlink to a directory is a leaf, not a directory), and dangling links are
-  fine.
+  fine. Symlinks carry no metadata.
+
+A file's contents are held as a **content handle** (length + SHA-256 digest +
+source path), not loaded into memory — so the tree costs O(number of files), and
+bytes stream straight from the source to the destination on write. A file's
+**metadata** is a generic, filesystem-agnostic map of `name → value`, so new
+attribute kinds need no type change. Tracked today: **mode** (permission bits,
+incl. setuid/sticky), **owner** (`uid`/`gid`), and every **extended attribute**
+the OS reports. All of it is part of the file's identity: two files are equal
+only if content *and* every tracked attribute match.
+
+Reading extended attributes is best-effort — a filesystem that doesn't support
+them contributes none. **Applying** metadata is strict: attributes are set on the
+temp file *before* the atomic rename, and any failure (e.g. no privilege to
+`chown`, or a filesystem that can't store an xattr) **refuses the run** (exit 1,
+nothing landed) rather than leaving a partially-attributed file. Because owner is
+tracked, a DESIRED tree owned by a different user (e.g. a Nix store path owned by
+root) will try to `chown` and therefore needs privilege to apply — run as that
+owner, or keep DESIRED's ownership matching the target.
 
 Reads **do not follow** symlinks inside the tree and **refuse (exit 1, nothing
 written)** on a FIFO/socket/device or a non-UTF-8 filename. A TARGET that exists
@@ -158,11 +176,11 @@ rule — we won't silently treat a plain file as an empty tree and delete it).
 Writes are **minimal and in place** (like YAML/TOML, not like JSON's canonical
 rewrite): config-graft diffs the reconciled tree against the current one and only
 creates/updates/deletes what changed, so **app-owned files keep their inode and
-mtime**. Each individual file write is atomic (temp-in-same-dir + `fsync` +
-`rename`); see §8 and §10 for the cross-file-atomicity trade-off. `--stdout` is
-unsupported (a tree has no single byte stream); `--indent` / `--plist-binary`
-error as with any non-matching format; `--array-strategy` / `--sort-keys` are
-inert (a tree has no arrays, and on-disk order isn't stored).
+mtime**. Each individual file write is atomic (temp-in-same-dir + `fsync` + set
+attributes + `rename`); see §8 and §10 for the cross-file-atomicity trade-off.
+`--stdout` is unsupported (a tree has no single byte stream); `--indent` /
+`--plist-binary` error as with any non-matching format; `--array-strategy` /
+`--sort-keys` are inert (a tree has no arrays, and on-disk order isn't stored).
 
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
