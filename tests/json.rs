@@ -301,6 +301,42 @@ fn merge_key_scoped_to_object_key() {
 }
 
 #[test]
+fn merge_key_scoped_to_a_dotted_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // `items` appears at the root and under `a`. `a.items=id` keys only the nested
+    // one (its record merges in place); the root `items` stays value-matched, so
+    // the changed record becomes delete+insert (two entries).
+    fs::write(
+        &target,
+        r#"{"items":[{"id":1,"x":"old"}],"a":{"items":[{"id":1,"x":"old"}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &desired,
+        r#"{"items":[{"id":1,"x":"new"}],"a":{"items":[{"id":1,"x":"new"}]}}"#,
+    )
+    .unwrap();
+
+    let out = run(&[
+        "--merge-key",
+        "a.items=id",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "items":[{"id":1,"x":"old"},{"id":1,"x":"new"}],
+            "a":{"items":[{"id":1,"x":"new"}]}
+        })
+    );
+}
+
+#[test]
 fn array_strategy_concat_appends() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");

@@ -98,24 +98,27 @@ pub enum ArrayStrategy {
 /// strategy can match a keyed record across TARGET/DESIRED/BASE (and deep-merge
 /// its fields) instead of matching by whole-value equality.
 ///
-/// `global` candidates apply to any keyable array not covered by a `scoped` rule
-/// (scoped by the immediate object key that holds the array). Empty everywhere =
-/// match by whole value (the default behavior).
+/// `global` candidates apply to any keyable array not covered by a `scoped` rule.
+/// A scoped rule is keyed by the array's **full path** from the reconcile root
+/// (matched by an exact object-key path). Empty everywhere = match by whole value
+/// (the default behavior).
 #[derive(Default)]
 pub struct MergeKeys {
     /// Candidate key fields applied to any keyable object-array.
     pub global: Vec<String>,
-    /// Per-object-key overrides: `key` (the object key holding the array) ->
-    /// candidate fields.
-    pub scoped: HashMap<String, Vec<String>>,
+    /// Per-path overrides: the array's full object-key path (from the reconcile
+    /// root) -> candidate fields. Arrays are atomic in this path model, so a path
+    /// addresses within one array-free subtree; a matched keyed record is its own
+    /// subtree, so a scope anchors at the document root or the nearest such record.
+    pub scoped: HashMap<Vec<String>, Vec<String>>,
 }
 
 impl MergeKeys {
-    /// The candidate key fields for an array held under `parent_key`: a scoped
-    /// rule if one matches that key, else the `global` candidates.
-    pub(crate) fn candidates(&self, parent_key: Option<&str>) -> &[String] {
-        parent_key
-            .and_then(|k| self.scoped.get(k))
+    /// The candidate key fields for an array at `path` (its full path from the
+    /// reconcile root): the scoped rule whose path matches exactly, else `global`.
+    pub(crate) fn candidates(&self, path: &[String]) -> &[String] {
+        self.scoped
+            .get(path)
             .map_or(self.global.as_slice(), Vec::as_slice)
     }
 }
@@ -181,7 +184,7 @@ pub fn reconcile<L: Leaf>(
     // alongside so the three-way `Merge` array strategy can see it. Array
     // conflicts bubble up as `deep_merge`'s return, gaining a path segment at each
     // level, so a location is built only for the (rare) conflicts.
-    let conflicts = deep_merge(&mut result, desired, base, opts, None);
+    let conflicts = deep_merge(&mut result, desired, base, opts, &mut KeyPath::new());
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
@@ -259,14 +262,15 @@ fn del_path<L: Leaf>(v: &mut Node<L>, path: &[String]) {
 /// `target`. Callers prepend their own key as the conflicts bubble up, so a
 /// location is built only for the (rare) conflicts, never for clean subtrees.
 ///
-/// `parent_key` is the object key this node is the value of (the Map arm passes
-/// it down one level); the array engine uses it to resolve per-key merge keys.
+/// `path` is this node's full object-key path from the reconcile root (the Map arm
+/// pushes each key as it descends, and pops after); the array engine uses it to
+/// resolve per-path merge keys.
 pub fn deep_merge<L: Leaf>(
     target: &mut Node<L>,
     desired: &Node<L>,
     base: Option<&Node<L>>,
     opts: &Options,
-    parent_key: Option<&str>,
+    path: &mut KeyPath,
 ) -> Vec<Conflict<L>> {
     match desired {
         Node::Map(d) => {
@@ -275,7 +279,10 @@ pub fn deep_merge<L: Leaf>(
                 for (k, dv) in d {
                     let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
                     if let Some(tv) = t.get_mut(k) {
-                        for mut c in deep_merge(tv, dv, bv, opts, Some(k)) {
+                        path.push(k.clone());
+                        let sub = deep_merge(tv, dv, bv, opts, path);
+                        path.pop();
+                        for mut c in sub {
                             c.path.prepend(k.clone());
                             conflicts.push(c);
                         }
@@ -288,7 +295,7 @@ pub fn deep_merge<L: Leaf>(
         }
         Node::Array(d) => {
             if let Node::Array(t) = target {
-                let (combined, conflicts) = arrays::combine(t, d, base, opts, parent_key);
+                let (combined, conflicts) = arrays::combine(t, d, base, opts, path);
                 *t = combined;
                 // Conflicts arrive with paths relative to this array (empty for a
                 // reorder of the array itself, a `[field=value]` selector + subpath
@@ -480,14 +487,14 @@ mod tests {
     }
 
     #[test]
-    fn keyed_scoped_applies_only_to_its_object_key() {
-        // `servers` scoped to key by `name`; the scope is by the immediate object key.
+    fn keyed_scoped_applies_only_to_its_path() {
+        // The `servers` array (at the document root) is scoped to key by `name`.
         let opts = Options {
             prune: true,
             arrays: ArrayStrategy::Merge,
             merge_keys: MergeKeys {
                 global: Vec::new(),
-                scoped: HashMap::from([("servers".to_string(), vec!["name".to_string()])]),
+                scoped: HashMap::from([(vec!["servers".to_string()], vec!["name".to_string()])]),
             },
         };
         let out = j(&reconcile(
@@ -500,6 +507,38 @@ mod tests {
         assert_eq!(
             out,
             json!({"servers": [{"name": "web", "up": true, "port": 80}]})
+        );
+    }
+
+    #[test]
+    fn scoped_path_disambiguates_same_named_arrays_by_depth() {
+        // `items` at the root and under `a`. Only `a.items` is keyed (by `id`), so
+        // its record merges in place; the root `items` is value-matched, so the
+        // changed record reads as delete+insert (two entries).
+        let opts = Options {
+            prune: true,
+            arrays: ArrayStrategy::Merge,
+            merge_keys: MergeKeys {
+                global: Vec::new(),
+                scoped: HashMap::from([(
+                    vec!["a".to_string(), "items".to_string()],
+                    vec!["id".to_string()],
+                )]),
+            },
+        };
+        let out = j(&reconcile(
+            &n(json!({"items": [{"id": 1, "x": "old"}], "a": {"items": [{"id": 1, "x": "old"}]}})),
+            &n(json!({"items": [{"id": 1, "x": "new"}], "a": {"items": [{"id": 1, "x": "new"}]}})),
+            None,
+            &opts,
+        )
+        .0);
+        assert_eq!(
+            out,
+            json!({
+                "items": [{"id": 1, "x": "old"}, {"id": 1, "x": "new"}],
+                "a": {"items": [{"id": 1, "x": "new"}]}
+            })
         );
     }
 
@@ -1214,6 +1253,30 @@ mod tests {
     }
 
     // ----- helper-level unit tests -----
+
+    #[test]
+    fn candidates_matches_exact_path_else_global() {
+        let mk = MergeKeys {
+            global: vec!["gid".to_string()],
+            scoped: HashMap::from([(
+                vec!["a".to_string(), "items".to_string()],
+                vec!["id".to_string()],
+            )]),
+        };
+        let p = |segs: &[&str]| segs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Exact path -> the scope's fields.
+        assert_eq!(mk.candidates(&p(&["a", "items"])), ["id".to_string()]);
+        // The same leaf name at another depth does NOT match the scope -> global.
+        assert_eq!(mk.candidates(&p(&["items"])), ["gid".to_string()]);
+        assert_eq!(mk.candidates(&p(&["b", "items"])), ["gid".to_string()]);
+    }
+
+    #[test]
+    fn candidates_empty_without_scope_or_global() {
+        assert!(MergeKeys::default()
+            .candidates(&["x".to_string()])
+            .is_empty());
+    }
 
     #[test]
     fn leaf_paths_treats_arrays_as_atomic() {

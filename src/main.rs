@@ -87,16 +87,19 @@ struct Cli {
 
     /// Identify object-array elements by a field so `merge` matches keyed records
     /// (and merges their fields) instead of by whole value. `FIELD` (or
-    /// `f1,f2`) applies to any object-array; `KEY=FIELD` scopes it to arrays under
-    /// object key `KEY`. Repeatable. Example: `--merge-key name --merge-key
-    /// routes=id`.
-    #[arg(long = "merge-key", value_name = "[KEY=]FIELD")]
+    /// `f1,f2`) applies to any object-array; `PATH=FIELD` scopes it to the array at
+    /// `PATH` — its full path from the document root, segments joined by the format
+    /// separator (`.`, or `:` for plist). Repeatable. Example: `--merge-key name
+    /// --merge-key spec.containers=name`.
+    #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
 }
 
 /// Parse `--merge-key` specs into [`MergeKeys`]. Each spec is `FIELD` / `f1,f2`
-/// (global candidates) or `KEY=FIELD` / `KEY=f1,f2` (scoped to object key `KEY`).
-fn parse_merge_keys(specs: &[String]) -> MergeKeys {
+/// (global candidates) or `PATH=FIELD` / `PATH=f1,f2` (scoped to the array at
+/// `PATH`). `PATH` is the array's full path from the document root, its segments
+/// joined by the format separator `sep` (`.` for JSON/YAML/TOML, `:` for plist).
+fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
     let mut mk = MergeKeys::default();
     for spec in specs {
         let (scope, fields) = match spec.split_once('=') {
@@ -112,9 +115,17 @@ fn parse_merge_keys(specs: &[String]) -> MergeKeys {
         if fields.is_empty() {
             continue;
         }
-        match scope {
-            Some(k) if !k.is_empty() => mk.scoped.entry(k.to_string()).or_default().extend(fields),
-            _ => mk.global.extend(fields),
+        let path: Vec<String> = scope
+            .into_iter()
+            .flat_map(|k| k.split(sep))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        if path.is_empty() {
+            mk.global.extend(fields);
+        } else {
+            mk.scoped.entry(path).or_default().extend(fields);
         }
     }
     mk
@@ -183,7 +194,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
     let opts = Options {
         prune: !cli.no_prune,
         arrays: cli.array_strategy,
-        merge_keys: parse_merge_keys(&cli.merge_key),
+        merge_keys: parse_merge_keys(&cli.merge_key, F::PATH_SEP),
     };
     let (mut result, conflicts) = reconcile(&target, &desired, base.as_ref(), &opts);
     // A `merge` array where TARGET and DESIRED reorder the same elements

@@ -37,8 +37,8 @@ made on either side. If TARGET and DESIRED reorder the same elements
 (TARGET order preferred), but config-graft prints a warning to stderr naming the
 array and the conflicting elements (the exit code is unchanged). For **arrays of
 keyed records** (a list of objects like `servers`), pass `--merge-key name` (or
-`--merge-key servers=name` to scope it to that key) so `merge` matches elements by
-that field and reconciles their fields — bump a managed field while keeping an
+`--merge-key servers=name` to scope it to the array at that path) so `merge` matches
+elements by that field and reconciles their fields — bump a managed field while keeping an
 app-added one, instead of duplicating the record. The other strategies are
 `replace` (**atomic** — DESIRED's list wins wholesale; the right choice when you
 own the whole list, or for arrays of objects with no key field),
@@ -78,9 +78,11 @@ entry:
 ```
 
 Give several candidate fields (`--merge-key name,id`, first present wins), or scope
-a key to one list (`--merge-key servers=name`). Keying engages only when a key
-resolves and every element on both sides is an object carrying it; otherwise
-`merge` falls back to whole-value matching.
+a key to the array at a path (`--merge-key servers=name`, or a dotted path like
+`--merge-key spec.containers=name` — segments joined by the format separator, `:`
+for plist — so same-named arrays at different depths take different rules). Keying
+engages only when a key resolves and every element on both sides is an object
+carrying it; otherwise `merge` falls back to whole-value matching.
 
 ## Formats
 

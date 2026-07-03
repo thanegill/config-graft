@@ -16,14 +16,14 @@ use std::collections::HashSet;
 /// this array — empty for a cross-over reorder of the array itself, a
 /// `[field=value]` element selector for a conflict nested inside a keyed record).
 /// `base` is the merge ancestor at this path (used only by `Merge`); only `Merge`
-/// can conflict. `parent_key` is the object key holding this array — used to
-/// resolve per-key merge keys.
+/// can conflict. `path` is this array's full object-key path from the reconcile
+/// root — used to resolve per-path merge keys.
 pub(super) fn combine<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: Option<&Node<L>>,
     opts: &Options,
-    parent_key: Option<&str>,
+    path: &[String],
 ) -> (NodeList<L>, Vec<Conflict<L>>) {
     match opts.arrays {
         // Atomic: DESIRED's array wins wholesale.
@@ -59,7 +59,7 @@ pub(super) fn combine<L: Leaf>(
                 desired,
                 base_arr,
                 opts,
-                opts.merge_keys.candidates(parent_key),
+                opts.merge_keys.candidates(path),
             )
         }
     }
