@@ -206,6 +206,76 @@ fn clean_merge_does_not_warn() {
 }
 
 #[test]
+fn merge_key_matches_objects_by_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    // DESIRED bumps web.replicas; the app added web.status and a whole `cache`
+    // entry; BASE had web+db. Keyed by `name`: web's fields merge (no duplicate),
+    // cache is preserved.
+    fs::write(
+        &target,
+        r#"{"servers":[{"name":"web","replicas":2,"status":"up"},{"name":"db"},{"name":"cache"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        &desired,
+        r#"{"servers":[{"name":"web","replicas":3},{"name":"db"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        &base,
+        r#"{"servers":[{"name":"web","replicas":2},{"name":"db"}]}"#,
+    )
+    .unwrap();
+
+    let out = run(&[
+        "--merge-key",
+        "name",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"servers":[
+            {"name":"web","replicas":3,"status":"up"},
+            {"name":"db"},
+            {"name":"cache"}
+        ]})
+    );
+}
+
+#[test]
+fn merge_key_scoped_to_object_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    // `servers=name` scopes keying to the `servers` array.
+    fs::write(&target, r#"{"servers":[{"name":"web","up":true}]}"#).unwrap();
+    fs::write(&desired, r#"{"servers":[{"name":"web","port":80}]}"#).unwrap();
+    fs::write(&base, r#"{"servers":[{"name":"web"}]}"#).unwrap();
+
+    let out = run(&[
+        "--merge-key",
+        "servers=name",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"servers":[{"name":"web","up":true,"port":80}]})
+    );
+}
+
+#[test]
 fn array_strategy_concat_appends() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");

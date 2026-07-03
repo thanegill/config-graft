@@ -7,7 +7,7 @@
 use crate::value::{Leaf, Node};
 use clap::ValueEnum;
 use indexmap::IndexMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 mod arrays;
 
@@ -82,12 +82,40 @@ pub enum ArrayStrategy {
     Merge,
 }
 
+/// Which field(s) identify the elements of an object-array, so the `merge`
+/// strategy can match a keyed record across TARGET/DESIRED/BASE (and deep-merge
+/// its fields) instead of matching by whole-value equality.
+///
+/// `global` candidates apply to any keyable array not covered by a `scoped` rule
+/// (scoped by the immediate object key that holds the array). Empty everywhere =
+/// match by whole value (the default behavior).
+#[derive(Default)]
+pub struct MergeKeys {
+    /// Candidate key fields applied to any keyable object-array.
+    pub global: Vec<String>,
+    /// Per-object-key overrides: `key` (the object key holding the array) ->
+    /// candidate fields.
+    pub scoped: HashMap<String, Vec<String>>,
+}
+
+impl MergeKeys {
+    /// The candidate key fields for an array held under `parent_key`: a scoped
+    /// rule if one matches that key, else the `global` candidates.
+    pub(crate) fn candidates(&self, parent_key: Option<&str>) -> &[String] {
+        parent_key
+            .and_then(|k| self.scoped.get(k))
+            .map_or(self.global.as_slice(), Vec::as_slice)
+    }
+}
+
 /// Options controlling reconciliation.
 pub struct Options {
     /// Prune keys dropped from DESIRED (requires BASE). When false, only merge.
     pub prune: bool,
     /// How DESIRED arrays combine with TARGET arrays.
     pub arrays: ArrayStrategy,
+    /// Fields that identify object-array elements for keyed `merge` matching.
+    pub merge_keys: MergeKeys,
 }
 
 /// A `merge` array conflict: at `path`, TARGET and DESIRED reordered `elements`
@@ -141,7 +169,7 @@ pub fn reconcile<L: Leaf>(
     // alongside so the three-way `Merge` array strategy can see it. Array
     // conflicts bubble up as `deep_merge`'s return, gaining a path segment at each
     // level, so a location is built only for the (rare) conflicts.
-    let conflicts = deep_merge(&mut result, desired, base, opts.arrays);
+    let conflicts = deep_merge(&mut result, desired, base, opts, None);
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
@@ -218,11 +246,15 @@ fn del_path<L: Leaf>(v: &mut Node<L>, path: &[String]) {
 /// Returns any `merge` [`Conflict`]s found, each with a path *relative to*
 /// `target`. Callers prepend their own key as the conflicts bubble up, so a
 /// location is built only for the (rare) conflicts, never for clean subtrees.
+///
+/// `parent_key` is the object key this node is the value of (the Map arm passes
+/// it down one level); the array engine uses it to resolve per-key merge keys.
 pub fn deep_merge<L: Leaf>(
     target: &mut Node<L>,
     desired: &Node<L>,
     base: Option<&Node<L>>,
-    arrays: ArrayStrategy,
+    opts: &Options,
+    parent_key: Option<&str>,
 ) -> Vec<Conflict<L>> {
     match desired {
         Node::Map(d) => {
@@ -231,7 +263,7 @@ pub fn deep_merge<L: Leaf>(
                 for (k, dv) in d {
                     let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
                     if let Some(tv) = t.get_mut(k) {
-                        for mut c in deep_merge(tv, dv, bv, arrays) {
+                        for mut c in deep_merge(tv, dv, bv, opts, Some(k)) {
                             c.path.prepend(k.clone());
                             conflicts.push(c);
                         }
@@ -244,7 +276,7 @@ pub fn deep_merge<L: Leaf>(
         }
         Node::Array(d) => {
             if let Node::Array(t) = target {
-                let (combined, conflict) = arrays::combine(t, d, base, arrays);
+                let (combined, conflict) = arrays::combine(t, d, base, opts, parent_key);
                 *t = combined;
                 return conflict
                     .map(|elements| Conflict {
@@ -304,6 +336,7 @@ mod tests {
             &Options {
                 prune,
                 arrays: ArrayStrategy::Replace,
+                merge_keys: MergeKeys::default(),
             },
         )
         .0)
@@ -317,6 +350,7 @@ mod tests {
             &Options {
                 prune: true,
                 arrays,
+                merge_keys: MergeKeys::default(),
             },
         )
         .0)
@@ -335,9 +369,128 @@ mod tests {
             &Options {
                 prune: true,
                 arrays,
+                merge_keys: MergeKeys::default(),
             },
         )
         .0)
+    }
+
+    fn reconciled_keyed(
+        target: Value,
+        desired: Value,
+        base: Option<Value>,
+        global_keys: &[&str],
+    ) -> Value {
+        j(&reconcile(
+            &n(target),
+            &n(desired),
+            base.map(n).as_ref(),
+            &Options {
+                prune: true,
+                arrays: ArrayStrategy::Merge,
+                merge_keys: MergeKeys {
+                    global: global_keys.iter().map(|s| s.to_string()).collect(),
+                    scoped: HashMap::new(),
+                },
+            },
+        )
+        .0)
+    }
+
+    #[test]
+    fn keyed_merges_matched_record_fields() {
+        // DESIRED bumps replicas; TARGET has an app-added `status` -> one `web`
+        // with both, not two entries.
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s": [{"name": "web", "replicas": 2, "status": "up"}]}),
+                json!({"s": [{"name": "web", "replicas": 3}]}),
+                Some(json!({"s": [{"name": "web", "replicas": 2}]})),
+                &["name"],
+            ),
+            json!({"s": [{"name": "web", "replicas": 3, "status": "up"}]})
+        );
+    }
+
+    #[test]
+    fn keyed_keeps_app_added_and_prunes_dropped() {
+        // BASE [web, db]; DESIRED drops db; TARGET added `cache` -> web kept, db
+        // pruned (dropped & unchanged), cache preserved.
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s": [{"name": "web"}, {"name": "db"}, {"name": "cache"}]}),
+                json!({"s": [{"name": "web"}]}),
+                Some(json!({"s": [{"name": "web"}, {"name": "db"}]})),
+                &["name"],
+            ),
+            json!({"s": [{"name": "web"}, {"name": "cache"}]})
+        );
+    }
+
+    #[test]
+    fn keyed_candidate_falls_through_to_second_field() {
+        // `name` absent -> match by `id`.
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s": [{"id": "a", "v": 1}]}),
+                json!({"s": [{"id": "a", "v": 2}]}),
+                None,
+                &["name", "id"],
+            ),
+            json!({"s": [{"id": "a", "v": 2}]})
+        );
+    }
+
+    #[test]
+    fn keyed_inserts_desired_only_record() {
+        // A keyed record present only in DESIRED is inserted.
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s": [{"name": "web"}]}),
+                json!({"s": [{"name": "web"}, {"name": "api"}]}),
+                None,
+                &["name"],
+            ),
+            json!({"s": [{"name": "web"}, {"name": "api"}]})
+        );
+    }
+
+    #[test]
+    fn keyed_falls_back_to_value_when_not_all_keyed() {
+        // A DESIRED element lacks the key -> value-equality for the whole array.
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s": [{"name": "a"}]}),
+                json!({"s": [{"other": "b"}]}),
+                None,
+                &["name"],
+            ),
+            json!({"s": [{"name": "a"}, {"other": "b"}]})
+        );
+    }
+
+    #[test]
+    fn keyed_scoped_applies_only_to_its_object_key() {
+        // `servers` scoped to key by `name`; the scope is by the immediate object key.
+        let opts = Options {
+            prune: true,
+            arrays: ArrayStrategy::Merge,
+            merge_keys: MergeKeys {
+                global: Vec::new(),
+                scoped: HashMap::from([("servers".to_string(), vec!["name".to_string()])]),
+            },
+        };
+        let out = j(&reconcile(
+            &n(json!({"servers": [{"name": "web", "up": true}]})),
+            &n(json!({"servers": [{"name": "web", "port": 80}]})),
+            Some(&n(json!({"servers": [{"name": "web"}]}))),
+            &opts,
+        )
+        .0);
+        assert_eq!(
+            out,
+            json!({"servers": [{"name": "web", "up": true, "port": 80}]})
+        );
     }
 
     #[test]
@@ -659,6 +812,7 @@ mod tests {
             &Options {
                 prune: true,
                 arrays: ArrayStrategy::Set,
+                merge_keys: MergeKeys::default(),
             },
         )
         .0);
@@ -898,6 +1052,7 @@ mod tests {
             &Options {
                 prune: true,
                 arrays,
+                merge_keys: MergeKeys::default(),
             },
         );
         conflicts.iter().map(|c| c.path.render(".")).collect()
@@ -923,6 +1078,7 @@ mod tests {
             &Options {
                 prune: true,
                 arrays: ArrayStrategy::Merge,
+                merge_keys: MergeKeys::default(),
             },
         );
         assert_eq!(conflicts.len(), 1);

@@ -154,7 +154,7 @@ fn leaf_to_plist(l: &PlistLeaf) -> plist::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reconcile::{reconcile, sort_keys, ArrayStrategy, Options};
+    use crate::reconcile::{reconcile, sort_keys, ArrayStrategy, MergeKeys, Options};
     use std::time::{Duration, SystemTime};
 
     fn pint(i: i64) -> plist::Value {
@@ -237,6 +237,7 @@ mod tests {
             &Options {
                 prune: true,
                 arrays: ArrayStrategy::Replace,
+                merge_keys: MergeKeys::default(),
             },
         );
         let m = merged.as_map().unwrap();

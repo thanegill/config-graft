@@ -19,6 +19,7 @@ config-graft config.json desired.json .state/last-applied.json
 config-graft --check config.json desired.json base.json    # exit 3 if it would change
 config-graft --stdout --diff config.json desired.json       # preview without writing
 config-graft --array-strategy replace config.json desired.json  # own the list wholesale
+config-graft --merge-key name config.json desired.json          # match list-of-objects by `name`
 
 config-graft app.plist desired.plist base.plist             # same merge, plist files
 config-graft --format plist config desired                  # force plist on any name
@@ -34,12 +35,52 @@ respect a BASE element the user deleted from TARGET, and preserve a reordering
 made on either side. If TARGET and DESIRED reorder the same elements
 *contradictorily*, that's a conflict: it's still resolved deterministically
 (TARGET order preferred), but config-graft prints a warning to stderr naming the
-array and the conflicting elements (the exit code is unchanged). The other strategies are `replace` (**atomic** — DESIRED's
-list wins wholesale; the right choice when you own the whole list, or when its
-elements are structurally anonymous objects `merge` can't match by value),
+array and the conflicting elements (the exit code is unchanged). For **arrays of
+keyed records** (a list of objects like `servers`), pass `--merge-key name` (or
+`--merge-key servers=name` to scope it to that key) so `merge` matches elements by
+that field and reconciles their fields — bump a managed field while keeping an
+app-added one, instead of duplicating the record. The other strategies are
+`replace` (**atomic** — DESIRED's list wins wholesale; the right choice when you
+own the whole list, or for arrays of objects with no key field),
 `concat` (append, keeping order and duplicates), and `set` (two-way union,
 ignoring order and BASE). Scalars are always replaced. `null` is a real value,
 not a delete sentinel — deletion is driven entirely by the BASE↔DESIRED diff.
+
+### Keyed lists: `--merge-key`
+
+The app owns a `servers` list and has added a `status` field to `web`; you manage
+each server's `replicas` and want to bump `web` from 2 to 3. TARGET (live) and
+DESIRED (managed):
+
+```jsonc
+// TARGET
+{ "servers": [ { "name": "web", "replicas": 2, "status": "running" } ] }
+// DESIRED
+{ "servers": [ { "name": "web", "replicas": 3 } ] }
+```
+
+Without a key, `merge` compares whole objects, so the edited `web` reads as a
+delete + insert — you get **two** `web` entries:
+
+```json
+{ "servers": [
+  { "name": "web", "replicas": 2, "status": "running" },
+  { "name": "web", "replicas": 3 }
+] }
+```
+
+With `--merge-key name`, `web` is matched by its `name` and its fields reconcile
+three-way — the managed `replicas` updates, the app's `status` survives, **one**
+entry:
+
+```json
+{ "servers": [ { "name": "web", "replicas": 3, "status": "running" } ] }
+```
+
+Give several candidate fields (`--merge-key name,id`, first present wins), or scope
+a key to one list (`--merge-key servers=name`). Keying engages only when a key
+resolves and every element on both sides is an object carrying it; otherwise
+`merge` falls back to whole-value matching.
 
 ## Formats
 
