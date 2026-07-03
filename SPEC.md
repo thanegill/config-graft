@@ -41,8 +41,8 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 
 ### Arguments
 
-- `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent.
-- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping / TOML table.
+- `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent. With `--format directory` it is a directory tree (§5b).
+- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping / TOML table (or, with `--format directory`, a directory).
 - `BASE` — path to the previous snapshot. Optional; absent/empty/invalid ⇒ no pruning (first-run behavior).
 
 ### Options
@@ -56,7 +56,7 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
 - `--array-strategy <merge|replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `merge` (three-way, move-aware against BASE; **the default**), `replace` (atomic), `concat` (append, keeping order and duplicates), or `set` (two-way union, ignoring order and dropping duplicates).
 - `--merge-key <[PATH=]FIELD>` — for `merge`, identify object-array elements by a field so keyed records are merged in place instead of matched by whole value (see §5). `FIELD` / `f1,f2` (candidate fields, first present wins) applies to any object-array; `PATH=FIELD` scopes it to the array at `PATH` — its full path from the document root, segments joined by the format separator (`.`, or `:` for plist). Repeatable.
-- `--format <json|plist|yaml|toml>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a).
+- `--format <json|plist|yaml|toml|directory>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a). `directory` is never inferred — it must be passed explicitly, and makes TARGET/DESIRED/BASE *directories* rather than files (§5b).
 - `--plist-binary` — write plist output as binary instead of XML. **Plist only** — passing it with another format is an error (exit 1).
 
 ### Exit codes
@@ -135,6 +135,35 @@ forced with `--format`.
   can't make safely. A TOML document's root is always a table, so a desired TOML
   file that parses is always a valid mapping. `--indent` does not apply.
 
+## 5b. Directory mode (`--format directory`)
+
+Instead of a single file, TARGET / DESIRED / BASE are **directory trees**, and
+config-graft reconciles *which files exist and their contents* — the same
+three-way merge, one filesystem level up. It is opt-in (`--format directory` is
+never inferred). The tree maps onto the same value model as every other format:
+
+- a **directory** is the map/object shape (the container that merges);
+- a **regular file** is an atomic leaf carrying its whole contents **and unix
+  mode** — config-graft never merges *within* a file, and a mode-only change
+  counts as a change;
+- a **symlink** is an atomic leaf carrying its target; it is **never followed**
+  (a symlink to a directory is a leaf, not a directory), and dangling links are
+  fine.
+
+Reads **do not follow** symlinks inside the tree and **refuse (exit 1, nothing
+written)** on a FIFO/socket/device or a non-UTF-8 filename. A TARGET that exists
+but is not a directory is a hard error (unlike the single-file coerce-to-empty
+rule — we won't silently treat a plain file as an empty tree and delete it).
+
+Writes are **minimal and in place** (like YAML/TOML, not like JSON's canonical
+rewrite): config-graft diffs the reconciled tree against the current one and only
+creates/updates/deletes what changed, so **app-owned files keep their inode and
+mtime**. Each individual file write is atomic (temp-in-same-dir + `fsync` +
+`rename`); see §8 and §10 for the cross-file-atomicity trade-off. `--stdout` is
+unsupported (a tree has no single byte stream); `--indent` / `--plist-binary`
+error as with any non-matching format; `--array-strategy` / `--sort-keys` are
+inert (a tree has no arrays, and on-disk order isn't stored).
+
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
 A managed key is removed **only** when:
@@ -148,7 +177,7 @@ ever pruned.
 
 ## 7. File handling & robustness
 
-- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary / YAML mapping / TOML table. (Exception: a non-empty YAML or TOML target that can't be edited safely is **refused**, not overwritten — see §5a.)
+- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary / YAML mapping / TOML table. (Exception: a non-empty YAML or TOML target that can't be edited safely is **refused**, not overwritten — see §5a. In directory mode a *missing* TARGET is likewise treated as empty, but a TARGET that exists and is **not** a directory is **refused**, not coerced — see §5b.)
 - **Missing/empty/unparseable/non-object BASE** ⇒ pruning disabled (first run).
 - **Invalid DESIRED** ⇒ hard error (exit 1); TARGET untouched.
 - Parent directories of TARGET created as needed.
@@ -159,6 +188,7 @@ ever pruned.
 - Write to a temp file in TARGET's directory, `fsync`, then `rename(2)` over TARGET (atomic; no torn writes).
 - Preserve TARGET's existing file mode; default `0644` for new files.
 - Deterministic output: stable key ordering (per `--sort-keys`), fixed indentation, single trailing newline. Running twice with the same inputs is a no-op (idempotent) and `--check`-clean; an unchanged result skips the write entirely.
+- **Directory mode (§5b):** each file/symlink is written atomically the same way (a file with its reconciled mode; new dirs `0755`), but the *whole-tree* apply is **not one transaction** — a crash mid-apply leaves a partial (though per-file consistent) tree, which a re-run completes idempotently (§10).
 
 ## 9. Non-goals
 
@@ -174,6 +204,7 @@ ever pruned.
 
 - Because removal is snapshot-driven (not null-sentinel), the tool **cannot set a managed key to `null`-meaning-delete**; `null` is a real value. This is intentional and the inverse of RFC 7386's limitation.
 - Atomic arrays mean you can't manage a single element of an app-written list; you own the whole array or none of it.
+- **Directory mode (§5b):** the multi-file apply is best-effort, not transactional (§8) — re-run to complete a partial apply. An **empty declared directory** is created but is effectively **unprunable** (it has no managed leaf path to diff against, the same way a key whose value is `{}` can't be pruned).
 
 ## 11. Examples
 
@@ -219,7 +250,14 @@ to value matching when not all keyed)**; **default array-strategy is `merge`**;
 non-object/missing/invalid TARGET coerced to empty; missing/invalid BASE (no
 prune); usage error exit 2; invalid `--array-strategy` exit 2; `--check`
 idempotence; `--stdout` leaves TARGET untouched; `--sort-keys`/`--indent`
-output; `--diff` add/remove/change lines; file mode preserved.
+output; `--diff` add/remove/change lines; file mode preserved. **Directory mode
+(§5b):** first-apply creates the tree; app-owned file preserved (inode kept);
+prune dropped file on unchanged; keep user-edited file on prune; prune collapses
+empty parent; `--no-prune` keeps dropped file; file↔dir type change both ways;
+symlink create/update/dangling; symlink-to-dir not followed; refuse special file
+(exit 1); non-directory TARGET refused (exit 1); `--check` pending exit 3 (tree
+untouched); `--diff` with `/`-joined paths; mode set on create and on mode-only
+change; empty declared dir created; re-apply idempotent.
 
 ## 13. Implementation
 
@@ -231,6 +269,11 @@ Implemented in **Rust** (this repo):
   can't hold a plist `Date`, by construction.
 - `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
   unit-tested against §12. Managed key paths are a `KeyPath` newtype.
+- `src/directory.rs` — the `--format directory` backend (§5b): a `DirLeaf` leaf
+  type (file-with-mode / symlink), a recursive `read_tree`, and a minimal-diff
+  `apply_tree`. Not a `Format` (a tree has no byte stream); `main` dispatches
+  `FormatKind::Directory` to a separate `run_directory` that reuses the shared
+  reconcile engine and diff renderer.
 - `src/format/` — one module per format (`json`/`plist`/`yaml`/`toml`), each
   defining its leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and
   `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind`
