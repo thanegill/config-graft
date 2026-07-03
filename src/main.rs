@@ -253,20 +253,28 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
 /// Atomic in-place write: temp file in the same dir, fsync, then rename over the
 /// target. Preserves the target's existing mode (0644 for new files).
 fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mode = fs::metadata(path)
+        .ok()
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0o644);
+    write_atomic_mode(path, content, mode)
+}
+
+/// Atomic in-place write with an explicit permission mode (temp file in the same
+/// dir, fsync, set mode, then rename over the target). The directory writer uses
+/// this to land each file with the exact mode carried by its `DirLeaf`.
+pub fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
     };
     fs::create_dir_all(&dir)?;
-    let mode = fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o777);
 
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
     tmp.write_all(content)?;
     tmp.as_file().sync_all()?;
     tmp.as_file()
-        .set_permissions(fs::Permissions::from_mode(mode.unwrap_or(0o644)))?;
+        .set_permissions(fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
