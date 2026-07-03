@@ -328,13 +328,9 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
 }
 
 /// Atomic in-place write with an explicit permission mode (temp file in the same
-/// dir, fsync, set mode, then rename over the target). The directory writer uses
-/// this to land each file with the exact mode carried by its `DirLeaf`.
-pub fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
+/// dir, fsync, set mode, then rename over the target).
+fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
+    let dir = dest_dir(path);
     fs::create_dir_all(&dir)?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
@@ -344,6 +340,33 @@ pub fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Res
         .set_permissions(fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Atomic in-place write that *streams* the file at `source` into a temp file in
+/// the destination dir (never buffering it in memory), fsyncs, sets `mode`, then
+/// renames over `path`. The directory writer uses this so a managed file's bytes
+/// never live in the value tree — they go straight from disk to disk.
+pub fn write_atomic_from(path: &Path, source: &Path, mode: u32) -> std::io::Result<()> {
+    let dir = dest_dir(path);
+    fs::create_dir_all(&dir)?;
+
+    let mut src = fs::File::open(source)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    std::io::copy(&mut src, tmp.as_file_mut())?;
+    tmp.as_file().sync_all()?;
+    tmp.as_file()
+        .set_permissions(fs::Permissions::from_mode(mode))?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// The directory an atomic write stages its temp file in: the target's parent, or
+/// the current directory for a bare filename.
+fn dest_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
 }
 
 /// A compact, leaf-level diff (`+` added, `-` removed, `~` changed) with keys

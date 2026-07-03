@@ -22,21 +22,62 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
+use sha2::{Digest, Sha256};
 
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
 /// A single filesystem object the reconcile engine treats atomically: either a
-/// regular file (its whole contents plus permission mode) or a symlink (its
-/// target). Directories are `Node::Map`, never a leaf.
+/// regular file or a symlink. Directories are `Node::Map`, never a leaf.
 ///
-/// `PartialEq` is content- **and** mode-sensitive, so changing only a file's mode
-/// is a changed leaf and triggers a rewrite. Symlinks carry no mode (symlink
-/// permission bits are not portably settable and are semantically the target's).
-#[derive(Clone, PartialEq, Debug)]
+/// A file is stored as a **content handle**, not its bytes. The engine only needs
+/// a file's *identity* — to compare it for pruning and change detection — plus its
+/// length and mode for `--diff`; it never needs the bytes themselves, which are
+/// streamed straight from `source` to the destination when a file is actually
+/// written. So the whole tree costs O(number of files), not O(total bytes).
+///
+/// Equality is `(len, mode, digest)` and deliberately ignores `source`: a file is
+/// equal to any file with the same contents and mode wherever it lives, which is
+/// exactly what makes re-applying an unchanged tree a no-op. A mode-only change is
+/// still a changed leaf. Symlinks carry no mode (symlink permission bits are not
+/// portably settable and are semantically the target's).
+#[derive(Clone, Debug)]
 pub enum DirLeaf {
-    File { contents: Vec<u8>, mode: u32 },
-    Symlink { target: PathBuf },
+    File {
+        /// Where the bytes live, read (streamed) lazily only when writing. Not
+        /// part of identity.
+        source: PathBuf,
+        len: u64,
+        mode: u32,
+        /// SHA-256 of the contents, computed by streaming at read time.
+        digest: [u8; 32],
+    },
+    Symlink {
+        target: PathBuf,
+    },
+}
+
+impl PartialEq for DirLeaf {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                DirLeaf::File {
+                    len: l1,
+                    mode: m1,
+                    digest: d1,
+                    ..
+                },
+                DirLeaf::File {
+                    len: l2,
+                    mode: m2,
+                    digest: d2,
+                    ..
+                },
+            ) => l1 == l2 && m1 == m2 && d1 == d2,
+            (DirLeaf::Symlink { target: t1 }, DirLeaf::Symlink { target: t2 }) => t1 == t2,
+            _ => false,
+        }
+    }
 }
 
 impl Leaf for DirLeaf {
@@ -44,9 +85,7 @@ impl Leaf for DirLeaf {
     /// binary): a file shows its length and mode, a symlink its target.
     fn render(&self) -> String {
         match self {
-            DirLeaf::File { contents, mode } => {
-                format!("file({} bytes, {:04o})", contents.len(), mode & 0o7777)
-            }
+            DirLeaf::File { len, mode, .. } => format!("file({len} bytes, {:04o})", mode & 0o7777),
             DirLeaf::Symlink { target } => format!("-> {}", target.display()),
         }
     }
@@ -116,12 +155,28 @@ fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
     } else if ft.is_dir() {
         read_dir(path)
     } else if ft.is_file() {
-        let contents = fs::read(path).map_err(|e| read_err(path, e))?;
         let mode = meta.permissions().mode() & 0o7777;
-        Ok(Node::Leaf(DirLeaf::File { contents, mode }))
+        Ok(Node::Leaf(DirLeaf::File {
+            source: path.to_path_buf(),
+            len: meta.len(),
+            mode,
+            digest: hash_file(path)?,
+        }))
     } else {
         Err(Error::UnsupportedFileType(path.to_path_buf()))
     }
+}
+
+/// Stream `path` through SHA-256, returning its content digest without ever
+/// holding the whole file in memory.
+fn hash_file(path: &Path) -> Result<[u8; 32], Error> {
+    let mut file = fs::File::open(path).map_err(|e| read_err(path, e))?;
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher).map_err(|e| read_err(path, e))?;
+    let out = hasher.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    Ok(digest)
 }
 
 /// Apply the reconciled tree `want` under `root`, given `cur` (the tree as it was
@@ -229,8 +284,8 @@ fn apply_node(
 /// file/symlink is there.
 fn write_leaf(path: &Path, leaf: &DirLeaf) -> Result<(), Error> {
     match leaf {
-        DirLeaf::File { contents, mode } => {
-            crate::write_atomic_mode(path, contents, *mode).map_err(|e| write_err(path, e))
+        DirLeaf::File { source, mode, .. } => {
+            crate::write_atomic_from(path, source, *mode).map_err(|e| write_err(path, e))
         }
         DirLeaf::Symlink { target } => atomic_symlink(path, target).map_err(|e| write_err(path, e)),
     }
@@ -309,21 +364,36 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
-    fn file(contents: &str, mode: u32) -> Node<DirLeaf> {
-        Node::Leaf(DirLeaf::File {
-            contents: contents.as_bytes().to_vec(),
+    /// A synthetic file leaf (no file on disk) for the pure render/equality tests.
+    fn leaf(source: &str, contents: &str, mode: u32) -> DirLeaf {
+        let mut hasher = Sha256::new();
+        hasher.update(contents.as_bytes());
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&hasher.finalize());
+        DirLeaf::File {
+            source: PathBuf::from(source),
+            len: contents.len() as u64,
             mode,
-        })
+            digest,
+        }
+    }
+
+    /// Materialize a tree on disk from `(relative path, contents, mode)` specs and
+    /// read it back into a `Node` (with real `source` paths, so it can be applied).
+    fn tree(dir: &Path, specs: &[(&str, &str, u32)]) -> Node<DirLeaf> {
+        for (rel, contents, mode) in specs {
+            let p = dir.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, contents).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(*mode)).unwrap();
+        }
+        read_tree(dir).unwrap().unwrap()
     }
 
     #[test]
     fn render_never_dumps_contents() {
         assert_eq!(
-            DirLeaf::File {
-                contents: b"hello world".to_vec(),
-                mode: 0o755,
-            }
-            .render(),
+            leaf("/x", "hello world", 0o755).render(),
             "file(11 bytes, 0755)"
         );
         assert_eq!(
@@ -336,16 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn partial_eq_is_mode_sensitive() {
-        let a = DirLeaf::File {
-            contents: b"x".to_vec(),
-            mode: 0o644,
-        };
-        let b = DirLeaf::File {
-            contents: b"x".to_vec(),
-            mode: 0o755,
-        };
-        assert_ne!(a, b);
+    fn equality_is_content_and_mode_but_not_path() {
+        // Same contents + mode at different paths are equal (keeps re-apply a no-op).
+        assert_eq!(leaf("/a", "x", 0o644), leaf("/b", "x", 0o644));
+        // Mode-only difference is a change.
+        assert_ne!(leaf("/a", "x", 0o644), leaf("/a", "x", 0o755));
+        // Content difference (same length) is a change.
+        assert_ne!(leaf("/a", "x", 0o644), leaf("/a", "y", 0o644));
     }
 
     #[test]
@@ -393,19 +460,18 @@ mod tests {
     fn apply_prunes_dropped_leaf_and_collapses_dir() {
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        let mut before = IndexMap::new();
-        let mut sub = IndexMap::new();
-        sub.insert("only.txt".to_string(), file("v", 0o644));
-        before.insert("sub".to_string(), Node::Map(sub));
-        before.insert("keep.txt".to_string(), file("k", 0o644));
-        let before = Node::Map(before);
+        let src1 = tempfile::tempdir().unwrap();
+        let before = tree(
+            src1.path(),
+            &[("sub/only.txt", "v", 0o644), ("keep.txt", "k", 0o644)],
+        );
         apply_tree(&root, None, &before).unwrap();
+        let cur = read_tree(&root).unwrap().unwrap();
 
         // want drops sub/only.txt entirely; keep.txt stays.
-        let mut after = IndexMap::new();
-        after.insert("keep.txt".to_string(), file("k", 0o644));
-        let after = Node::Map(after);
-        let changed = apply_tree(&root, Some(&before), &after).unwrap();
+        let src2 = tempfile::tempdir().unwrap();
+        let after = tree(src2.path(), &[("keep.txt", "k", 0o644)]);
+        let changed = apply_tree(&root, Some(&cur), &after).unwrap();
         assert!(changed);
 
         assert!(!root.join("sub").exists());
@@ -416,12 +482,12 @@ mod tests {
     fn apply_is_idempotent() {
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        let mut m = IndexMap::new();
-        m.insert("a.txt".to_string(), file("hello", 0o644));
-        let want = Node::Map(m);
+        let src = tempfile::tempdir().unwrap();
+        let want = tree(src.path(), &[("a.txt", "hello", 0o644)]);
         apply_tree(&root, None, &want).unwrap();
         let cur = read_tree(&root).unwrap().unwrap();
-        // Nothing changed on a second apply with the same desired tree.
+        // Nothing changed on a second apply: `cur` (source under `root`) equals
+        // `want` (source under `src`) by content+mode despite different paths.
         assert!(!apply_tree(&root, Some(&cur), &want).unwrap());
     }
 
@@ -429,17 +495,14 @@ mod tests {
     fn apply_handles_file_to_dir_type_change() {
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        let mut before = IndexMap::new();
-        before.insert("p".to_string(), file("iamfile", 0o644));
-        let before = Node::Map(before);
+        let src1 = tempfile::tempdir().unwrap();
+        let before = tree(src1.path(), &[("p", "iamfile", 0o644)]);
         apply_tree(&root, None, &before).unwrap();
+        let cur = read_tree(&root).unwrap().unwrap();
 
-        let mut inner = IndexMap::new();
-        inner.insert("inner.txt".to_string(), file("x", 0o644));
-        let mut after = IndexMap::new();
-        after.insert("p".to_string(), Node::Map(inner));
-        let after = Node::Map(after);
-        apply_tree(&root, Some(&before), &after).unwrap();
+        let src2 = tempfile::tempdir().unwrap();
+        let after = tree(src2.path(), &[("p/inner.txt", "x", 0o644)]);
+        apply_tree(&root, Some(&cur), &after).unwrap();
 
         assert!(root.join("p").is_dir());
         assert_eq!(fs::read_to_string(root.join("p/inner.txt")).unwrap(), "x");
