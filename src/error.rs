@@ -34,6 +34,12 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// Reading a `--format directory` tree entry failed (I/O error other than a
+    /// plain "not found", which the single-file readers treat as empty).
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
     /// The YAML target can't be edited while preserving comments without risking
@@ -47,6 +53,14 @@ pub enum Error {
         flag: &'static str,
         only: &'static str,
     },
+    /// A directory-mode tree entry is a type we can't reconcile (FIFO, socket,
+    /// device, ...).
+    UnsupportedFileType(PathBuf),
+    /// A `--format directory` path exists but is not a directory.
+    NotDirectory(PathBuf),
+    /// `--stdout` was passed with `--format directory` (a tree has no single
+    /// byte stream to emit).
+    StdoutUnsupportedForDirectory,
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
@@ -75,11 +89,21 @@ impl fmt::Display for Error {
                 write!(f, "DESIRED must be a TOML table: {}", p.display())
             }
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
+            Error::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
             Error::TomlUnsafe => f.write_str(TOML_UNSAFE),
             Error::IncompatibleFlag { flag, only } => {
                 write!(f, "{flag} applies to {only} output only")
+            }
+            Error::UnsupportedFileType(p) => write!(
+                f,
+                "unsupported file type (not a regular file, directory, or symlink): {}",
+                p.display()
+            ),
+            Error::NotDirectory(p) => write!(f, "not a directory: {}", p.display()),
+            Error::StdoutUnsupportedForDirectory => {
+                f.write_str("--stdout is not supported with --format directory")
             }
         }
     }
@@ -88,7 +112,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Write { source, .. } => Some(source),
+            Error::Write { source, .. } | Error::Read { source, .. } => Some(source),
             Error::PlistSerialize(e) => Some(e),
             _ => None,
         }
