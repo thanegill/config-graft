@@ -34,6 +34,9 @@ pub enum FormatKind {
     Plist,
     Yaml,
     Toml,
+    /// Reconcile a directory *tree* rather than a single file. Not a byte-oriented
+    /// [`Format`]; `main` dispatches it to a separate directory backend.
+    Directory,
 }
 
 impl FormatKind {
@@ -58,6 +61,8 @@ impl FormatKind {
             FormatKind::Plist => Error::InvalidPlist(path),
             FormatKind::Yaml => Error::InvalidYaml(path),
             FormatKind::Toml => Error::InvalidToml(path),
+            // DESIRED "doesn't parse as a directory" == it isn't one.
+            FormatKind::Directory => Error::NotDirectory(path),
         }
     }
 
@@ -69,6 +74,9 @@ impl FormatKind {
             FormatKind::Plist => Error::NotPlistDictionary(path),
             FormatKind::Yaml => Error::NotYamlMapping(path),
             FormatKind::Toml => Error::NotTomlTable(path),
+            // A real directory's root is always a Map, so this is unreachable in
+            // practice (like NotTomlTable); kept for FormatKind symmetry.
+            FormatKind::Directory => Error::NotDirectory(path),
         }
     }
 }

@@ -6,6 +6,7 @@ use std::process;
 
 use clap::Parser;
 
+mod directory;
 mod error;
 mod format;
 mod reconcile;
@@ -144,6 +145,7 @@ fn main() {
         FormatKind::Plist => run::<Plist>(&cli),
         FormatKind::Yaml => run::<Yaml>(&cli),
         FormatKind::Toml => run::<Toml>(&cli),
+        FormatKind::Directory => run_directory(&cli),
     };
     match result {
         Ok(outcome) => process::exit(outcome.code()),
@@ -250,6 +252,71 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
     Ok(Outcome::Applied)
 }
 
+/// Reconcile a directory *tree* in place (`--format directory`). A directory is
+/// not a byte-oriented [`Format`], so this runs beside the generic `run::<F>()`
+/// and shares only the format-agnostic reconcile engine and the diff renderer.
+/// TARGET, DESIRED, and BASE are all directories (homogeneous, like every other
+/// format).
+fn run_directory(cli: &Cli) -> Result<Outcome, Error> {
+    // Flags that only shape single-file byte output have no meaning for a tree.
+    if cli.indent.is_some() {
+        return Err(Error::IncompatibleFlag {
+            flag: "--indent",
+            only: "JSON",
+        });
+    }
+    if cli.plist_binary {
+        return Err(Error::IncompatibleFlag {
+            flag: "--plist-binary",
+            only: "plist",
+        });
+    }
+    if cli.stdout {
+        return Err(Error::StdoutUnsupportedForDirectory);
+    }
+
+    // read_tree yields a Map root for any real directory, so no is_map check is
+    // needed (unlike the single-file path). A missing/non-directory DESIRED is a
+    // hard error.
+    let desired = directory::read_tree(&cli.desired)?
+        .ok_or_else(|| FormatKind::Directory.invalid_desired(cli.desired.clone()))?;
+
+    // Missing TARGET tree ⇒ empty (first apply). A TARGET that exists but is not a
+    // directory errors out of read_tree — we won't silently clobber a plain file.
+    let target = directory::read_tree(&cli.target)?.unwrap_or_else(Node::empty_map);
+
+    // Empty/missing/non-directory BASE disables pruning (first run), matching the
+    // single-file leniency where a bad BASE never hard-errors.
+    let base_path = cli
+        .base_flag
+        .as_deref()
+        .or(cli.base.as_deref())
+        .filter(|p| !p.is_empty());
+    let base = base_path.and_then(|p| directory::read_tree(Path::new(p)).ok().flatten());
+
+    // --array-strategy and --sort-keys are inert on a tree (no arrays exist, and
+    // on-disk entry order isn't stored), so they pass through harmlessly.
+    let opts = Options {
+        prune: !cli.no_prune,
+        arrays: cli.array_strategy,
+    };
+    let result = reconcile(&target, &desired, base.as_ref(), &opts);
+
+    if cli.diff {
+        print!("{}", diff_tree(&target, &result));
+    }
+    let changed = target != result;
+    if cli.check {
+        return Ok(if changed {
+            Outcome::WouldChange
+        } else {
+            Outcome::Applied
+        });
+    }
+    directory::apply_tree(&cli.target, Some(&target), &result)?;
+    Ok(Outcome::Applied)
+}
+
 /// Atomic in-place write: temp file in the same dir, fsync, then rename over the
 /// target. Preserves the target's existing mode (0644 for new files).
 fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
@@ -279,10 +346,22 @@ pub fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Res
     Ok(())
 }
 
-/// A compact, leaf-level diff (`+` added, `-` removed, `~` changed). Arrays and
-/// scalars are atomic leaves, matching the reconcile semantics. `sep` is the
-/// format's key-path separator (see `Format::PATH_SEP`).
+/// A compact, leaf-level diff (`+` added, `-` removed, `~` changed) with keys
+/// joined by the format's key-path separator (see `Format::PATH_SEP`).
 fn diff_text<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) -> String {
+    diff_text_sep(old, new, sep)
+}
+
+/// A `--diff` for a directory tree: the same leaf-level diff, but keys are
+/// filesystem paths joined by `/`.
+fn diff_tree<L: Leaf>(old: &Node<L>, new: &Node<L>) -> String {
+    diff_text_sep(old, new, "/")
+}
+
+/// A compact, leaf-level diff (`+` added, `-` removed, `~` changed) with path
+/// components joined by `sep`. Arrays and scalars are atomic leaves, matching the
+/// reconcile semantics.
+fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) -> String {
     use std::collections::HashSet;
     let old_leaves: HashSet<KeyPath> = leaf_paths(old).into_iter().collect();
     let new_leaves: HashSet<KeyPath> = leaf_paths(new).into_iter().collect();
