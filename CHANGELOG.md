@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconciled element-wise against BASE by default. Use `replace` to own a list
   wholesale, or for arrays of structurally anonymous objects that `merge` can't
   match by value.
+- Diagnostic key-paths (`--diff` output and `merge` conflict warnings) use the
+  format's separator: `.` for JSON/YAML/TOML, `:` for plist (PlistBuddy).
 
 ## [0.0.3] - 2026-06-16
 

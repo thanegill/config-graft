@@ -107,6 +107,7 @@ impl ValueCodec for Plist {
 
 impl Format for Plist {
     const KIND: FormatKind = FormatKind::Plist;
+    const PATH_SEP: &'static str = ":";
 
     fn parse(bytes: &[u8]) -> Option<Node<PlistLeaf>> {
         let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;

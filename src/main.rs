@@ -158,7 +158,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
         eprintln!(
             "config-graft: warning: array `{}` had a contradictory reorder of [{}] \
              between TARGET and DESIRED; resolved deterministically (TARGET order preferred)",
-            c.path,
+            c.path.render(F::PATH_SEP),
             elements.join(", ")
         );
     }
@@ -177,7 +177,7 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
     let output = F::serialize(&result, &current, write_opts)?;
 
     if cli.diff {
-        print!("{}", diff_text(&target, &result));
+        print!("{}", diff_text(&target, &result, F::PATH_SEP));
     }
 
     let changed = current != output;
@@ -224,8 +224,9 @@ fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
 }
 
 /// A compact, leaf-level diff (`+` added, `-` removed, `~` changed). Arrays and
-/// scalars are atomic leaves, matching the reconcile semantics.
-fn diff_text<L: Leaf>(old: &Node<L>, new: &Node<L>) -> String {
+/// scalars are atomic leaves, matching the reconcile semantics. `sep` is the
+/// format's key-path separator (see `Format::PATH_SEP`).
+fn diff_text<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) -> String {
     use std::collections::HashSet;
     let old_leaves: HashSet<KeyPath> = leaf_paths(old).into_iter().collect();
     let new_leaves: HashSet<KeyPath> = leaf_paths(new).into_iter().collect();
@@ -234,7 +235,7 @@ fn diff_text<L: Leaf>(old: &Node<L>, new: &Node<L>) -> String {
 
     let mut lines = Vec::new();
     for p in all {
-        let key = p.join(".");
+        let key = p.render(sep);
         match (get_path(old, &p), get_path(new, &p)) {
             (None, Some(n)) => lines.push(format!("+ {key} = {}", compact(n))),
             (Some(o), None) => lines.push(format!("- {key} = {}", compact(o))),

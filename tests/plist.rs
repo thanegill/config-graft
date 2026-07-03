@@ -153,6 +153,33 @@ fn diff_renders_plist_date_and_data_tokens() {
 }
 
 #[test]
+fn merge_conflict_path_uses_colon_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    // A nested dict holds an array reordered contradictorily -> a `merge` conflict.
+    // plist paths use `:` (PlistBuddy), so the warning names `config:tags`, not `.`.
+    let arr = |a: &str, b: &str| {
+        plist::Value::Array(vec![
+            plist::Value::String(a.to_string()),
+            plist::Value::String(b.to_string()),
+        ])
+    };
+    pdict(vec![("config", pdict(vec![("tags", arr("x", "y"))]))])
+        .to_file_xml(&target)
+        .unwrap();
+    pdict(vec![("config", pdict(vec![("tags", arr("y", "x"))]))])
+        .to_file_xml(&desired)
+        .unwrap();
+
+    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("contradictory reorder"), "stderr was: {err}");
+    assert!(err.contains("`config:tags`"), "stderr was: {err}"); // `:` not `.`
+}
+
+#[test]
 fn not_a_mapping_error_names_plist() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("c.plist");

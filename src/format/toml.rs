@@ -67,6 +67,7 @@ impl ValueCodec for Toml {
 
 impl Format for Toml {
     const KIND: FormatKind = FormatKind::Toml;
+    const PATH_SEP: &'static str = ".";
 
     fn parse(bytes: &[u8]) -> Option<Node<TomlLeaf>> {
         let text = std::str::from_utf8(bytes).ok()?;
