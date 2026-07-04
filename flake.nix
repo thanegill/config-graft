@@ -34,7 +34,7 @@
       # Declarative wrappers exposing `managed{Json,Plist,Yaml,Toml}` -- one per
       # format config-graft reconciles. `home.*` for home-manager,
       # `environment.*` for NixOS / nix-darwin. The three modules share one
-      # assembly (modules/lib.nix). All need `config-graft` on PATH: apply
+      # assembly (modules/shared.nix). All need `config-graft` on PATH: apply
       # `overlays.default`, or set each entry's `package`. Each is exposed under
       # both `default` and the named `config-graft` attribute.
       homeManagerModules = {

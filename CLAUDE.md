@@ -38,9 +38,9 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   one per platform: `home-manager.nix` (`home.managed*`), `nixos.nix` and
   `darwin.nix` (`environment.managed*`). Each is a thin normal
   `{ config, lib, pkgs, ... }:` module that supplies a *platform* record and calls
-  `lib.nix`'s `build`; there is **no dispatch on module type**. `lib.nix` holds
-  the static `specs` list, the format option/DESIRED helpers + `build` (used by
-  all three), and `systemPlatform` (shared by `nixos.nix`/`darwin.nix`, which
+  `shared.nix`'s `build`; there is **no dispatch on module type**. `shared.nix`
+  holds the static `specs` list, the format option/DESIRED helpers + `build` (used
+  by all three), and `systemPlatform` (shared by `nixos.nix`/`darwin.nix`, which
   differ only in `wireActivation`). The home-manager platform has a single
   consumer, so it's defined inline in `home-manager.nix`. Two recursion traps
   the module system punishes via `_module.freeformType`, both avoided by

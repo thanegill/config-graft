@@ -1,6 +1,6 @@
 # home-manager module: declaratively manage config files an application owns and
 # writes to itself, via `home.managed{Json,Plist,Yaml,Toml}`. The per-format specs
-# and assembly are shared (./lib.nix); the home-manager platform has a single
+# and assembly are shared (./shared.nix); the home-manager platform has a single
 # consumer, so it is defined here (mirroring how the system modules supply their
 # own activation wiring).
 {
@@ -11,7 +11,7 @@
 }:
 
 let
-  cg = import ./lib.nix;
+  shared = import ./shared.nix;
 
   homeTargetExample = {
     json = ".config/app/config.json";
@@ -145,7 +145,7 @@ let
       );
   };
 in
-cg.build {
+shared.build {
   inherit
     config
     lib

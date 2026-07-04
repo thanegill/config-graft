@@ -140,40 +140,63 @@ pruning keys you drop, with the previous generation as the BASE snapshot.
 Each module is also exposed under the name `config-graft` (e.g.
 `homeManagerModules.config-graft`), identical to `default`.
 
+Add the flake as an input, apply `overlays.default` so the module finds the
+binary, and pull in the wrapper for your platform. A standalone home-manager
+`flake.nix` grafting a few keys into files apps keep rewriting:
+
 ```nix
 {
-  inputs.config-graft.url = "github:thanegill/config-graft";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    home-manager.url = "github:nix-community/home-manager";
+    config-graft.url = "github:thanegill/config-graft";
+  };
 
-  # NixOS / nix-darwin: apply the overlay so the modules find the binary.
-  nixpkgs.overlays = [ inputs.config-graft.overlays.default ];
+  outputs =
+    {
+      nixpkgs,
+      home-manager,
+      config-graft,
+      ...
+    }:
+    {
+      homeConfigurations."me" = home-manager.lib.homeManagerConfiguration {
+        # Apply the overlay so the module finds the config-graft binary.
+        pkgs = import nixpkgs {
+          system = "x86_64-linux";
+          overlays = [ config-graft.overlays.default ];
+        };
+        modules = [
+          config-graft.homeManagerModules.default
+          {
+            home.managedJson.claude-code = {
+              target = ".claude/settings.json";
+              settings.permissions.ask = [ "Bash(git push)" ];
+            };
+
+            home.managedYaml.app = {
+              target = ".config/app/config.yaml"; # comments in the live file are preserved
+              settings.theme = "dark";
+            };
+          }
+        ];
+      };
+    };
 }
 ```
 
-```nix
-# home-manager: graft a few keys into a file the app keeps rewriting.
-{
-  imports = [ inputs.config-graft.homeManagerModules.default ];
-
-  home.managedJson.claude-code = {
-    target = ".claude/settings.json";
-    settings.permissions.ask = [ "Bash(git push)" ];
-  };
-
-  home.managedYaml.app = {
-    target = ".config/app/config.yaml";   # comments in the live file are preserved
-    settings.theme = "dark";
-  };
-}
-```
+For NixOS or nix-darwin, add `config-graft.nixosModules.default` (or
+`darwinModules.default`) and the overlay to your system's `modules`, then set
+`environment.managed{Json,Plist,Yaml,Toml}` entries with absolute targets.
 
 An entry with empty `settings` is inert. Freeform formats (JSON/YAML/TOML) accept
 a `format` override (any `pkgs.formats`-style generator) for schema-checked
 output. There's a module per platform — [`home-manager.nix`](modules/home-manager.nix),
 [`nixos.nix`](modules/nixos.nix),
 [`darwin.nix`](modules/darwin.nix) — each supplying a *platform* record to the
-shared assembly in [`lib.nix`](modules/lib.nix), which holds the per-format specs,
-assembly, and the shared system platform; see it for the option docs and the
-snapshot/prune rationale.
+shared assembly in [`shared.nix`](modules/shared.nix), which holds the per-format
+specs, assembly, and the shared system platform; see it for the option docs and
+the snapshot/prune rationale.
 
 ## Develop
 
