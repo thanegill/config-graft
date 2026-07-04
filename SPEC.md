@@ -58,6 +58,7 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--merge-key <[PATH=]FIELD>` — for `merge`, identify object-array elements by a field so keyed records are merged in place instead of matched by whole value (see §5). `FIELD` / `f1,f2` (candidate fields, first present wins) applies to any object-array; `PATH=FIELD` scopes it to the array at `PATH` — its full path from the document root, segments joined by the format separator (`.`, or `:` for plist). Repeatable.
 - `--format <json|plist|yaml|toml|directory>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a). `directory` is never inferred — it must be passed explicitly, and makes TARGET/DESIRED/BASE *directories* rather than files (§5b).
 - `--plist-binary` — write plist output as binary instead of XML. **Plist only** — passing it with another format is an error (exit 1).
+- `--manage-root` — also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs), not just its contents. **`--format directory` only** — passing it with another format is an error (exit 1). Off by default (§5b).
 
 ### Exit codes
 
@@ -144,9 +145,11 @@ never inferred). The tree maps onto the same value model as every other format:
 
 - a **directory** is the map/object shape (the container that merges); it also
   carries its **own metadata** (mode/owner/xattrs), reconciled the same way a
-  file's is — with **one exception**: the *root* directory (the target you point
-  at) is left alone, so config-graft never chmod/chown's the directory you aim it
-  at, only what lives inside;
+  file's is. The **root** directory (the target you point at) is the exception:
+  by default its own attributes are left alone — config-graft never chmod/chown's
+  the directory you aim it at, only what lives inside — but `--manage-root`
+  reconciles the root too (useful when you own the whole tree; note a DESIRED tree
+  owned by another user, e.g. a Nix store path, then needs privilege to apply);
 - a **regular file** is an atomic leaf carrying its whole contents **and its
   metadata** (see below) — config-graft never merges *within* a file, and a
   metadata-only change counts as a change;

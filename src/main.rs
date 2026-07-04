@@ -94,6 +94,12 @@ struct Cli {
     /// --merge-key spec.containers=name`.
     #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
+
+    /// Also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs),
+    /// not just its contents. `--format directory` only — passing it with another
+    /// format is an error.
+    #[arg(long = "manage-root")]
+    manage_root: bool,
 }
 
 /// Parse `--merge-key` specs into [`MergeKeys`]. Each spec is `FIELD` / `f1,f2`
@@ -130,7 +136,6 @@ fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
         }
     }
     mk
-}
 
 fn main() {
     let cli = Cli::parse();
@@ -169,6 +174,13 @@ fn run<F: Format>(cli: &Cli) -> Result<Outcome, Error> {
         return Err(Error::IncompatibleFlag {
             flag: "--plist-binary",
             only: "plist",
+        });
+    }
+    // `--manage-root` only makes sense for a directory tree.
+    if cli.manage_root {
+        return Err(Error::IncompatibleFlag {
+            flag: "--manage-root",
+            only: "--format directory",
         });
     }
 
@@ -275,15 +287,19 @@ fn run_directory(cli: &Cli) -> Result<Outcome, Error> {
         return Err(Error::StdoutUnsupportedForDirectory);
     }
 
+    // `--manage-root` decides whether the root directory's own attributes are part
+    // of the reconciled trees; it must be the same for TARGET, DESIRED, and BASE.
+    let root = cli.manage_root;
+
     // read_tree yields a Map root for any real directory, so no is_map check is
     // needed (unlike the single-file path). A missing/non-directory DESIRED is a
     // hard error.
-    let desired = directory::read_tree(&cli.desired)?
+    let desired = directory::read_tree(&cli.desired, root)?
         .ok_or_else(|| FormatKind::Directory.invalid_desired(cli.desired.clone()))?;
 
     // Missing TARGET tree ⇒ empty (first apply). A TARGET that exists but is not a
     // directory errors out of read_tree — we won't silently clobber a plain file.
-    let target = directory::read_tree(&cli.target)?.unwrap_or_else(Node::empty_map);
+    let target = directory::read_tree(&cli.target, root)?.unwrap_or_else(Node::empty_map);
 
     // Empty/missing/non-directory BASE disables pruning (first run), matching the
     // single-file leniency where a bad BASE never hard-errors.
@@ -292,7 +308,7 @@ fn run_directory(cli: &Cli) -> Result<Outcome, Error> {
         .as_deref()
         .or(cli.base.as_deref())
         .filter(|p| !p.is_empty());
-    let base = base_path.and_then(|p| directory::read_tree(Path::new(p)).ok().flatten());
+    let base = base_path.and_then(|p| directory::read_tree(Path::new(p), root).ok().flatten());
 
     // --array-strategy and --sort-keys are inert on a tree (no arrays exist, and
     // on-disk entry order isn't stored), so they pass through harmlessly.

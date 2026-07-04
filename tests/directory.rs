@@ -467,3 +467,50 @@ fn apply_is_idempotent() {
     );
     assert_eq!(fs::metadata(target.join("c.txt")).unwrap().ino(), inode);
 }
+
+#[test]
+fn manage_root_is_rejected_without_directory_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("c.json");
+    let desired = dir.path().join("d.json");
+    fs::write(&desired, "{}").unwrap();
+    // --manage-root only applies to --format directory.
+    let out = run(&[
+        "--manage-root",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--manage-root"), "got: {err}");
+}
+
+#[test]
+fn manage_root_reconciles_the_target_root_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    fs::create_dir(&desired).unwrap();
+    fs::set_permissions(&desired, fs::Permissions::from_mode(0o751)).unwrap();
+    write(&desired.join("f.txt"), "x");
+    fs::create_dir(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Without the flag, the target root keeps its 0700.
+    assert!(
+        graft(&[target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert_eq!(mode_of(&target), 0o700);
+
+    // With --manage-root, the target root is reconciled to the source root's 0751.
+    assert!(graft(&[
+        "--manage-root",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ])
+    .status
+    .success());
+    assert_eq!(mode_of(&target), 0o751);
+}

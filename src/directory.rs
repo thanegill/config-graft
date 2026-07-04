@@ -149,12 +149,20 @@ fn write_err(path: &Path, source: io::Error) -> Error {
 /// symlinks *inside* the tree are never followed — they become `Symlink` leaves.
 /// Entries are read in sorted filename order so the tree, and thus `--diff`
 /// output, is deterministic.
-pub fn read_tree(path: &Path) -> Result<Option<Node<DirLeaf>>, Error> {
+pub fn read_tree(path: &Path, manage_root: bool) -> Result<Option<Node<DirLeaf>>, Error> {
     match fs::metadata(path) {
-        // The root directory's *own* attributes are not managed (it's the target
-        // you point at, not something DESIRED owns), so it gets empty metadata —
-        // only its contents, and nested directories, are reconciled.
-        Ok(m) if m.is_dir() => Ok(Some(read_dir(path, BTreeMap::new())?)),
+        Ok(m) if m.is_dir() => {
+            // The root directory's *own* attributes are reconciled only with
+            // `--manage-root`; by default it gets empty metadata (its contents and
+            // nested directories are always reconciled). Not managing the root
+            // means config-graft never chmod/chown's the directory you point it at.
+            let meta = if manage_root {
+                read_attrs(path, &m)
+            } else {
+                BTreeMap::new()
+            };
+            Ok(Some(read_dir(path, meta)?))
+        }
         Ok(_) => Err(Error::NotDirectory(path.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(read_err(path, e)),
@@ -257,10 +265,25 @@ pub fn apply_tree(
     cur: Option<&Node<DirLeaf>>,
     want: &Node<DirLeaf>,
 ) -> Result<bool, Error> {
-    let want_map = want.as_map().expect("directory reconcile result is a map");
-    let cur_map = cur.and_then(Node::as_map);
+    let (want_map, want_meta) = match want {
+        Node::Map(m, meta) => (m, meta),
+        _ => unreachable!("directory reconcile result is a map"),
+    };
     ensure_root(root)?;
-    apply_dir(root, cur_map, want_map)
+    let mut changed = false;
+    // The root's own attributes are empty unless `--manage-root`; apply them only
+    // when present and drifted, so by default the target directory is untouched.
+    let cur_meta = cur.and_then(|c| match c {
+        Node::Map(_, meta) => Some(meta),
+        _ => None,
+    });
+    if !want_meta.is_empty() && cur_meta != Some(want_meta) {
+        apply_attrs(root, want_meta)?;
+        changed = true;
+    }
+    let cur_map = cur.and_then(Node::as_map);
+    changed |= apply_dir(root, cur_map, want_map)?;
+    Ok(changed)
 }
 
 /// Ensure `root` exists as a directory, creating it (and parents) if missing.
@@ -523,7 +546,7 @@ mod tests {
             fs::write(&p, contents).unwrap();
             fs::set_permissions(&p, fs::Permissions::from_mode(*mode)).unwrap();
         }
-        read_tree(dir).unwrap().unwrap()
+        read_tree(dir, false).unwrap().unwrap()
     }
 
     #[test]
@@ -591,11 +614,13 @@ mod tests {
     #[test]
     fn read_missing_is_none_non_dir_is_error() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_tree(&dir.path().join("nope")).unwrap().is_none());
+        assert!(read_tree(&dir.path().join("nope"), false)
+            .unwrap()
+            .is_none());
 
         let f = dir.path().join("f");
         fs::write(&f, "x").unwrap();
-        assert!(matches!(read_tree(&f), Err(Error::NotDirectory(_))));
+        assert!(matches!(read_tree(&f, false), Err(Error::NotDirectory(_))));
     }
 
     #[test]
@@ -608,7 +633,7 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         symlink("/dangling/target", src.path().join("link")).unwrap();
 
-        let want = read_tree(src.path()).unwrap().unwrap();
+        let want = read_tree(src.path(), false).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -616,7 +641,7 @@ mod tests {
         assert!(changed);
 
         // Re-reading the applied tree yields the same Node (round-trip).
-        assert_eq!(read_tree(&root).unwrap().unwrap(), want);
+        assert_eq!(read_tree(&root, false).unwrap().unwrap(), want);
         // Executable bit preserved.
         assert_eq!(
             fs::metadata(root.join("run.sh")).unwrap().mode() & 0o777,
@@ -639,7 +664,7 @@ mod tests {
             &[("sub/only.txt", "v", 0o644), ("keep.txt", "k", 0o644)],
         );
         apply_tree(&root, None, &before).unwrap();
-        let cur = read_tree(&root).unwrap().unwrap();
+        let cur = read_tree(&root, false).unwrap().unwrap();
 
         // want drops sub/only.txt entirely; keep.txt stays.
         let src2 = tempfile::tempdir().unwrap();
@@ -658,7 +683,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let want = tree(src.path(), &[("a.txt", "hello", 0o644)]);
         apply_tree(&root, None, &want).unwrap();
-        let cur = read_tree(&root).unwrap().unwrap();
+        let cur = read_tree(&root, false).unwrap().unwrap();
         // Nothing changed on a second apply: `cur` (source under `root`) equals
         // `want` (source under `src`) by content+mode despite different paths.
         assert!(!apply_tree(&root, Some(&cur), &want).unwrap());
@@ -671,7 +696,7 @@ mod tests {
         let src1 = tempfile::tempdir().unwrap();
         let before = tree(src1.path(), &[("p", "iamfile", 0o644)]);
         apply_tree(&root, None, &before).unwrap();
-        let cur = read_tree(&root).unwrap().unwrap();
+        let cur = read_tree(&root, false).unwrap().unwrap();
 
         let src2 = tempfile::tempdir().unwrap();
         let after = tree(src2.path(), &[("p/inner.txt", "x", 0o644)]);
@@ -691,7 +716,7 @@ mod tests {
             eprintln!("skipping reconciles_extended_attributes: xattrs unsupported here");
             return;
         }
-        let want = read_tree(src.path()).unwrap().unwrap();
+        let want = read_tree(src.path(), false).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -703,7 +728,7 @@ mod tests {
             Some(&b"v1"[..])
         );
         // Idempotent: the reapplied tree carries the same attribute, so no rewrite.
-        let cur = read_tree(&root).unwrap().unwrap();
+        let cur = read_tree(&root, false).unwrap().unwrap();
         assert!(!apply_tree(&root, Some(&cur), &want).unwrap());
     }
 
@@ -717,7 +742,7 @@ mod tests {
         fs::create_dir(src.path().join("d")).unwrap();
         fs::set_permissions(src.path().join("d"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(src.path().join("d/f.txt"), "x").unwrap();
-        let want = read_tree(src.path()).unwrap().unwrap();
+        let want = read_tree(src.path(), false).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -726,26 +751,44 @@ mod tests {
 
         // Drift the applied directory's mode; reconcile must detect and fix it.
         fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o755)).unwrap();
-        let cur = read_tree(&root).unwrap().unwrap();
+        let cur = read_tree(&root, false).unwrap().unwrap();
         assert_ne!(cur, want); // directory-mode drift is part of the identity
         assert!(apply_tree(&root, Some(&cur), &want).unwrap());
         assert_eq!(dir_mode(&root.join("d")), 0o700);
     }
 
     #[test]
-    fn root_directory_attributes_are_not_managed() {
+    fn root_directory_attributes_are_not_managed_by_default() {
         let src = tempfile::tempdir().unwrap();
         fs::set_permissions(src.path(), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(src.path().join("f.txt"), "x").unwrap();
-        let want = read_tree(src.path()).unwrap().unwrap();
+        let want = read_tree(src.path(), false).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let cur = read_tree(&root).unwrap();
+        let cur = read_tree(&root, false).unwrap();
         apply_tree(&root, cur.as_ref(), &want).unwrap();
         // The root keeps its own 0700 even though the source root was 0755.
         assert_eq!(dir_mode(&root), 0o700);
+    }
+
+    #[test]
+    fn manage_root_reconciles_the_root_directory() {
+        let src = tempfile::tempdir().unwrap();
+        fs::set_permissions(src.path(), fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(src.path().join("f.txt"), "x").unwrap();
+        // With manage_root, the source root's own mode is part of the tree.
+        let want = read_tree(src.path(), true).unwrap().unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let root = dst.path().join("out");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let cur = read_tree(&root, true).unwrap();
+        assert!(apply_tree(&root, cur.as_ref(), &want).unwrap());
+        // The root is now reconciled to the source root's 0750.
+        assert_eq!(dir_mode(&root), 0o750);
     }
 }
