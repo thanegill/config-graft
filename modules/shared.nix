@@ -86,6 +86,7 @@ let
       lib,
       pkgs,
       platform,
+      defaultPackage,
     }:
     let
       inherit (lib)
@@ -97,7 +98,6 @@ let
         mapAttrsToList
         concatStringsSep
         optionalAttrs
-        mkPackageOption
         literalExpression
         ;
 
@@ -138,7 +138,16 @@ let
             options = {
               target = platform.targetOption spec;
 
-              package = mkPackageOption pkgs "config-graft" { };
+              package = mkOption {
+                type = types.package;
+                default = defaultPackage;
+                defaultText = literalExpression "config-graft.packages.\${system}.default";
+                description = ''
+                  The config-graft package used to reconcile this entry. Defaults
+                  to this flake's own build, so no overlay or `PATH` entry is
+                  needed -- the activation script calls it by store path.
+                '';
+              };
 
               settings = mkOption {
                 type = settingsType spec config;

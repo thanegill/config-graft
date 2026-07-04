@@ -19,8 +19,6 @@
           config-graft.darwinModules.default
           {
             nixpkgs.hostPlatform = "aarch64-darwin";
-            # Apply the overlay so the module finds the config-graft binary.
-            nixpkgs.overlays = [ config-graft.overlays.default ];
 
             # System files an app owns and rewrites; reconciled during the
             # postActivation phase with the previous generation as BASE. `target`

@@ -2,7 +2,9 @@
 # writes to itself, via `home.managed{Json,Plist,Yaml,Toml}`. The per-format specs
 # and assembly are shared (./shared.nix); the home-manager platform has a single
 # consumer, so it is defined here (mirroring how the system modules supply their
-# own activation wiring).
+# own activation wiring). The flake applies this with `self` so the default
+# package comes from this flake's own build -- no overlay or `PATH` entry needed.
+{ self }:
 {
   config,
   lib,
@@ -152,4 +154,5 @@ shared.build {
     pkgs
     platform
     ;
+  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 }

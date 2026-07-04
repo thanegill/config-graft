@@ -2,7 +2,10 @@
 # owns and writes to itself, via `environment.managed{Json,Plist,Yaml,Toml}`. The
 # per-format specs, assembly, and system platform are shared (./shared.nix); this
 # file only wires activation the nix-darwin way -- appended to the fixed
-# `postActivation` phase, since nix-darwin runs only its predefined phases.
+# `postActivation` phase, since nix-darwin runs only its predefined phases. The
+# flake applies this with `self` so the default package comes from this flake's
+# own build -- no overlay or `PATH` entry needed.
+{ self }:
 {
   config,
   lib,
@@ -28,4 +31,5 @@ shared.build {
     pkgs
     platform
     ;
+  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 }

@@ -15,8 +15,6 @@
           config-graft.nixosModules.default
           {
             nixpkgs.hostPlatform = "x86_64-linux";
-            # Apply the overlay so the module finds the config-graft binary.
-            nixpkgs.overlays = [ config-graft.overlays.default ];
 
             # System files an app owns and rewrites; reconciled during activation
             # with the previous generation as BASE. `target` is an absolute path;

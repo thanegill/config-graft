@@ -134,15 +134,16 @@ pruning keys you drop, with the previous generation as the BASE snapshot.
   preference domains.
 - `nixosModules.default` / `darwinModules.default` — `environment.managed{Json,Plist,Yaml,Toml}`
   (absolute targets, reconciled during system activation).
-- `overlays.default` — adds `config-graft` to `pkgs`, which the modules use by
-  default (or set each entry's `package`).
+- `overlays.default` — optional; adds the `config-graft` CLI to `pkgs` for
+  interactive use. The modules don't need it — they run the flake's own build by
+  store path. Override a single entry with its `package` option.
 
 Each module is also exposed under the name `config-graft` (e.g.
 `homeManagerModules.config-graft`), identical to `default`.
 
-Add the flake as an input, apply `overlays.default` so the module finds the
-binary, and pull in the wrapper for your platform. A standalone home-manager
-`flake.nix` grafting a few keys into files apps keep rewriting:
+Add the flake as an input and pull in the wrapper for your platform — no overlay
+required. A standalone home-manager `flake.nix` grafting a few keys into files
+apps keep rewriting:
 
 ```nix
 {
@@ -161,22 +162,21 @@ binary, and pull in the wrapper for your platform. A standalone home-manager
     }:
     {
       homeConfigurations."me" = home-manager.lib.homeManagerConfiguration {
-        # Apply the overlay so the module finds the config-graft binary.
-        pkgs = import nixpkgs {
-          system = "x86_64-linux";
-          overlays = [ config-graft.overlays.default ];
-        };
+        pkgs = import nixpkgs { system = "x86_64-linux"; };
         modules = [
           config-graft.homeManagerModules.default
           {
-            home.managedJson.claude-code = {
-              target = ".claude/settings.json";
-              settings.permissions.ask = [ "Bash(git push)" ];
+            home.managedJson.app = {
+              target = ".config/app/config.json";
+              settings = {
+                theme = "dark";
+                editor.fontSize = 14;
+              };
             };
 
-            home.managedYaml.app = {
-              target = ".config/app/config.yaml"; # comments in the live file are preserved
-              settings.theme = "dark";
+            home.managedYaml.tool = {
+              target = ".config/tool/config.yaml"; # comments in the live file are preserved
+              settings.plugins = [ "git" ];
             };
           }
         ];
@@ -186,7 +186,7 @@ binary, and pull in the wrapper for your platform. A standalone home-manager
 ```
 
 For NixOS or nix-darwin, add `config-graft.nixosModules.default` (or
-`darwinModules.default`) and the overlay to your system's `modules`, then set
+`darwinModules.default`) to your system's `modules`, then set
 `environment.managed{Json,Plist,Yaml,Toml}` entries with absolute targets. See
 [`examples/`](examples) for a complete flake per platform (home-manager, NixOS,
 nix-darwin).

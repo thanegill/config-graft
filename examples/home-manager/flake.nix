@@ -20,11 +20,7 @@
     {
       # Activate with: home-manager switch --flake .#alice
       homeConfigurations."alice" = home-manager.lib.homeManagerConfiguration {
-        # Apply the overlay so the module finds the config-graft binary.
-        pkgs = import nixpkgs {
-          system = "x86_64-linux";
-          overlays = [ config-graft.overlays.default ];
-        };
+        pkgs = import nixpkgs { system = "x86_64-linux"; };
 
         modules = [
           config-graft.homeManagerModules.default
@@ -36,14 +32,17 @@
             # Graft a few keys into files the apps keep rewriting: keys the app
             # owns are preserved, keys you drop here are pruned on the next switch
             # (BASE is the previous generation's snapshot).
-            home.managedJson.claude-code = {
-              target = ".claude/settings.json";
-              settings.permissions.ask = [ "Bash(git push)" ];
+            home.managedJson.app = {
+              target = ".config/app/config.json";
+              settings = {
+                theme = "dark";
+                editor.fontSize = 14;
+              };
             };
 
-            home.managedYaml.app = {
-              target = ".config/app/config.yaml"; # comments in the live file are preserved
-              settings.theme = "dark";
+            home.managedYaml.tool = {
+              target = ".config/tool/config.yaml"; # comments in the live file are preserved
+              settings.plugins = [ "git" ];
             };
           }
         ];

@@ -9,8 +9,9 @@ Each subdirectory is a self-contained flake wiring config-graft into one platfor
 - [`nix-darwin/`](nix-darwin) — a nix-darwin host (same `environment.managed*`,
   applied in the `postActivation` phase).
 
-Every example applies `config-graft.overlays.default` so the module finds the
-`config-graft` binary, then pulls in the wrapper for its platform.
+Each example just pulls in the wrapper for its platform. The modules run
+config-graft from this flake's own build (by store path), so there's no overlay
+to apply and nothing to put on `PATH`.
 
 ## Trying one
 
