@@ -6,13 +6,12 @@ use std::process;
 
 use clap::Parser;
 
-mod directory;
 mod error;
 mod format;
 mod reconcile;
 mod value;
 use error::{Error, Outcome};
-use format::{Format, FormatKind, Indent, Json, Plist, Toml, WriteOpts, Yaml};
+use format::{directory, Format, FormatKind, Indent, Json, Plist, Toml, WriteOpts, Yaml};
 use reconcile::{
     get_path, leaf_paths, reconcile, sort_keys, ArrayStrategy, KeyPath, MergeKeys, Options,
 };
@@ -136,6 +135,7 @@ fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
         }
     }
     mk
+}
 
 fn main() {
     let cli = Cli::parse();

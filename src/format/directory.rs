@@ -23,10 +23,19 @@ use std::os::unix::fs::{chown, symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
-use sha2::{Digest, Sha256};
+// `Digest as _` brings the trait's methods into scope without binding the name,
+// which the `Digest` type alias below uses.
+use sha2::{Digest as _, Sha256};
 
 use crate::error::Error;
 use crate::value::{Leaf, Node};
+
+/// A file's content digest (SHA-256).
+type Digest = [u8; 32];
+
+/// A file's or directory's tracked metadata: a filesystem-agnostic map of
+/// `attribute name -> raw value` (see [`DirLeaf`] for the well-known keys).
+type Attrs = BTreeMap<String, Vec<u8>>;
 
 /// A single filesystem object the reconcile engine treats atomically: either a
 /// regular file or a symlink. Directories are `Node::Map`, never a leaf.
@@ -56,9 +65,9 @@ pub enum DirLeaf {
         source: PathBuf,
         len: u64,
         /// SHA-256 of the contents, computed by streaming at read time.
-        digest: [u8; 32],
+        digest: Digest,
         /// Filesystem-agnostic metadata (see the type docs for well-known keys).
-        attrs: BTreeMap<String, Vec<u8>>,
+        attrs: Attrs,
     },
     Symlink {
         target: PathBuf,
@@ -91,7 +100,7 @@ impl PartialEq for DirLeaf {
 impl Leaf for DirLeaf {
     /// A directory's own attributes (mode/owner/xattrs) ride on its map node, so
     /// they reconcile through the same engine as file leaves.
-    type MapMeta = BTreeMap<String, Vec<u8>>;
+    type MapMeta = Attrs;
 
     /// Compact `--diff` rendering. Never dumps contents (files may be huge or
     /// binary): a file shows its length, mode, owner, and extended-attribute
@@ -159,7 +168,7 @@ pub fn read_tree(path: &Path, manage_root: bool) -> Result<Option<Node<DirLeaf>>
             let meta = if manage_root {
                 read_attrs(path, &m)
             } else {
-                BTreeMap::new()
+                Attrs::new()
             };
             Ok(Some(read_dir(path, meta)?))
         }
@@ -171,7 +180,7 @@ pub fn read_tree(path: &Path, manage_root: bool) -> Result<Option<Node<DirLeaf>>
 
 /// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
 /// directory's own attributes).
-fn read_dir(dir: &Path, meta: BTreeMap<String, Vec<u8>>) -> Result<Node<DirLeaf>, Error> {
+fn read_dir(dir: &Path, meta: Attrs) -> Result<Node<DirLeaf>, Error> {
     let mut names: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| read_err(dir, e))?
         .map(|e| e.map(|e| e.path()).map_err(|e| read_err(dir, e)))
@@ -219,8 +228,8 @@ fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
 /// filesystem that doesn't support them (so `listxattr` fails) simply contributes
 /// no `xattr:*` entries. (Applying them, by contrast, is strict — see
 /// [`apply_attrs`].)
-fn read_attrs(path: &Path, meta: &fs::Metadata) -> BTreeMap<String, Vec<u8>> {
-    let mut attrs = BTreeMap::new();
+fn read_attrs(path: &Path, meta: &fs::Metadata) -> Attrs {
+    let mut attrs = Attrs::new();
     attrs.insert(
         "mode".to_string(),
         format!("{:o}", meta.permissions().mode() & 0o7777).into_bytes(),
@@ -242,7 +251,7 @@ fn read_attrs(path: &Path, meta: &fs::Metadata) -> BTreeMap<String, Vec<u8>> {
 
 /// Stream `path` through SHA-256, returning its content digest without ever
 /// holding the whole file in memory.
-fn hash_file(path: &Path) -> Result<[u8; 32], Error> {
+fn hash_file(path: &Path) -> Result<Digest, Error> {
     let mut file = fs::File::open(path).map_err(|e| read_err(path, e))?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher).map_err(|e| read_err(path, e))?;
@@ -390,7 +399,7 @@ fn write_leaf(path: &Path, leaf: &DirLeaf) -> Result<(), Error> {
 /// Atomically write a file at `dest`, streaming its bytes from `source` (never
 /// buffering them) and applying `attrs` to the temp file **before** the rename,
 /// so a failure to set any attribute leaves nothing on disk.
-fn write_file(dest: &Path, source: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<(), Error> {
+fn write_file(dest: &Path, source: &Path, attrs: &Attrs) -> Result<(), Error> {
     let dir = crate::dest_dir(dest);
     fs::create_dir_all(&dir).map_err(|e| write_err(&dir, e))?;
     let mut src = fs::File::open(source).map_err(|e| read_err(source, e))?;
@@ -409,7 +418,7 @@ fn write_file(dest: &Path, source: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> 
 /// setuid/setgid bits, so mode must follow it). Any failure is propagated so the
 /// caller refuses rather than landing a half-attributed entry. An empty map is a
 /// no-op.
-fn apply_attrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<(), Error> {
+fn apply_attrs(path: &Path, attrs: &Attrs) -> Result<(), Error> {
     for (key, value) in attrs {
         if let Some(name) = key.strip_prefix("xattr:") {
             xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
@@ -430,11 +439,7 @@ fn apply_attrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<(), Err
 /// Parse a numeric attribute (`mode` in octal, `uid`/`gid` in decimal) from the
 /// map, if present. These are our own canonical encodings, so a parse failure is
 /// a corrupt/handmade leaf and surfaces as [`Error::InvalidAttribute`].
-fn attr_num(
-    attrs: &BTreeMap<String, Vec<u8>>,
-    key: &str,
-    radix: u32,
-) -> Result<Option<u32>, Error> {
+fn attr_num(attrs: &Attrs, key: &str, radix: u32) -> Result<Option<u32>, Error> {
     match attrs.get(key) {
         None => Ok(None),
         Some(bytes) => std::str::from_utf8(bytes)
@@ -513,10 +518,9 @@ fn remove_node(path: &Path, node: &Node<DirLeaf>) -> Result<bool, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::os::unix::fs::MetadataExt;
 
-    fn attrs(pairs: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+    fn attrs(pairs: &[(&str, &str)]) -> Attrs {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
@@ -524,7 +528,7 @@ mod tests {
     }
 
     /// A synthetic file leaf (no file on disk) for the pure render/equality tests.
-    fn leaf(source: &str, contents: &str, attrs: BTreeMap<String, Vec<u8>>) -> DirLeaf {
+    fn leaf(source: &str, contents: &str, attrs: Attrs) -> DirLeaf {
         let mut hasher = Sha256::new();
         hasher.update(contents.as_bytes());
         let mut digest = [0u8; 32];

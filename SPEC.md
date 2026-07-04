@@ -300,7 +300,7 @@ Implemented in **Rust** (this repo):
   `Node`'s `Clone`/`PartialEq`/`Debug` are hand-written to carry it.
 - `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
   unit-tested against §12. Managed key paths are a `KeyPath` newtype.
-- `src/directory.rs` — the `--format directory` backend (§5b): a `DirLeaf` leaf
+- `src/format/directory.rs` — the `--format directory` backend (§5b): a `DirLeaf` leaf
   that stores each file as a **content handle** (length + SHA-256 digest + source
   path + a generic attribute map of mode/owner/xattrs) or a symlink; a recursive
   `read_tree` (streaming the digest, never buffering the bytes) and a minimal-diff

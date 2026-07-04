@@ -5,7 +5,11 @@
 //! Reconciliation is homogeneous — one format governs TARGET, DESIRED, BASE, and
 //! the output — so there is never a cross-format conversion. Each format lives in
 //! its own module ([`json`], [`plist`], [`yaml`]); this module holds the shared
-//! [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] selector.
+//! [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] selector. The
+//! [`directory`] module is the odd one out: `--format directory` reconciles a
+//! whole tree, which has no single byte stream, so it does **not** implement the
+//! byte-oriented [`Format`] trait — it provides its own tree reader/writer and is
+//! dispatched separately (see `run_directory` in `main`).
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +18,7 @@ use clap::ValueEnum;
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
+pub(crate) mod directory;
 pub(crate) mod json;
 pub(crate) mod plist;
 pub(crate) mod toml;

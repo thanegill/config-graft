@@ -32,7 +32,8 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   (native ⇄ `Node`) + `Format` (parse/serialize). `mod.rs` holds the traits,
   `FormatKind`, `Indent`, `read_file`. Dispatch is **static**: `main` matches the
   `FormatKind` and monomorphizes `run::<F>()` (no `&dyn Format`).
-- `src/directory.rs` — the `--format directory` backend. **Not a `Format`** (a
+- `src/format/directory.rs` — the `--format directory` backend, living beside the
+  format codecs but **not a `Format`** (a
   tree has no byte stream): `main` dispatches `FormatKind::Directory` to a separate
   `run_directory` that reuses the shared reconcile engine + diff renderer. A
   `DirLeaf` file is a **content handle** (len + SHA-256 digest + source path +

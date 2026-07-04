@@ -1,7 +1,7 @@
 # config-graft
 
-Three-way reconcile for **app-owned JSON, plist, YAML, and TOML files** — or a
-whole **directory tree**.
+Three-way reconcile/merge for **JSON, plist, YAML, and TOML files** or a
+**directory tree**.
 
 It deep-merges a *managed subset* (DESIRED) into a file the application also
 writes to (TARGET), while:
