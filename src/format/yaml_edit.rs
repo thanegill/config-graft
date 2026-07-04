@@ -118,7 +118,7 @@ fn diff_map(
         let Some(tv) = tmap.get(k) else { continue };
         let (_, kn, vn) = find(k).ok_or(Error::YamlUnsafe)?;
         match (tv, rv) {
-            (Node::Map(tc), Node::Map(rc)) => diff_map(tc, rc, vn, src, edits)?,
+            (Node::Map(tc, _), Node::Map(rc, _)) => diff_map(tc, rc, vn, src, edits)?,
             _ if tv == rv => {}
             (Node::Leaf(_), Node::Leaf(_)) => {
                 // Scalar → scalar: replace just the value span (keeps any inline

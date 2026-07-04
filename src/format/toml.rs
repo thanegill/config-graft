@@ -24,6 +24,7 @@ pub enum TomlLeaf {
 }
 
 impl Leaf for TomlLeaf {
+    type MapMeta = ();
     fn render(&self) -> String {
         match self {
             TomlLeaf::Bool(b) => b.to_string(),
@@ -58,7 +59,7 @@ impl ValueCodec for Toml {
     fn encode(node: &Node<TomlLeaf>) -> Item {
         match node {
             // Maps become real `[section]` tables so canonical output is idiomatic.
-            Node::Map(m) => Item::Table(encode_table(m)),
+            Node::Map(m, ()) => Item::Table(encode_table(m)),
             Node::Array(a) => Item::Value(Value::Array(encode_array(a))),
             Node::Leaf(l) => Item::Value(leaf_to_value(l)),
         }
@@ -97,7 +98,7 @@ fn write_canonical(node: &Node<TomlLeaf>) -> String {
     let mut doc = DocumentMut::new();
     // Callers guarantee a map root (DESIRED must be a mapping); anything else
     // would be a non-table the engine never produces here.
-    if let Node::Map(m) = node {
+    if let Node::Map(m, ()) = node {
         for (k, v) in m {
             doc.insert(k, Toml::encode(v));
         }
@@ -117,7 +118,7 @@ fn decode_table(t: &Table) -> Option<Node<TomlLeaf>> {
     for (k, v) in t.iter() {
         map.insert(k.to_string(), Toml::decode(v)?);
     }
-    Some(Node::Map(map))
+    Some(Node::Map(map, ()))
 }
 
 /// Decode a TOML value (scalar, array, or inline table) into a node.
@@ -140,7 +141,7 @@ fn decode_value(v: &Value) -> Option<Node<TomlLeaf>> {
             for (k, val) in it.iter() {
                 map.insert(k.to_string(), decode_value(val)?);
             }
-            Node::Map(map)
+            Node::Map(map, ())
         }
     })
 }
@@ -168,7 +169,7 @@ fn encode_array(a: &[Node<TomlLeaf>]) -> Array {
 /// [`super::toml_edit_apply`] for in-place value replacement.
 pub(super) fn node_to_value(node: &Node<TomlLeaf>) -> Value {
     match node {
-        Node::Map(m) => {
+        Node::Map(m, ()) => {
             let mut it = InlineTable::new();
             for (k, v) in m {
                 it.insert(k, node_to_value(v));
@@ -250,7 +251,8 @@ mod tests {
                         Node::Leaf(TomlLeaf::String("a".to_string()))
                     )]
                     .into_iter()
-                    .collect()
+                    .collect(),
+                    ()
                 ),
                 Node::Map(
                     [(
@@ -258,7 +260,8 @@ mod tests {
                         Node::Leaf(TomlLeaf::String("b".to_string()))
                     )]
                     .into_iter()
-                    .collect()
+                    .collect(),
+                    ()
                 ),
             ])
         );

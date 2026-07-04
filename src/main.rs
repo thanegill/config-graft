@@ -398,7 +398,7 @@ fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) -> String {
 /// `<date …>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
 fn compact<L: Leaf>(v: &Node<L>) -> String {
     match v {
-        Node::Map(m) => {
+        Node::Map(m, _) => {
             let inner: Vec<String> = m
                 .iter()
                 .map(|(k, val)| format!("{}:{}", quote(k), compact(val)))

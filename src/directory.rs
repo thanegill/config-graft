@@ -89,6 +89,10 @@ impl PartialEq for DirLeaf {
 }
 
 impl Leaf for DirLeaf {
+    /// A directory's own attributes (mode/owner/xattrs) ride on its map node, so
+    /// they reconcile through the same engine as file leaves.
+    type MapMeta = BTreeMap<String, Vec<u8>>;
+
     /// Compact `--diff` rendering. Never dumps contents (files may be huge or
     /// binary): a file shows its length, mode, owner, and extended-attribute
     /// count; a symlink its target.
@@ -147,15 +151,16 @@ fn write_err(path: &Path, source: io::Error) -> Error {
 /// output, is deterministic.
 pub fn read_tree(path: &Path) -> Result<Option<Node<DirLeaf>>, Error> {
     match fs::metadata(path) {
-        Ok(m) if m.is_dir() => Ok(Some(read_dir(path)?)),
+        Ok(m) if m.is_dir() => Ok(Some(read_dir(path, BTreeMap::new())?)),
         Ok(_) => Err(Error::NotDirectory(path.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(read_err(path, e)),
     }
 }
 
-/// Read a directory's entries (sorted) into a `Map` node.
-fn read_dir(dir: &Path) -> Result<Node<DirLeaf>, Error> {
+/// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
+/// directory's own attributes).
+fn read_dir(dir: &Path, meta: BTreeMap<String, Vec<u8>>) -> Result<Node<DirLeaf>, Error> {
     let mut names: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| read_err(dir, e))?
         .map(|e| e.map(|e| e.path()).map_err(|e| read_err(dir, e)))
@@ -171,7 +176,7 @@ fn read_dir(dir: &Path) -> Result<Node<DirLeaf>, Error> {
         };
         map.insert(name, read_node(&child)?);
     }
-    Ok(Node::Map(map))
+    Ok(Node::Map(map, meta))
 }
 
 /// Classify one tree entry (not following symlinks).
@@ -182,7 +187,7 @@ fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
         let target = fs::read_link(path).map_err(|e| read_err(path, e))?;
         Ok(Node::Leaf(DirLeaf::Symlink { target }))
     } else if ft.is_dir() {
-        read_dir(path)
+        read_dir(path, BTreeMap::new())
     } else if ft.is_file() {
         Ok(Node::Leaf(DirLeaf::File {
             source: path.to_path_buf(),
@@ -297,10 +302,10 @@ fn apply_node(
     want: &Node<DirLeaf>,
 ) -> Result<bool, Error> {
     match want {
-        Node::Map(want_map) => {
+        Node::Map(want_map, _) => {
             let mut changed = false;
             let cur_map = match cur {
-                Some(Node::Map(m)) => Some(m),
+                Some(Node::Map(m, _)) => Some(m),
                 // Type change (file/symlink -> directory): drop the leaf first.
                 Some(Node::Leaf(_)) => {
                     remove_leaf(path)?;
@@ -321,7 +326,7 @@ fn apply_node(
         Node::Leaf(want_leaf) => match cur {
             Some(Node::Leaf(c)) if c == want_leaf => Ok(false),
             // Type change (directory -> file/symlink): remove the subtree first.
-            Some(Node::Map(_)) => {
+            Some(Node::Map(..)) => {
                 remove_tree(path)?;
                 write_leaf(path, want_leaf)?;
                 Ok(true)
@@ -458,7 +463,7 @@ fn remove_tree(path: &Path) -> Result<(), Error> {
 /// so it only deletes what we knew was there.
 fn remove_node(path: &Path, node: &Node<DirLeaf>) -> Result<bool, Error> {
     match node {
-        Node::Map(m) => {
+        Node::Map(m, _) => {
             for (name, child) in m {
                 remove_node(&path.join(name), child)?;
             }
