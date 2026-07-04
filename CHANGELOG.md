@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory mode** (`--format directory`): reconcile a whole directory *tree*
+  instead of a single file — TARGET, DESIRED, and BASE are directories. A
+  directory is a map and a file/symlink is an atomic leaf, so the same three-way
+  merge preserves app-created files and prunes files you stop declaring (keeping
+  user edits). Writes are **minimal and in place** — unchanged files keep their
+  inode and mtime, each file write is atomic, and file contents stream
+  source→destination (never buffered in memory) with a SHA-256 content digest for
+  identity. A file's — and a directory's — **mode, owner (uid/gid), and extended
+  attributes** are tracked and reconciled; an attribute that can't be applied
+  (e.g. no privilege to `chown`) refuses the run rather than leaving a
+  half-applied entry. Symlinks are managed by target and never followed;
+  FIFOs/sockets/devices and non-UTF-8 filenames are refused. The root directory's
+  own attributes are left untouched unless `--manage-root` is given. Opt-in:
+  `directory` is never inferred from a path.
+- `--manage-root` (directory mode) to also reconcile the TARGET directory's own
+  mode/owner/xattrs, not just its contents.
 - **TOML** support alongside JSON, plist, and YAML. The format is inferred from
   TARGET's extension (`.toml`) or forced with `--format toml`. Like YAML, an
   existing TOML target is edited in place (via `toml_edit`) so **comments, blank

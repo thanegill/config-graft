@@ -282,7 +282,10 @@ empty parent; `--no-prune` keeps dropped file; file↔dir type change both ways;
 symlink create/update/dangling; symlink-to-dir not followed; refuse special file
 (exit 1); non-directory TARGET refused (exit 1); `--check` pending exit 3 (tree
 untouched); `--diff` with `/`-joined paths; mode set on create and on mode-only
-change; empty declared dir created; re-apply idempotent.
+change; empty declared dir created; re-apply idempotent; **file owner/xattrs
+tracked and round-tripped; directory mode reconciled with drift corrected; root
+attributes unmanaged by default and managed with `--manage-root`; `--manage-root`
+rejected for non-directory formats (exit 1).**
 
 ## 13. Implementation
 
@@ -291,14 +294,22 @@ Implemented in **Rust** (this repo):
 - `src/value.rs` — the internal value model: a `Leaf` trait and a `Node<L>`
   generic over it. Each format supplies **its own** leaf type (no single enum
   mixing every format's value space), so the encoders are total — a JSON node
-  can't hold a plist `Date`, by construction.
+  can't hold a plist `Date`, by construction. A `Leaf::MapMeta` associated type
+  rides on every `Node::Map` (unit `()` for JSON/plist/YAML/TOML; a directory's
+  own attributes for directory mode) and reconciles through the same engine;
+  `Node`'s `Clone`/`PartialEq`/`Debug` are hand-written to carry it.
 - `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
   unit-tested against §12. Managed key paths are a `KeyPath` newtype.
 - `src/directory.rs` — the `--format directory` backend (§5b): a `DirLeaf` leaf
-  type (file-with-mode / symlink), a recursive `read_tree`, and a minimal-diff
-  `apply_tree`. Not a `Format` (a tree has no byte stream); `main` dispatches
-  `FormatKind::Directory` to a separate `run_directory` that reuses the shared
-  reconcile engine and diff renderer.
+  that stores each file as a **content handle** (length + SHA-256 digest + source
+  path + a generic attribute map of mode/owner/xattrs) or a symlink; a recursive
+  `read_tree` (streaming the digest, never buffering the bytes) and a minimal-diff
+  `apply_tree` that streams bytes source→dest and applies attributes atomically,
+  refusing on failure. A directory's own attributes ride on its map node's
+  `MapMeta`; the root is unmanaged unless `--manage-root`. Not a `Format` (a tree
+  has no byte stream); `main` dispatches `FormatKind::Directory` to a separate
+  `run_directory` that reuses the shared reconcile engine and diff renderer. Uses
+  the `sha2` and `xattr` crates.
 - `src/format/` — one module per format (`json`/`plist`/`yaml`/`toml`), each
   defining its leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and
   `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind`
