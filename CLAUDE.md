@@ -35,16 +35,17 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
 - `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
   `nixos`/`darwinModules` + `overlays.default`). **Three separate module files**,
-  one per platform: `managed-hm.nix` (`home.managed*`), `managed-nixos.nix` and
-  `managed-darwin.nix` (`environment.managed*`). Each is a thin normal
-  `{ config, lib, pkgs, ... }:` module that picks an *engine* record from `lib.nix`
-  and calls its `build`; there is **no dispatch on module type**. `lib.nix` holds
+  one per platform: `home-manager.nix` (`home.managed*`), `nixos.nix` and
+  `darwin.nix` (`environment.managed*`). Each is a thin normal
+  `{ config, lib, pkgs, ... }:` module that supplies a *platform* record and calls
+  `lib.nix`'s `build`; there is **no dispatch on module type**. `lib.nix` holds
   the static `specs` list, the format option/DESIRED helpers + `build` (used by
-  all three), and the engine records: `homeEngine`, and `systemEngine` (shared by
-  the two system files, which differ only in `wireActivation`). Two recursion traps
+  all three), and `systemPlatform` (shared by `nixos.nix`/`darwin.nix`, which
+  differ only in `wireActivation`). The home-manager platform has a single
+  consumer, so it's defined inline in `home-manager.nix`. Two recursion traps
   the module system punishes via `_module.freeformType`, both avoided by
-  construction: (1) the engine is chosen by the *file*, never `pkgs.stdenv`, so
-  config *keys* never depend on `pkgs`; (2) every engine config fragment uses a
+  construction: (1) the platform is chosen by the *file*, never `pkgs.stdenv`, so
+  config *keys* never depend on `pkgs`; (2) every platform config fragment uses a
   **static top-level key** whose value aggregates over `active` (e.g.
   `home.file = listToAttrs … entries`), so the `mkIf` body shape is fixed and
   `active` (hence `config`) isn't forced while keys are determined — never

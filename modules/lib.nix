@@ -1,21 +1,22 @@
 # Shared attributes for the home-manager, NixOS, and nix-darwin modules.
 #
-# Each of those is its own module file (`managed-hm.nix`, `managed-nixos.nix`,
-# `managed-darwin.nix`) that picks an *engine* record and calls `build` here.
+# Each of those is its own module file (`home-manager.nix`, `nixos.nix`,
+# `darwin.nix`) that supplies a *platform* record and calls `build` here.
 # There is no dispatch on module type in this file -- it holds the per-format
-# `specs`, the format-aware option/DESIRED helpers and assembly (`build`), and the
-# engine records: `homeEngine`, and `systemEngine` (shared by the two system
-# modules, which differ only in how activation is wired -- supplied by each).
+# `specs`, the format-aware option/DESIRED helpers and assembly (`build`), and
+# `systemPlatform` (shared by the two system modules, which differ only in how
+# activation is wired -- supplied by each). The home-manager platform has a single
+# consumer, so it lives in `home-manager.nix` rather than here.
 #
-# An engine record provides: `parent` (the option attrset, e.g. "home"),
+# A platform record provides: `parent` (the option attrset, e.g. "home"),
 # `targetOption`/`targetConfig`/`extraEntryOptions`/`optionDescription`,
 # `snapshotRel`/`targetPath`, `recordSnapshots`, `wireActivation`, and `mkScript`.
 #
 # Two recursion traps the module system punishes via `_module.freeformType`, both
 # avoided by construction: `build` is called from inside a normal
-# `{ config, lib, pkgs, ... }:` module (engine chosen by the file, never from
-# `pkgs`, so config keys never depend on `pkgs`); and every config fragment an
-# engine returns keeps a *static* top-level key whose value aggregates over the
+# `{ config, lib, pkgs, ... }:` module (platform chosen by the file, never from
+# `pkgs`, so config keys never depend on `pkgs`); and every config fragment a
+# platform returns keeps a *static* top-level key whose value aggregates over the
 # active entries (e.g. `home.file` built from them), so `mkIf`'s body shape is
 # fixed and `active` (hence `config`) is not forced while keys are determined.
 
@@ -77,21 +78,14 @@ let
     plist = "/Library/Preferences/com.example.app.plist";
   };
 
-  homeTargetExample = {
-    json = ".config/app/config.json";
-    yaml = ".config/app/config.yaml";
-    toml = ".config/app/config.toml";
-    plist = "Library/Preferences/com.example.app.plist";
-  };
-
-  # Assemble `{ options; config; }` for one engine. Called from inside a module,
+  # Assemble `{ options; config; }` for one platform. Called from inside a module,
   # so `config`/`lib`/`pkgs` come from that module's own arguments.
   build =
     {
       config,
       lib,
       pkgs,
-      engine,
+      platform,
     }:
     let
       inherit (lib)
@@ -142,7 +136,7 @@ let
           { name, config, ... }:
           {
             options = {
-              target = engine.targetOption spec;
+              target = platform.targetOption spec;
 
               package = mkPackageOption pkgs "config-graft" { };
 
@@ -154,31 +148,31 @@ let
               };
             }
             // optionalAttrs (isFreeform spec) { format = formatOption spec; }
-            // engine.extraEntryOptions spec;
+            // platform.extraEntryOptions spec;
 
-            config = engine.targetConfig name;
+            config = platform.targetConfig name;
           }
         );
 
       perSpec =
         spec:
         let
-          cfg = config.${engine.parent}.${spec.optionName};
+          cfg = config.${platform.parent}.${spec.optionName};
           active = filterAttrs (_: entry: entry.settings != { }) cfg;
 
           # Per-entry data, built from `active`. It must only feed config *values*,
           # never config *keys* (see the header note on `_module.freeformType`).
           entries = mapAttrsToList (name: entry: rec {
-            snapshotRel = engine.snapshotRel spec name;
+            snapshotRel = platform.snapshotRel spec name;
             desired = mkDesired spec name entry;
-            script = engine.mkScript {
+            script = platform.mkScript {
               inherit
                 spec
                 entry
                 desired
                 snapshotRel
                 ;
-              target = engine.targetPath config entry;
+              target = platform.targetPath config entry;
             };
           }) active;
 
@@ -189,13 +183,13 @@ let
 
           option = mkOption {
             default = { };
-            description = engine.optionDescription spec;
+            description = platform.optionDescription spec;
             type = types.attrsOf (mkSubmodule spec);
           };
 
           config = mkIf (active != { }) (mkMerge [
-            (engine.recordSnapshots { inherit spec entries; })
-            (engine.wireActivation {
+            (platform.recordSnapshots { inherit spec entries; })
+            (platform.wireActivation {
               inherit spec;
               text = activationText;
             })
@@ -205,7 +199,7 @@ let
       built = map perSpec specs;
     in
     {
-      options.${engine.parent} = builtins.listToAttrs (
+      options.${platform.parent} = builtins.listToAttrs (
         map (m: {
           name = m.optionName;
           value = m.option;
@@ -215,7 +209,7 @@ let
       config = mkMerge (map (m: m.config) built);
     };
 
-  # Engine shared by the NixOS and nix-darwin modules. Snapshot rationale: each
+  # Platform shared by the NixOS and nix-darwin modules. Snapshot rationale: each
   # generation embeds its DESIRED into the toplevel closure (via
   # `system.systemBuilderCommands`); during activation `/run/current-system` still
   # points at the previous generation (the symlink swap is activation's last step
@@ -223,7 +217,7 @@ let
   # `/run/current-system/<snapshot>`. Absent on the first switch (or for a newly
   # added entry) -> no pruning. No `cfprefsd` path: cfprefsd domains are per-user,
   # not a system concern. Each system module supplies `wireActivation`.
-  systemEngine = lib: {
+  systemPlatform = lib: {
     parent = "environment";
 
     targetOption =
@@ -281,136 +275,11 @@ let
       '';
   };
 
-  # Engine for the home-manager module. Snapshot rationale: config-graft needs the
-  # settings we applied *last* time as BASE. We take them from the previous
-  # home-manager generation, not mutable state -- each entry's DESIRED is linked as
-  # a `home.file` (the snapshot), so the prior generation's copy is reachable at
-  # `$oldGenPath/home-files/<snapshot>` on the next switch (GC-safe: the old
-  # generation is a GC root). Unset $oldGenPath on the first switch -> no pruning.
-  homeEngine = lib: {
-    parent = "home";
-
-    targetOption =
-      spec:
-      lib.mkOption {
-        type = lib.types.str;
-        example = homeTargetExample.${spec.fmt};
-        description = "Path of the managed ${spec.fmt} file, relative to the home directory.";
-      };
-
-    targetConfig = name: { target = lib.mkDefault name; };
-
-    extraEntryOptions =
-      spec:
-      lib.optionalAttrs (spec.kind == "plist") {
-        cfprefsdDomain = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
-          example = "com.example.app";
-          description = ''
-            macOS preference domain backing this plist (e.g. `com.example.app` for
-            {file}`~/Library/Preferences/com.example.app.plist`). When set,
-            {option}`settings` are reconciled through `cfprefsd` instead of by
-            editing {option}`target` in place: {command}`defaults export` reads the
-            live domain, {command}`config-graft` deep-merges and prunes, and
-            {command}`defaults import` writes the result back -- so the change isn't
-            lost to cfprefsd's in-memory cache. A running app keeps its own copy of
-            the prefs, so quit it before switching and relaunch afterwards.
-            {option}`target` is ignored in this mode.
-          '';
-        };
-      };
-
-    optionDescription = spec: ''
-      ${spec.fmt} configuration files that an application owns and writes to, but
-      which home-manager should partially manage. Each entry deep-merges its
-      {option}`settings` into {option}`target` during activation (via
-      {command}`config-graft`), keeping keys the app wrote that aren't managed here
-      and pruning keys dropped from Nix. All activation is handled by this module.
-    '';
-
-    snapshotRel = spec: name: ".local/state/home-manager/managed-${spec.fmt}/${name}.${spec.ext}";
-
-    targetPath = config: entry: "${config.home.homeDirectory}/${entry.target}";
-
-    # Static top-level key (`home.file`); the per-entry snapshot links are its
-    # value.
-    recordSnapshots =
-      { entries, ... }:
-      {
-        home.file = builtins.listToAttrs (
-          map (e: {
-            name = e.snapshotRel;
-            value.source = e.desired;
-          }) entries
-        );
-      };
-
-    wireActivation =
-      { spec, text }:
-      {
-        home.activation.${spec.optionName} = lib.hm.dag.entryAfter [ "writeBoundary" ] text;
-      };
-
-    mkScript =
-      {
-        spec,
-        entry,
-        desired,
-        snapshotRel,
-        target,
-      }:
-      # Previous run's settings = the prior generation's snapshot. Unset on the
-      # first switch, so PREVIOUS stays empty.
-      ''
-        _prev=""
-        if [[ -v oldGenPath && -e "$oldGenPath/home-files/${snapshotRel}" ]]; then
-          _prev="$oldGenPath/home-files/${snapshotRel}"
-          verboseEcho "Pruning against previous snapshot $_prev"
-        fi
-      ''
-      + (
-        if spec.kind == "plist" && entry.cfprefsdDomain != null then
-          ''
-            _domain=${lib.escapeShellArg entry.cfprefsdDomain}
-            _i "Reconciling managed plist domain %s" "$_domain"
-
-            # Read the live domain through cfprefsd (not the on-disk file, which
-            # may be staler than cfprefsd's cache). Empty/missing domain -> start
-            # from an empty plist.
-            _live=$(mktemp)
-            /usr/bin/defaults export "$_domain" "$_live" 2>/dev/null || true
-            [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
-
-            # Graft our settings into the live state in place, then push the merged
-            # result back through cfprefsd so it adopts it.
-            run ${lib.getExe entry.package} \
-              --format plist \
-              "$_live" \
-              ${desired} \
-              "$_prev"
-            run /usr/bin/defaults import "$_domain" "$_live"
-            rm -f "$_live"
-          ''
-        else
-          ''
-            _target=${lib.escapeShellArg target}
-            _i "Reconciling managed ${spec.fmt} file %s" "$_target"
-
-            run ${lib.getExe entry.package} \
-              --format ${spec.fmt} \
-              "$_target" \
-              ${desired} \
-              "$_prev"
-          ''
-      );
-  };
 in
 {
   inherit
     specs
     build
-    homeEngine
-    systemEngine
+    systemPlatform
     ;
 }

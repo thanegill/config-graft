@@ -33,21 +33,21 @@
 
       # Declarative wrappers exposing `managed{Json,Plist,Yaml,Toml}` -- one per
       # format config-graft reconciles. `home.*` for home-manager,
-      # `environment.*` for NixOS / nix-darwin. The three modules share one engine
-      # (modules/lib.nix). All need `config-graft` on PATH: apply
+      # `environment.*` for NixOS / nix-darwin. The three modules share one
+      # assembly (modules/lib.nix). All need `config-graft` on PATH: apply
       # `overlays.default`, or set each entry's `package`. Each is exposed under
       # both `default` and the named `config-graft` attribute.
       homeManagerModules = {
-        config-graft = ./modules/managed-hm.nix;
-        default = ./modules/managed-hm.nix;
+        config-graft = ./modules/home-manager.nix;
+        default = ./modules/home-manager.nix;
       };
       nixosModules = {
-        config-graft = ./modules/managed-nixos.nix;
-        default = ./modules/managed-nixos.nix;
+        config-graft = ./modules/nixos.nix;
+        default = ./modules/nixos.nix;
       };
       darwinModules = {
-        config-graft = ./modules/managed-darwin.nix;
-        default = ./modules/managed-darwin.nix;
+        config-graft = ./modules/darwin.nix;
+        default = ./modules/darwin.nix;
       };
 
       # All the tools needed to build, test, lint, and format the crate.

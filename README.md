@@ -168,11 +168,12 @@ Each module is also exposed under the name `config-graft` (e.g.
 
 An entry with empty `settings` is inert. Freeform formats (JSON/YAML/TOML) accept
 a `format` override (any `pkgs.formats`-style generator) for schema-checked
-output. There's a module per platform — [`managed-hm.nix`](modules/managed-hm.nix),
-[`managed-nixos.nix`](modules/managed-nixos.nix),
-[`managed-darwin.nix`](modules/managed-darwin.nix) — each selecting an engine from
-[`lib.nix`](modules/lib.nix), which holds the per-format specs, assembly, and the
-engine records; see it for the option docs and the snapshot/prune rationale.
+output. There's a module per platform — [`home-manager.nix`](modules/home-manager.nix),
+[`nixos.nix`](modules/nixos.nix),
+[`darwin.nix`](modules/darwin.nix) — each supplying a *platform* record to the
+shared assembly in [`lib.nix`](modules/lib.nix), which holds the per-format specs,
+assembly, and the shared system platform; see it for the option docs and the
+snapshot/prune rationale.
 
 ## Develop
 

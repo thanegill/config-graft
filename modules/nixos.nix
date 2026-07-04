@@ -1,8 +1,8 @@
 # NixOS module: declaratively manage system-level config files an application owns
 # and writes to itself, via `environment.managed{Json,Plist,Yaml,Toml}`. The
-# per-format specs, assembly, and system engine are shared (./lib.nix); this file
-# only wires activation the NixOS way -- an arbitrary-named activation script per
-# format, run via the activation topological sort.
+# per-format specs, assembly, and system platform are shared (./lib.nix); this
+# file only wires activation the NixOS way -- an arbitrary-named activation script
+# per format, run via the activation topological sort.
 {
   config,
   lib,
@@ -13,7 +13,7 @@
 let
   cg = import ./lib.nix;
 
-  engine = cg.systemEngine lib // {
+  platform = cg.systemPlatform lib // {
     wireActivation =
       { spec, text }:
       {
@@ -29,6 +29,6 @@ cg.build {
     config
     lib
     pkgs
-    engine
+    platform
     ;
 }
