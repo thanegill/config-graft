@@ -52,6 +52,8 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   `mkMerge (mapAttrsToList … active)` at the top. Pruning uses the previous
   generation as BASE: HM via `$oldGenPath/home-files/<snap>`, system via
   `/run/current-system/<snap>` embedded with `system.systemBuilderCommands`.
+  `examples/{home-manager,nixos,nix-darwin}/` are self-contained consumer flakes
+  (relative `path:../..` input) that each evaluate to a full `toplevel`.
 
 ## Gotchas
 

@@ -187,7 +187,9 @@ binary, and pull in the wrapper for your platform. A standalone home-manager
 
 For NixOS or nix-darwin, add `config-graft.nixosModules.default` (or
 `darwinModules.default`) and the overlay to your system's `modules`, then set
-`environment.managed{Json,Plist,Yaml,Toml}` entries with absolute targets.
+`environment.managed{Json,Plist,Yaml,Toml}` entries with absolute targets. See
+[`examples/`](examples) for a complete flake per platform (home-manager, NixOS,
+nix-darwin).
 
 An entry with empty `settings` is inert. Freeform formats (JSON/YAML/TOML) accept
 a `format` override (any `pkgs.formats`-style generator) for schema-checked
