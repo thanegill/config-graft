@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{fchown, symlink, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{chown, symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -151,6 +151,9 @@ fn write_err(path: &Path, source: io::Error) -> Error {
 /// output, is deterministic.
 pub fn read_tree(path: &Path) -> Result<Option<Node<DirLeaf>>, Error> {
     match fs::metadata(path) {
+        // The root directory's *own* attributes are not managed (it's the target
+        // you point at, not something DESIRED owns), so it gets empty metadata —
+        // only its contents, and nested directories, are reconciled.
         Ok(m) if m.is_dir() => Ok(Some(read_dir(path, BTreeMap::new())?)),
         Ok(_) => Err(Error::NotDirectory(path.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -187,7 +190,8 @@ fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
         let target = fs::read_link(path).map_err(|e| read_err(path, e))?;
         Ok(Node::Leaf(DirLeaf::Symlink { target }))
     } else if ft.is_dir() {
-        read_dir(path, BTreeMap::new())
+        // A nested directory carries its own attributes (unlike the root).
+        read_dir(path, read_attrs(path, &meta))
     } else if ft.is_file() {
         Ok(Node::Leaf(DirLeaf::File {
             source: path.to_path_buf(),
@@ -302,19 +306,29 @@ fn apply_node(
     want: &Node<DirLeaf>,
 ) -> Result<bool, Error> {
     match want {
-        Node::Map(want_map, _) => {
+        Node::Map(want_map, want_meta) => {
             let mut changed = false;
             let cur_map = match cur {
-                Some(Node::Map(m, _)) => Some(m),
+                Some(Node::Map(m, cur_meta)) => {
+                    // Only touch the directory's attributes if they drifted. An
+                    // empty `want_meta` (the root) makes this a no-op.
+                    if cur_meta != want_meta {
+                        apply_attrs(path, want_meta)?;
+                        changed = true;
+                    }
+                    Some(m)
+                }
                 // Type change (file/symlink -> directory): drop the leaf first.
                 Some(Node::Leaf(_)) => {
                     remove_leaf(path)?;
                     mkdir(path)?;
+                    apply_attrs(path, want_meta)?;
                     changed = true;
                     None
                 }
                 None => {
                     mkdir(path)?;
+                    apply_attrs(path, want_meta)?;
                     changed = true;
                     None
                 }
@@ -360,20 +374,19 @@ fn write_file(dest: &Path, source: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> 
     let mut tmp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| write_err(dest, e))?;
     io::copy(&mut src, tmp.as_file_mut()).map_err(|e| write_err(dest, e))?;
     tmp.as_file().sync_all().map_err(|e| write_err(dest, e))?;
-    apply_attrs(&tmp, attrs)?;
+    // Attributes go on the temp file, before the rename, so a failure to set any
+    // of them leaves nothing on disk.
+    apply_attrs(tmp.path(), attrs)?;
     tmp.persist(dest).map_err(|e| write_err(dest, e.error))?;
     Ok(())
 }
 
-/// Apply `attrs` to the freshly written temp file. Extended attributes first,
-/// then ownership, then mode last (chown(2) clears the setuid/setgid bits, so
-/// mode must follow it). Any failure is propagated so the caller refuses rather
-/// than landing a half-attributed file.
-fn apply_attrs(
-    tmp: &tempfile::NamedTempFile,
-    attrs: &BTreeMap<String, Vec<u8>>,
-) -> Result<(), Error> {
-    let path = tmp.path();
+/// Apply `attrs` (mode/owner/xattrs) to `path` — a file or a directory. Extended
+/// attributes first, then ownership, then mode last (chown(2) clears the
+/// setuid/setgid bits, so mode must follow it). Any failure is propagated so the
+/// caller refuses rather than landing a half-attributed entry. An empty map is a
+/// no-op.
+fn apply_attrs(path: &Path, attrs: &BTreeMap<String, Vec<u8>>) -> Result<(), Error> {
     for (key, value) in attrs {
         if let Some(name) = key.strip_prefix("xattr:") {
             xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
@@ -382,11 +395,10 @@ fn apply_attrs(
     let uid = attr_num(attrs, "uid", 10)?;
     let gid = attr_num(attrs, "gid", 10)?;
     if uid.is_some() || gid.is_some() {
-        fchown(tmp.as_file(), uid, gid).map_err(|e| write_err(path, e))?;
+        chown(path, uid, gid).map_err(|e| write_err(path, e))?;
     }
     if let Some(mode) = attr_num(attrs, "mode", 8)? {
-        tmp.as_file()
-            .set_permissions(fs::Permissions::from_mode(mode))
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
             .map_err(|e| write_err(path, e))?;
     }
     Ok(())
@@ -693,5 +705,47 @@ mod tests {
         // Idempotent: the reapplied tree carries the same attribute, so no rewrite.
         let cur = read_tree(&root).unwrap().unwrap();
         assert!(!apply_tree(&root, Some(&cur), &want).unwrap());
+    }
+
+    fn dir_mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn reconciles_directory_mode_and_corrects_drift() {
+        let src = tempfile::tempdir().unwrap();
+        fs::create_dir(src.path().join("d")).unwrap();
+        fs::set_permissions(src.path().join("d"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(src.path().join("d/f.txt"), "x").unwrap();
+        let want = read_tree(src.path()).unwrap().unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let root = dst.path().join("out");
+        apply_tree(&root, None, &want).unwrap();
+        assert_eq!(dir_mode(&root.join("d")), 0o700);
+
+        // Drift the applied directory's mode; reconcile must detect and fix it.
+        fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o755)).unwrap();
+        let cur = read_tree(&root).unwrap().unwrap();
+        assert_ne!(cur, want); // directory-mode drift is part of the identity
+        assert!(apply_tree(&root, Some(&cur), &want).unwrap());
+        assert_eq!(dir_mode(&root.join("d")), 0o700);
+    }
+
+    #[test]
+    fn root_directory_attributes_are_not_managed() {
+        let src = tempfile::tempdir().unwrap();
+        fs::set_permissions(src.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(src.path().join("f.txt"), "x").unwrap();
+        let want = read_tree(src.path()).unwrap().unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let root = dst.path().join("out");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let cur = read_tree(&root).unwrap();
+        apply_tree(&root, cur.as_ref(), &want).unwrap();
+        // The root keeps its own 0700 even though the source root was 0755.
+        assert_eq!(dir_mode(&root), 0o700);
     }
 }

@@ -142,7 +142,11 @@ config-graft reconciles *which files exist and their contents* — the same
 three-way merge, one filesystem level up. It is opt-in (`--format directory` is
 never inferred). The tree maps onto the same value model as every other format:
 
-- a **directory** is the map/object shape (the container that merges);
+- a **directory** is the map/object shape (the container that merges); it also
+  carries its **own metadata** (mode/owner/xattrs), reconciled the same way a
+  file's is — with **one exception**: the *root* directory (the target you point
+  at) is left alone, so config-graft never chmod/chown's the directory you aim it
+  at, only what lives inside;
 - a **regular file** is an atomic leaf carrying its whole contents **and its
   metadata** (see below) — config-graft never merges *within* a file, and a
   metadata-only change counts as a change;
