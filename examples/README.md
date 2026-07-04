@@ -14,12 +14,13 @@ Every example applies `config-graft.overlays.default` so the module finds the
 
 ## Trying one
 
-The examples reference this repo with a relative path input
-(`config-graft.url = "path:../.."`) so they track the working tree. In your own
-flake, point it at the published source instead:
+The examples pull config-graft from its published source
+(`config-graft.url = "github:thanegill/config-graft"`). To try one against a local
+checkout instead, override the input:
 
-```nix
-config-graft.url = "github:thanegill/config-graft";
+```sh
+nix eval ./examples/home-manager#homeConfigurations.alice.activationPackage.drvPath \
+  --override-input config-graft path:/path/to/config-graft
 ```
 
 Evaluate a build without applying it, e.g.:

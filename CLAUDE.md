@@ -53,7 +53,9 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   generation as BASE: HM via `$oldGenPath/home-files/<snap>`, system via
   `/run/current-system/<snap>` embedded with `system.systemBuilderCommands`.
   `examples/{home-manager,nixos,nix-darwin}/` are self-contained consumer flakes
-  (relative `path:../..` input) that each evaluate to a full `toplevel`.
+  (input `github:thanegill/config-graft`; override with `--override-input
+  config-graft path:.` to test a local checkout) that each evaluate to a full
+  `toplevel`.
 
 ## Gotchas
 

@@ -7,8 +7,7 @@
       url = "github:nix-darwin/nix-darwin";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Outside this repo, use: config-graft.url = "github:thanegill/config-graft";
-    config-graft.url = "path:../..";
+    config-graft.url = "github:thanegill/config-graft";
   };
 
   outputs =
