@@ -20,13 +20,17 @@
       darwinConfigurations.example = nix-darwin.lib.darwinSystem {
         modules = [
           config-graft.darwinModules.default
+
+          # --- minimal host stub so the example evaluates; replace with yours ---
           {
             nixpkgs.hostPlatform = "aarch64-darwin";
+            system.stateVersion = 5;
+          }
 
-            # System files an app owns and rewrites; reconciled during the
-            # postActivation phase with the previous generation as BASE. The
-            # attribute name is the target's absolute path (override with `target`).
-
+          # config-graft: system files an app owns and rewrites; reconciled during
+          # the postActivation phase with the previous generation as BASE. The
+          # attribute name is the target's absolute path (override with `target`).
+          {
             # (1) Edited in place: config-graft rewrites the .plist file directly.
             environment.managedPlist."/Library/Preferences/com.acme.editor.plist".settings = {
               ShowLineNumbers = true;
@@ -40,9 +44,6 @@
               cfprefsdDomain = "com.acme.daemon";
               settings.LogLevel = "info";
             };
-
-            # --- minimal host stub so the example evaluates; replace with yours ---
-            system.stateVersion = 5;
           }
         ];
       };

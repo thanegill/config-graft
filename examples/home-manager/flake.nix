@@ -27,15 +27,19 @@
 
         modules = [
           config-graft.homeManagerModules.default
+
+          # --- minimal home stub so the example evaluates; replace with yours ---
           {
             home.username = "alice";
             home.homeDirectory = "/home/alice";
             home.stateVersion = "24.05";
+          }
 
-            # Graft a few keys into files the apps keep rewriting: keys the app
-            # owns are preserved, keys you drop here are pruned on the next switch
-            # (BASE is the previous generation's snapshot). The attribute name is
-            # the target path, relative to $HOME (override with `target` if needed).
+          # config-graft: graft a few keys into files the apps keep rewriting; keys
+          # the app owns are preserved, keys you drop here are pruned on the next
+          # switch (BASE is the previous generation's snapshot). The attribute name
+          # is the target path, relative to $HOME (override with `target`).
+          {
             home.managedJson.".config/app/config.json".settings = {
               theme = "dark";
               editor.fontSize = 14;
