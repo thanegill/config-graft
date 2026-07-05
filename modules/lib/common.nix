@@ -1,10 +1,21 @@
-# Format-agnostic leaf helpers shared by the three managed-file modules. These are
-# plain functions with no per-platform dispatch: each module writes its own
-# `options`/`config` linearly and calls these for the pieces every platform shares
-# (the entry submodule, the DESIRED store path, the build-time assertions).
+# Format-agnostic pieces shared by the three managed-file modules. Plain helpers
+# with no per-platform dispatch: each module writes its own `options`/`config`
+# linearly and calls these for the entry submodule, the DESIRED store path, the
+# reconcile script, and the build-time assertions.
 let
   inherit (import ./formats.nix) isFreeform;
-  cfprefsdDomainOption = import ./cfprefsd.nix;
+
+  # macOS preference-domain option (plist only). Reconciling through `cfprefsd`
+  # (`defaults`/`plutil`) is macOS-only; each platform supplies its own
+  # `description`, and `mkAssertions` guards a Darwin host when it's set.
+  cfprefsdDomainOption =
+    lib: description:
+    lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "com.example.app";
+      inherit description;
+    };
 in
 {
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
@@ -93,6 +104,37 @@ in
         }
       )
     );
+
+  # The per-entry reconcile script, shared by every platform. It uses `run` (run a
+  # command) and `_i` (info log): home-manager provides these in its activation
+  # context, and the system module defines pass-through shims. The caller sets
+  # `_prev` (the BASE snapshot path) beforehand and passes the resolved `target`.
+  mkReconcileScript =
+    lib: format: entry: desired: target:
+    if format.kind == "plist" && entry.cfprefsdDomain != null then
+      ''
+        _domain=${lib.escapeShellArg entry.cfprefsdDomain}
+        _i "Reconciling managed plist domain %s" "$_domain"
+
+        # Read the live domain through cfprefsd (not the on-disk file, which may be
+        # staler than cfprefsd's cache). Empty/missing domain -> start from an empty
+        # plist.
+        _live=$(mktemp)
+        /usr/bin/defaults export "$_domain" "$_live" 2>/dev/null || true
+        [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
+
+        # Graft our settings into the live state, then push it back through cfprefsd
+        # so it adopts the merged result.
+        run ${lib.getExe entry.package} --format plist "$_live" ${desired} "$_prev"
+        run /usr/bin/defaults import "$_domain" "$_live"
+        rm -f "$_live"
+      ''
+    else
+      ''
+        _target=${lib.escapeShellArg target}
+        _i "Reconciling managed ${format.format} file %s" "$_target"
+        run ${lib.getExe entry.package} --format ${format.format} "$_target" ${desired} "$_prev"
+      '';
 
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
   # macOS-only tooling, and `settings`/`source` are mutually exclusive.

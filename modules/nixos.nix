@@ -14,12 +14,10 @@
 import ./lib/system.nix {
   inherit config lib pkgs;
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-  activationWiring =
-    { format, text }:
-    {
-      system.activationScripts.${format.optionName} = {
-        deps = [ "etc" ];
-        inherit text;
-      };
+  activationWiring = script: {
+    system.activationScripts.config-graft = {
+      deps = [ "etc" ];
+      text = "${script}";
     };
+  };
 }

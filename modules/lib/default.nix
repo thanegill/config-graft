@@ -3,11 +3,10 @@
 # `options`/`config` linearly and pulls the format-agnostic pieces from here.
 #
 # - `formats.nix`   per-format descriptors (JSON / YAML / TOML / plist)
-# - `common.nix`    the entry submodule type, DESIRED store path, and assertions
-#                   (re-exported here; imported as `./lib` by the module files)
-# - `system.nix`    the linear system module (imported directly by nixos.nix /
-#                   darwin.nix, which pass their activation wiring)
-# - `cfprefsd.nix`  the shared macOS `cfprefsdDomain` option (used by `common.nix`)
+# - `common.nix`    the entry submodule type, DESIRED store path, reconcile script,
+#                   and assertions (re-exported here; the modules import `./lib`)
+# - `system.nix`    the linear system module (imports `./lib`; nixos.nix /
+#                   darwin.nix are thin wrappers passing their activation wiring)
 #
 # Recursion trap the module system punishes via `_module.freeformType`, avoided by
 # construction: a module's config keys never depend on `pkgs` (the module is chosen

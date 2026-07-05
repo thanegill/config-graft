@@ -1,7 +1,8 @@
 # Linear system module for the NixOS and nix-darwin wrappers, which differ only in
 # `activationWiring` (how the reconcile script is placed into activation) and pass
-# their own. Declares `environment.managed{Json,Plist,Yaml,Toml}` and wires each
-# format's activation directly, so the whole system module reads top to bottom.
+# their own. Declares `environment.managed{Json,Plist,Yaml,Toml}` and reconciles all
+# managed system files from a single `config-graft-activation` script, so the whole
+# system module reads top to bottom.
 #
 # Snapshot rationale: each generation embeds its DESIRED into the toplevel closure
 # (via `system.systemBuilderCommands`); during activation `/run/current-system`
@@ -12,8 +13,8 @@
 # `cfprefsd` (as root, so system/global domains) instead of editing the file;
 # a build-time assertion requires a Darwin host.
 let
-  common = import ./common.nix;
-  inherit (import ./formats.nix) formats;
+  configGraftLib = import ./.;
+  inherit (configGraftLib) formats;
 
   systemTargetExample = {
     json = "/etc/app/config.json";
@@ -41,7 +42,7 @@ let
         system activation (via {command}`config-graft`), keeping keys the app wrote
         that aren't managed here and pruning keys dropped from Nix.
       '';
-      type = common.entryType {
+      type = configGraftLib.entryType {
         inherit
           lib
           pkgs
@@ -67,89 +68,47 @@ let
       };
     };
 
-  # No home-manager `run`/`_i` helpers at the system level, so plain bash. Previous
-  # run's settings = the prior generation's snapshot, reachable at /run/current-system
-  # until activation's final symlink swap. Empty on the first switch -> no pruning.
-  mkScript =
-    format: snapshotRel: entry: desired:
+  # The active entries of every format, flattened, each carrying its snapshot path
+  # and DESIRED. Values only -- never used to build config *keys*.
+  activeByFormat = map (format: {
+    inherit format;
+    active = lib.filterAttrs (
+      _: entry: entry.settings != { } || entry.source != null
+    ) config.environment.${format.optionName};
+  }) formats;
+
+  entries = lib.concatMap (
+    { format, active }:
+    lib.mapAttrsToList (name: entry: {
+      inherit format entry;
+      snapshotRel = "config-graft/managed-${format.format}/${name}.${format.fileExtension}";
+      desired = configGraftLib.mkDesired lib pkgs format name entry;
+    }) active
+  ) activeByFormat;
+
+  # A single activation script for all managed system files. The system activation
+  # environment has none of home-manager's helpers, so define pass-through `run` and
+  # `_i` shims (the reconcile body, shared with home-manager, calls them). BASE is
+  # the previous generation's snapshot, reachable at /run/current-system until
+  # activation's final symlink swap; empty on the first switch -> no pruning.
+  activationScript = pkgs.writeShellScript "config-graft-activation" (
     ''
-      _prev="/run/current-system/${snapshotRel}"
-      [[ -e "$_prev" ]] || _prev=""
+      run() { "$@"; }
+      _i() {
+        _fmt="$1"
+        shift
+        printf "config-graft: $_fmt\n" "$@"
+      }
     ''
-    + (
-      if format.kind == "plist" && entry.cfprefsdDomain != null then
-        ''
-          _domain=${lib.escapeShellArg entry.cfprefsdDomain}
-          echo "config-graft: reconciling managed plist domain $_domain"
-
-          # Read the live domain through cfprefsd (not the on-disk file, which may
-          # be staler than cfprefsd's cache). Empty/missing domain -> start from an
-          # empty plist.
-          _live=$(mktemp)
-          /usr/bin/defaults export "$_domain" "$_live" 2>/dev/null || true
-          [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
-
-          # Graft our settings into the live state, then push it back through
-          # cfprefsd so it adopts the merged result.
-          ${lib.getExe entry.package} --format plist "$_live" ${desired} "$_prev"
-          /usr/bin/defaults import "$_domain" "$_live"
-          rm -f "$_live"
-        ''
-      else
-        ''
-          _target=${lib.escapeShellArg entry.target}
-          echo "config-graft: reconciling managed ${format.format} file $_target"
-          ${lib.getExe entry.package} --format ${format.format} "$_target" ${desired} "$_prev"
-        ''
-    );
-
-  managedConfig =
-    format:
-    let
-      active = lib.filterAttrs (
-        _: entry: entry.settings != { } || entry.source != null
-      ) config.environment.${format.optionName};
-
-      entries = lib.mapAttrs (
-        name: entry:
-        let
-          snapshotRel = "config-graft/managed-${format.format}/${name}.${format.fileExtension}";
-          desired = common.mkDesired lib pkgs format name entry;
-        in
-        {
-          inherit snapshotRel desired;
-          script = mkScript format snapshotRel entry desired;
-        }
-      ) active;
-    in
-    lib.mkIf (active != { }) (
-      lib.mkMerge [
-        # Embed each DESIRED into the toplevel closure at its snapshot path.
-        {
-          system.systemBuilderCommands = lib.concatStrings (
-            lib.mapAttrsToList (_: e: ''
-              mkdir -p "$(dirname "$out/${e.snapshotRel}")"
-              ln -s ${e.desired} $out/${e.snapshotRel}
-            '') entries
-          );
-        }
-        (activationWiring {
-          inherit format;
-          text = lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) entries);
-        })
-        {
-          assertions = common.mkAssertions {
-            inherit
-              lib
-              pkgs
-              format
-              active
-              ;
-            parent = "environment";
-          };
-        }
-      ]
-    );
+    + lib.concatMapStringsSep "\n" (
+      e:
+      ''
+        _prev="/run/current-system/${e.snapshotRel}"
+        [[ -e "$_prev" ]] || _prev=""
+      ''
+      + configGraftLib.mkReconcileScript lib e.format e.entry e.desired e.entry.target
+    ) entries
+  );
 in
 {
   options.environment = builtins.listToAttrs (
@@ -159,5 +118,30 @@ in
     }) formats
   );
 
-  config = lib.mkMerge (map managedConfig formats);
+  config = lib.mkIf (entries != [ ]) (
+    lib.mkMerge [
+      # Embed each DESIRED into the toplevel closure at its snapshot path.
+      {
+        system.systemBuilderCommands = lib.concatMapStrings (e: ''
+          mkdir -p "$(dirname "$out/${e.snapshotRel}")"
+          ln -s ${e.desired} $out/${e.snapshotRel}
+        '') entries;
+      }
+      (activationWiring activationScript)
+      {
+        assertions = lib.concatMap (
+          { format, active }:
+          configGraftLib.mkAssertions {
+            inherit
+              lib
+              pkgs
+              format
+              active
+              ;
+            parent = "environment";
+          }
+        ) activeByFormat;
+      }
+    ]
+  );
 }

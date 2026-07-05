@@ -19,7 +19,7 @@
   ...
 }:
 let
-  cg = import ./lib;
+  configGraftLib = import ./lib;
 
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
@@ -41,7 +41,7 @@ let
         {command}`config-graft`), keeping keys the app wrote that aren't managed here
         and pruning keys dropped from Nix. All activation is handled by this module.
       '';
-      type = cg.entryType {
+      type = configGraftLib.entryType {
         inherit
           lib
           pkgs
@@ -83,41 +83,7 @@ let
         verboseEcho "Pruning against previous snapshot $_prev"
       fi
     ''
-    + (
-      if format.kind == "plist" && entry.cfprefsdDomain != null then
-        ''
-          _domain=${lib.escapeShellArg entry.cfprefsdDomain}
-          _i "Reconciling managed plist domain %s" "$_domain"
-
-          # Read the live domain through cfprefsd (not the on-disk file, which
-          # may be staler than cfprefsd's cache). Empty/missing domain -> start
-          # from an empty plist.
-          _live=$(mktemp)
-          /usr/bin/defaults export "$_domain" "$_live" 2>/dev/null || true
-          [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
-
-          # Graft our settings into the live state in place, then push the merged
-          # result back through cfprefsd so it adopts it.
-          run ${lib.getExe entry.package} \
-            --format plist \
-            "$_live" \
-            ${desired} \
-            "$_prev"
-          run /usr/bin/defaults import "$_domain" "$_live"
-          rm -f "$_live"
-        ''
-      else
-        ''
-          _target=${lib.escapeShellArg target}
-          _i "Reconciling managed ${format.format} file %s" "$_target"
-
-          run ${lib.getExe entry.package} \
-            --format ${format.format} \
-            "$_target" \
-            ${desired} \
-            "$_prev"
-        ''
-    );
+    + configGraftLib.mkReconcileScript lib format entry desired target;
 
   managedConfig =
     format:
@@ -130,7 +96,7 @@ let
         name: entry:
         let
           snapshotRel = ".local/state/home-manager/managed-${format.format}/${name}.${format.fileExtension}";
-          desired = cg.mkDesired lib pkgs format name entry;
+          desired = configGraftLib.mkDesired lib pkgs format name entry;
         in
         {
           inherit snapshotRel desired;
@@ -146,7 +112,7 @@ let
         lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) entries)
       );
 
-      assertions = cg.mkAssertions {
+      assertions = configGraftLib.mkAssertions {
         inherit
           lib
           pkgs
@@ -162,8 +128,8 @@ in
     map (format: {
       name = format.optionName;
       value = managedOption format;
-    }) cg.formats
+    }) configGraftLib.formats
   );
 
-  config = lib.mkMerge (map managedConfig cg.formats);
+  config = lib.mkMerge (map managedConfig configGraftLib.formats);
 }
