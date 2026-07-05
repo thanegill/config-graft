@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
-use crate::format::directory::{self, DirLeaf};
+use crate::format::directory::{self, AttrPolicy, DirLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, WriteOpts};
 use crate::reconcile::{reconcile, sort_keys, MergeKeys, Options};
 use crate::value::{Leaf, Node};
@@ -182,6 +182,18 @@ impl<F: Format> Backend for ByteBackend<F> {
                 only: "--format directory",
             });
         }
+        if cli.no_owner {
+            return Err(Error::IncompatibleFlag {
+                flag: "--no-owner",
+                only: "--format directory",
+            });
+        }
+        if cli.xattrs.is_some() {
+            return Err(Error::IncompatibleFlag {
+                flag: "--xattrs",
+                only: "--format directory",
+            });
+        }
         Ok(())
     }
 
@@ -270,7 +282,7 @@ impl Backend for Directory {
     }
 
     fn read(cli: &Cli, path: &Path) -> Result<Option<Node<DirLeaf>>, Error> {
-        directory::read_tree(path, cli.manage_root)
+        directory::read_tree(path, cli.manage_root, dir_policy(cli))
     }
 
     fn output_bytes(_cli: &Cli, _result: &Node<DirLeaf>) -> Result<Option<Vec<u8>>, Error> {
@@ -293,6 +305,15 @@ impl Backend for Directory {
         base: Option<&Node<DirLeaf>>,
         _output: Option<&[u8]>,
     ) -> Result<(), Error> {
-        directory::apply_tree(&cli.target, Some(target), result, base).map(|_| ())
+        directory::apply_tree(&cli.target, Some(target), result, base, dir_policy(cli)).map(|_| ())
+    }
+}
+
+/// The metadata policy for a directory run: manage everything by default, with
+/// `--no-owner` and `--xattrs` as opt-outs.
+fn dir_policy(cli: &Cli) -> AttrPolicy {
+    AttrPolicy {
+        owner: !cli.no_owner,
+        xattrs: cli.xattrs.unwrap_or_default(),
     }
 }

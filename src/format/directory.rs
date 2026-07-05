@@ -37,6 +37,39 @@ type Digest = [u8; 32];
 /// `attribute name -> raw value` (see [`DirLeaf`] for the well-known keys).
 type Attrs = BTreeMap<String, Vec<u8>>;
 
+/// Which extended attributes are managed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum XattrScope {
+    /// Every extended attribute (default). System namespaces may need privilege.
+    #[default]
+    All,
+    /// A conservative allowlist that excludes privileged/system namespaces
+    /// (SELinux/SMACK `security.*`, POSIX ACLs `system.*`, `trusted.*`, and macOS
+    /// system attributes `com.apple.*`).
+    Safe,
+    /// No extended attributes.
+    None,
+}
+
+/// Which file/directory metadata is reconciled. `owner` (uid/gid) is on by default
+/// (`--no-owner` disables it); `xattrs` defaults to [`XattrScope::All`].
+#[derive(Clone, Copy, Debug)]
+pub struct AttrPolicy {
+    pub owner: bool,
+    pub xattrs: XattrScope,
+}
+
+/// Whether an extended attribute named `name` is within `scope`.
+fn xattr_in_scope(name: &str, scope: XattrScope) -> bool {
+    match scope {
+        XattrScope::All => true,
+        XattrScope::None => false,
+        XattrScope::Safe => !["security.", "system.", "trusted.", "com.apple."]
+            .iter()
+            .any(|prefix| name.starts_with(prefix)),
+    }
+}
+
 /// A single filesystem object the reconcile engine treats atomically: either a
 /// regular file or a symlink. Directories are `Node::Map`, never a leaf.
 ///
@@ -185,7 +218,11 @@ fn write_err(path: &Path, source: io::Error) -> Error {
 /// symlinks *inside* the tree are never followed — they become `Symlink` leaves.
 /// Entries are read in sorted filename order so the tree, and thus `--diff`
 /// output, is deterministic.
-pub fn read_tree(path: &Path, manage_root: bool) -> Result<Option<Node<DirLeaf>>, Error> {
+pub fn read_tree(
+    path: &Path,
+    manage_root: bool,
+    policy: AttrPolicy,
+) -> Result<Option<Node<DirLeaf>>, Error> {
     match fs::metadata(path) {
         Ok(m) if m.is_dir() => {
             // The root directory's *own* attributes are reconciled only with
@@ -193,11 +230,11 @@ pub fn read_tree(path: &Path, manage_root: bool) -> Result<Option<Node<DirLeaf>>
             // nested directories are always reconciled). Not managing the root
             // means config-graft never chmod/chown's the directory you point it at.
             let meta = if manage_root {
-                read_attrs(path, &m)
+                read_attrs(path, &m, policy)
             } else {
                 Attrs::new()
             };
-            Ok(Some(read_dir(path, meta)?))
+            Ok(Some(read_dir(path, meta, policy)?))
         }
         Ok(_) => Err(Error::NotDirectory(path.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -207,7 +244,7 @@ pub fn read_tree(path: &Path, manage_root: bool) -> Result<Option<Node<DirLeaf>>
 
 /// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
 /// directory's own attributes).
-fn read_dir(dir: &Path, meta: Attrs) -> Result<Node<DirLeaf>, Error> {
+fn read_dir(dir: &Path, meta: Attrs, policy: AttrPolicy) -> Result<Node<DirLeaf>, Error> {
     let mut names: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| read_err(dir, e))?
         .map(|e| e.map(|e| e.path()).map_err(|e| read_err(dir, e)))
@@ -221,13 +258,13 @@ fn read_dir(dir: &Path, meta: Attrs) -> Result<Node<DirLeaf>, Error> {
             // A non-UTF-8 filename can't be a String key and wouldn't round-trip.
             None => return Err(Error::UnsupportedFileType(child)),
         };
-        map.insert(name, read_node(&child)?);
+        map.insert(name, read_node(&child, policy)?);
     }
     Ok(Node::Map(map, meta))
 }
 
 /// Classify one tree entry (not following symlinks).
-fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
+fn read_node(path: &Path, policy: AttrPolicy) -> Result<Node<DirLeaf>, Error> {
     let meta = fs::symlink_metadata(path).map_err(|e| read_err(path, e))?;
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -235,13 +272,13 @@ fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
         Ok(Node::Leaf(DirLeaf::Symlink { target }))
     } else if ft.is_dir() {
         // A nested directory carries its own attributes (unlike the root).
-        read_dir(path, read_attrs(path, &meta))
+        read_dir(path, read_attrs(path, &meta, policy), policy)
     } else if ft.is_file() {
         Ok(Node::Leaf(DirLeaf::File {
             source: path.to_path_buf(),
             len: meta.len(),
             digest: hash_file(path)?,
-            attrs: read_attrs(path, &meta),
+            attrs: read_attrs(path, &meta, policy),
         }))
     } else {
         Err(Error::UnsupportedFileType(path.to_path_buf()))
@@ -249,26 +286,33 @@ fn read_node(path: &Path) -> Result<Node<DirLeaf>, Error> {
 }
 
 /// Collect a file's tracked metadata into the generic attribute map: permission
-/// mode, owner (uid/gid), and every extended attribute the OS reports.
+/// mode always; owner (uid/gid) when `policy.owner`; and every extended attribute
+/// the OS reports that is within `policy.xattrs`.
 ///
 /// Reading extended attributes is best-effort and **filesystem-agnostic**: a
 /// filesystem that doesn't support them (so `listxattr` fails) simply contributes
 /// no `xattr:*` entries. (Applying them, by contrast, is strict — see
 /// [`apply_attrs`].)
-fn read_attrs(path: &Path, meta: &fs::Metadata) -> Attrs {
+fn read_attrs(path: &Path, meta: &fs::Metadata, policy: AttrPolicy) -> Attrs {
     let mut attrs = Attrs::new();
     attrs.insert(
         "mode".to_string(),
         format!("{:o}", meta.permissions().mode() & 0o7777).into_bytes(),
     );
-    attrs.insert("uid".to_string(), meta.uid().to_string().into_bytes());
-    attrs.insert("gid".to_string(), meta.gid().to_string().into_bytes());
-    if let Ok(names) = xattr::list(path) {
-        for name in names {
-            // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
-            if let Some(name) = name.to_str() {
-                if let Ok(Some(value)) = xattr::get(path, name) {
-                    attrs.insert(format!("xattr:{name}"), value);
+    if policy.owner {
+        attrs.insert("uid".to_string(), meta.uid().to_string().into_bytes());
+        attrs.insert("gid".to_string(), meta.gid().to_string().into_bytes());
+    }
+    if policy.xattrs != XattrScope::None {
+        if let Ok(names) = xattr::list(path) {
+            for name in names {
+                // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
+                if let Some(name) = name.to_str() {
+                    if xattr_in_scope(name, policy.xattrs) {
+                        if let Ok(Some(value)) = xattr::get(path, name) {
+                            attrs.insert(format!("xattr:{name}"), value);
+                        }
+                    }
                 }
             }
         }
@@ -301,6 +345,7 @@ pub fn apply_tree(
     cur: Option<&Node<DirLeaf>>,
     want: &Node<DirLeaf>,
     base: Option<&Node<DirLeaf>>,
+    policy: AttrPolicy,
 ) -> Result<bool, Error> {
     let (want_map, want_meta) = match want {
         Node::Map(m, meta) => (m, meta),
@@ -315,12 +360,12 @@ pub fn apply_tree(
         _ => None,
     });
     if !want_meta.is_empty() && cur_meta != Some(want_meta) {
-        apply_attrs(root, want_meta)?;
+        apply_attrs(root, want_meta, policy)?;
         changed = true;
     }
     let cur_map = cur.and_then(Node::as_map);
     let base_map = base.and_then(Node::as_map);
-    changed |= apply_dir(root, cur_map, want_map, base_map)?;
+    changed |= apply_dir(root, cur_map, want_map, base_map, policy)?;
     Ok(changed)
 }
 
@@ -353,13 +398,14 @@ fn apply_dir(
     cur: Option<&IndexMap<String, Node<DirLeaf>>>,
     want: &IndexMap<String, Node<DirLeaf>>,
     base: Option<&IndexMap<String, Node<DirLeaf>>>,
+    policy: AttrPolicy,
 ) -> Result<bool, Error> {
     let mut changed = false;
     for (name, want_child) in want {
         let child = dir.join(name);
         let cur_child = cur.and_then(|m| m.get(name));
         let base_child = base.and_then(|m| m.get(name));
-        changed |= apply_node(&child, cur_child, want_child, base_child)?;
+        changed |= apply_node(&child, cur_child, want_child, base_child, policy)?;
     }
     if let Some(cur) = cur {
         for (name, cur_child) in cur {
@@ -378,6 +424,7 @@ fn apply_node(
     cur: Option<&Node<DirLeaf>>,
     want: &Node<DirLeaf>,
     base: Option<&Node<DirLeaf>>,
+    policy: AttrPolicy,
 ) -> Result<bool, Error> {
     match want {
         Node::Map(want_map, want_meta) => {
@@ -387,7 +434,7 @@ fn apply_node(
                     // Only touch the directory's attributes if they drifted. An
                     // empty `want_meta` (the root) makes this a no-op.
                     if cur_meta != want_meta {
-                        apply_attrs(path, want_meta)?;
+                        apply_attrs(path, want_meta, policy)?;
                         changed = true;
                     }
                     Some(m)
@@ -396,19 +443,19 @@ fn apply_node(
                 Some(Node::Leaf(_)) => {
                     remove_leaf(path)?;
                     mkdir(path)?;
-                    apply_attrs(path, want_meta)?;
+                    apply_attrs(path, want_meta, policy)?;
                     changed = true;
                     None
                 }
                 None => {
                     mkdir(path)?;
-                    apply_attrs(path, want_meta)?;
+                    apply_attrs(path, want_meta, policy)?;
                     changed = true;
                     None
                 }
                 Some(Node::Array(_)) => return Err(Error::DirectoryTreeInvariant),
             };
-            changed |= apply_dir(path, cur_map, want_map, base.and_then(Node::as_map))?;
+            changed |= apply_dir(path, cur_map, want_map, base.and_then(Node::as_map), policy)?;
             Ok(changed)
         }
         Node::Leaf(want_leaf) => match cur {
@@ -421,12 +468,12 @@ fn apply_node(
                     return Err(Error::AppDirWouldBeDeleted(path.to_path_buf()));
                 }
                 remove_tree(path)?;
-                write_leaf(path, want_leaf)?;
+                write_leaf(path, want_leaf, policy)?;
                 Ok(true)
             }
             // New, or a differing file/symlink: (over)write atomically.
             _ => {
-                write_leaf(path, want_leaf)?;
+                write_leaf(path, want_leaf, policy)?;
                 Ok(true)
             }
         },
@@ -436,9 +483,9 @@ fn apply_node(
 
 /// Write a leaf (file or symlink) at `path`, atomically replacing whatever plain
 /// file/symlink is there.
-fn write_leaf(path: &Path, leaf: &DirLeaf) -> Result<(), Error> {
+fn write_leaf(path: &Path, leaf: &DirLeaf, policy: AttrPolicy) -> Result<(), Error> {
     match leaf {
-        DirLeaf::File { source, attrs, .. } => write_file(path, source, attrs),
+        DirLeaf::File { source, attrs, .. } => write_file(path, source, attrs, policy),
         DirLeaf::Symlink { target } => atomic_symlink(path, target).map_err(|e| write_err(path, e)),
     }
 }
@@ -446,7 +493,7 @@ fn write_leaf(path: &Path, leaf: &DirLeaf) -> Result<(), Error> {
 /// Atomically write a file at `dest`, streaming its bytes from `source` (never
 /// buffering them) and applying `attrs` to the temp file **before** the rename,
 /// so a failure to set any attribute leaves nothing on disk.
-fn write_file(dest: &Path, source: &Path, attrs: &Attrs) -> Result<(), Error> {
+fn write_file(dest: &Path, source: &Path, attrs: &Attrs, policy: AttrPolicy) -> Result<(), Error> {
     let dir = crate::dest_dir(dest);
     fs::create_dir_all(&dir).map_err(|e| write_err(&dir, e))?;
     let mut src = fs::File::open(source).map_err(|e| read_err(source, e))?;
@@ -455,27 +502,60 @@ fn write_file(dest: &Path, source: &Path, attrs: &Attrs) -> Result<(), Error> {
     tmp.as_file().sync_all().map_err(|e| write_err(dest, e))?;
     // Attributes go on the temp file, before the rename, so a failure to set any
     // of them leaves nothing on disk.
-    apply_attrs(tmp.path(), attrs)?;
+    apply_attrs(tmp.path(), attrs, policy)?;
     tmp.persist(dest).map_err(|e| write_err(dest, e.error))?;
     Ok(())
 }
 
-/// Apply `attrs` (mode/owner/xattrs) to `path` — a file or a directory. Extended
-/// attributes first, then ownership, then mode last (chown(2) clears the
-/// setuid/setgid bits, so mode must follow it). Any failure is propagated so the
-/// caller refuses rather than landing a half-attributed entry. An empty map is a
-/// no-op.
-fn apply_attrs(path: &Path, attrs: &Attrs) -> Result<(), Error> {
-    for (key, value) in attrs {
-        if let Some(name) = key.strip_prefix("xattr:") {
-            xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
+/// Apply `attrs` (mode/owner/xattrs) to `path` — a file or a directory — honoring
+/// `policy`. Extended attributes first (setting the in-scope desired ones and
+/// removing in-scope ones on disk that DESIRED omits, so they converge), then
+/// ownership, then mode last (chown(2) clears the setuid/setgid bits, so mode must
+/// follow it). Any failure is propagated so the caller refuses rather than landing
+/// a half-attributed entry.
+fn apply_attrs(path: &Path, attrs: &Attrs, policy: AttrPolicy) -> Result<(), Error> {
+    if policy.xattrs != XattrScope::None {
+        let desired: std::collections::HashSet<&str> = attrs
+            .keys()
+            .filter_map(|k| k.strip_prefix("xattr:"))
+            .collect();
+        // Remove in-scope xattrs on disk that DESIRED doesn't declare (out-of-scope
+        // ones are left untouched). No-op for a fresh temp file (no xattrs yet).
+        if let Ok(names) = xattr::list(path) {
+            for name in names {
+                if let Some(name) = name.to_str() {
+                    if xattr_in_scope(name, policy.xattrs) && !desired.contains(name) {
+                        xattr::remove(path, name).map_err(|e| write_err(path, e))?;
+                    }
+                }
+            }
+        }
+        for (key, value) in attrs {
+            if let Some(name) = key.strip_prefix("xattr:") {
+                if xattr_in_scope(name, policy.xattrs) {
+                    xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
+                }
+            }
         }
     }
-    let uid = attr_num(path, attrs, "uid", 10)?;
-    let gid = attr_num(path, attrs, "gid", 10)?;
-    if uid.is_some() || gid.is_some() {
-        chown(path, uid, gid).map_err(|e| write_err(path, e))?;
+
+    // Ownership only with `--owner`, and only for a uid/gid that actually differs
+    // from what `path` already has — a fresh temp file is owned by the caller, so
+    // a self-owned tree needs no chown (avoiding a gratuitous chown that can EPERM
+    // on a non-member group).
+    if policy.owner {
+        let uid = attr_num(path, attrs, "uid", 10)?;
+        let gid = attr_num(path, attrs, "gid", 10)?;
+        let cur = fs::metadata(path).ok();
+        let cur_uid = cur.as_ref().map(MetadataExt::uid);
+        let cur_gid = cur.as_ref().map(MetadataExt::gid);
+        let want_uid = uid.filter(|&u| Some(u) != cur_uid);
+        let want_gid = gid.filter(|&g| Some(g) != cur_gid);
+        if want_uid.is_some() || want_gid.is_some() {
+            chown(path, want_uid, want_gid).map_err(|e| write_err(path, e))?;
+        }
     }
+
     if let Some(mode) = attr_num(path, attrs, "mode", 8)? {
         fs::set_permissions(path, fs::Permissions::from_mode(mode))
             .map_err(|e| write_err(path, e))?;
@@ -570,6 +650,12 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
+    /// Default policy for tests: manage everything (matches the CLI default).
+    const POLICY: AttrPolicy = AttrPolicy {
+        owner: true,
+        xattrs: XattrScope::All,
+    };
+
     fn attrs(pairs: &[(&str, &str)]) -> Attrs {
         pairs
             .iter()
@@ -600,7 +686,7 @@ mod tests {
             fs::write(&p, contents).unwrap();
             fs::set_permissions(&p, fs::Permissions::from_mode(*mode)).unwrap();
         }
-        read_tree(dir, false).unwrap().unwrap()
+        read_tree(dir, false, POLICY).unwrap().unwrap()
     }
 
     #[test]
@@ -666,7 +752,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let want = Node::Array(vec![]);
         assert!(matches!(
-            apply_node(&dir.path().join("x"), None, &want, None),
+            apply_node(&dir.path().join("x"), None, &want, None, POLICY),
             Err(Error::DirectoryTreeInvariant)
         ));
     }
@@ -681,6 +767,69 @@ mod tests {
             }
             other => panic!("expected InvalidAttribute, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn xattr_in_scope_excludes_system_namespaces() {
+        for name in [
+            "security.selinux",
+            "system.posix_acl_access",
+            "trusted.x",
+            "com.apple.quarantine",
+        ] {
+            assert!(!xattr_in_scope(name, XattrScope::Safe), "{name}");
+            assert!(xattr_in_scope(name, XattrScope::All), "{name}");
+            assert!(!xattr_in_scope(name, XattrScope::None), "{name}");
+        }
+        assert!(xattr_in_scope("user.foo", XattrScope::Safe));
+        assert!(!xattr_in_scope("user.foo", XattrScope::None));
+    }
+
+    #[test]
+    fn read_attrs_honors_owner_policy() {
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("f");
+        fs::write(&f, "x").unwrap();
+        let meta = fs::metadata(&f).unwrap();
+
+        let without = read_attrs(
+            &f,
+            &meta,
+            AttrPolicy {
+                owner: false,
+                xattrs: XattrScope::All,
+            },
+        );
+        assert!(without.contains_key("mode"));
+        assert!(!without.contains_key("uid") && !without.contains_key("gid"));
+
+        let with = read_attrs(&f, &meta, POLICY);
+        assert!(with.contains_key("uid") && with.contains_key("gid"));
+    }
+
+    #[test]
+    fn directory_xattrs_converge() {
+        let src = tempfile::tempdir().unwrap();
+        fs::create_dir(src.path().join("d")).unwrap();
+        fs::write(src.path().join("d/f.txt"), "x").unwrap();
+        if xattr::set(src.path().join("d"), "user.a", b"1").is_err() {
+            eprintln!("skipping directory_xattrs_converge: xattrs unsupported here");
+            return;
+        }
+        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let root = dst.path().join("out");
+        apply_tree(&root, None, &want, None, POLICY).unwrap();
+        // An app adds an in-scope xattr the DESIRED tree doesn't have.
+        xattr::set(root.join("d"), "user.b", b"2").unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        assert_ne!(cur, want); // drift detected
+
+        apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap();
+        // The unmanaged xattr is removed, so the tree converges (re-apply no-op).
+        assert!(xattr::get(root.join("d"), "user.b").unwrap().is_none());
+        assert_eq!(read_tree(&root, false, POLICY).unwrap().unwrap(), want);
     }
 
     #[test]
@@ -718,13 +867,16 @@ mod tests {
     #[test]
     fn read_missing_is_none_non_dir_is_error() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_tree(&dir.path().join("nope"), false)
+        assert!(read_tree(&dir.path().join("nope"), false, POLICY)
             .unwrap()
             .is_none());
 
         let f = dir.path().join("f");
         fs::write(&f, "x").unwrap();
-        assert!(matches!(read_tree(&f, false), Err(Error::NotDirectory(_))));
+        assert!(matches!(
+            read_tree(&f, false, POLICY),
+            Err(Error::NotDirectory(_))
+        ));
     }
 
     #[test]
@@ -737,15 +889,15 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         symlink("/dangling/target", src.path().join("link")).unwrap();
 
-        let want = read_tree(src.path(), false).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        let changed = apply_tree(&root, None, &want, None).unwrap();
+        let changed = apply_tree(&root, None, &want, None, POLICY).unwrap();
         assert!(changed);
 
         // Re-reading the applied tree yields the same Node (round-trip).
-        assert_eq!(read_tree(&root, false).unwrap().unwrap(), want);
+        assert_eq!(read_tree(&root, false, POLICY).unwrap().unwrap(), want);
         // Executable bit preserved.
         assert_eq!(
             fs::metadata(root.join("run.sh")).unwrap().mode() & 0o777,
@@ -767,13 +919,13 @@ mod tests {
             src1.path(),
             &[("sub/only.txt", "v", 0o644), ("keep.txt", "k", 0o644)],
         );
-        apply_tree(&root, None, &before, None).unwrap();
-        let cur = read_tree(&root, false).unwrap().unwrap();
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
 
         // want drops sub/only.txt entirely; keep.txt stays.
         let src2 = tempfile::tempdir().unwrap();
         let after = tree(src2.path(), &[("keep.txt", "k", 0o644)]);
-        let changed = apply_tree(&root, Some(&cur), &after, None).unwrap();
+        let changed = apply_tree(&root, Some(&cur), &after, None, POLICY).unwrap();
         assert!(changed);
 
         assert!(!root.join("sub").exists());
@@ -786,11 +938,11 @@ mod tests {
         let root = dst.path().join("out");
         let src = tempfile::tempdir().unwrap();
         let want = tree(src.path(), &[("a.txt", "hello", 0o644)]);
-        apply_tree(&root, None, &want, None).unwrap();
-        let cur = read_tree(&root, false).unwrap().unwrap();
+        apply_tree(&root, None, &want, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
         // Nothing changed on a second apply: `cur` (source under `root`) equals
         // `want` (source under `src`) by content+mode despite different paths.
-        assert!(!apply_tree(&root, Some(&cur), &want, None).unwrap());
+        assert!(!apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap());
     }
 
     #[test]
@@ -799,12 +951,12 @@ mod tests {
         let root = dst.path().join("out");
         let src1 = tempfile::tempdir().unwrap();
         let before = tree(src1.path(), &[("p", "iamfile", 0o644)]);
-        apply_tree(&root, None, &before, None).unwrap();
-        let cur = read_tree(&root, false).unwrap().unwrap();
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
 
         let src2 = tempfile::tempdir().unwrap();
         let after = tree(src2.path(), &[("p/inner.txt", "x", 0o644)]);
-        apply_tree(&root, Some(&cur), &after, None).unwrap();
+        apply_tree(&root, Some(&cur), &after, None, POLICY).unwrap();
 
         assert!(root.join("p").is_dir());
         assert_eq!(fs::read_to_string(root.join("p/inner.txt")).unwrap(), "x");
@@ -820,11 +972,11 @@ mod tests {
             eprintln!("skipping reconciles_extended_attributes: xattrs unsupported here");
             return;
         }
-        let want = read_tree(src.path(), false).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        apply_tree(&root, None, &want, None).unwrap();
+        apply_tree(&root, None, &want, None, POLICY).unwrap();
         assert_eq!(
             xattr::get(root.join("f.txt"), "user.cg_test")
                 .unwrap()
@@ -832,8 +984,8 @@ mod tests {
             Some(&b"v1"[..])
         );
         // Idempotent: the reapplied tree carries the same attribute, so no rewrite.
-        let cur = read_tree(&root, false).unwrap().unwrap();
-        assert!(!apply_tree(&root, Some(&cur), &want, None).unwrap());
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        assert!(!apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap());
     }
 
     fn dir_mode(path: &Path) -> u32 {
@@ -846,18 +998,18 @@ mod tests {
         fs::create_dir(src.path().join("d")).unwrap();
         fs::set_permissions(src.path().join("d"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(src.path().join("d/f.txt"), "x").unwrap();
-        let want = read_tree(src.path(), false).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        apply_tree(&root, None, &want, None).unwrap();
+        apply_tree(&root, None, &want, None, POLICY).unwrap();
         assert_eq!(dir_mode(&root.join("d")), 0o700);
 
         // Drift the applied directory's mode; reconcile must detect and fix it.
         fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o755)).unwrap();
-        let cur = read_tree(&root, false).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
         assert_ne!(cur, want); // directory-mode drift is part of the identity
-        assert!(apply_tree(&root, Some(&cur), &want, None).unwrap());
+        assert!(apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap());
         assert_eq!(dir_mode(&root.join("d")), 0o700);
     }
 
@@ -866,14 +1018,14 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         fs::set_permissions(src.path(), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(src.path().join("f.txt"), "x").unwrap();
-        let want = read_tree(src.path(), false).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let cur = read_tree(&root, false).unwrap();
-        apply_tree(&root, cur.as_ref(), &want, None).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap();
+        apply_tree(&root, cur.as_ref(), &want, None, POLICY).unwrap();
         // The root keeps its own 0700 even though the source root was 0755.
         assert_eq!(dir_mode(&root), 0o700);
     }
@@ -884,14 +1036,14 @@ mod tests {
         fs::set_permissions(src.path(), fs::Permissions::from_mode(0o750)).unwrap();
         fs::write(src.path().join("f.txt"), "x").unwrap();
         // With manage_root, the source root's own mode is part of the tree.
-        let want = read_tree(src.path(), true).unwrap().unwrap();
+        let want = read_tree(src.path(), true, POLICY).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let cur = read_tree(&root, true).unwrap();
-        assert!(apply_tree(&root, cur.as_ref(), &want, None).unwrap());
+        let cur = read_tree(&root, true, POLICY).unwrap();
+        assert!(apply_tree(&root, cur.as_ref(), &want, None, POLICY).unwrap());
         // The root is now reconciled to the source root's 0750.
         assert_eq!(dir_mode(&root), 0o750);
     }

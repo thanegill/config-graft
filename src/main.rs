@@ -12,6 +12,7 @@ mod format;
 mod reconcile;
 mod value;
 use backend::{run, ByteBackend, Directory};
+use format::directory::XattrScope;
 use format::{FormatKind, Indent, Json, Plist, Toml, Yaml};
 use reconcile::{get_path, leaf_paths, ArrayStrategy, KeyPath, MergeKeys};
 use value::{Leaf, Node};
@@ -98,6 +99,17 @@ pub(crate) struct Cli {
     /// format is an error.
     #[arg(long = "manage-root")]
     pub(crate) manage_root: bool,
+
+    /// Don't reconcile file/directory ownership (uid/gid). `--format directory`
+    /// only — passing it with another format is an error.
+    #[arg(long = "no-owner")]
+    pub(crate) no_owner: bool,
+
+    /// Which extended attributes to reconcile: `all` (default), `safe` (a
+    /// conservative allowlist that skips privileged/system namespaces), or `none`.
+    /// `--format directory` only — passing it with another format is an error.
+    #[arg(long = "xattrs", value_name = "SCOPE")]
+    pub(crate) xattrs: Option<XattrScope>,
 }
 
 /// Parse `--merge-key` specs into [`MergeKeys`]. Each spec is `FIELD` / `f1,f2`

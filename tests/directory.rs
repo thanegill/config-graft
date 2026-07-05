@@ -600,3 +600,43 @@ fn diff_reports_root_mode_change_with_manage_root() {
         "diff was: {diff:?}"
     );
 }
+
+#[test]
+fn metadata_flags_are_rejected_for_non_directory_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("c.json");
+    let desired = dir.path().join("d.json");
+    fs::write(&desired, "{}").unwrap();
+    // Directory-only metadata flags with a byte format are an error.
+    for flag in [vec!["--no-owner"], vec!["--xattrs", "safe"]] {
+        let mut args = flag.clone();
+        args.push(target.to_str().unwrap());
+        args.push(desired.to_str().unwrap());
+        let out = run(&args); // default (JSON) format
+        assert_eq!(out.status.code(), Some(1), "flag {flag:?}");
+    }
+}
+
+#[test]
+fn no_owner_applies_without_managing_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&desired.join("f.txt"), "hi");
+
+    let out = graft(&[
+        "--no-owner",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read(&target.join("f.txt")), "hi");
+    // Re-run is a no-op (owner isn't part of the identity, so no spurious change).
+    let check = graft(&[
+        "--no-owner",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(check.status.code(), Some(0));
+}
