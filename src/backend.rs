@@ -24,11 +24,13 @@ use crate::Cli;
 /// the format-specific steps here.
 pub(crate) trait Backend {
     type Leaf: Leaf;
-    /// Path separator for `--diff` (`"."` for byte formats, `"/"` for a tree).
-    const DIFF_SEP: &'static str;
+    /// Separator between key-path components in diagnostics (`--diff` lines and
+    /// `merge` conflict warnings): the format's own separator for byte formats
+    /// (`.` for JSON/YAML/TOML, `:` for plist), `/` for a directory tree.
+    const COMPONENT_SEPARATOR: &'static str;
 
     /// Reject CLI flags this backend doesn't support.
-    fn check_flags(cli: &Cli) -> Result<(), Error>;
+    fn check_cli_args(cli: &Cli) -> Result<(), Error>;
 
     /// Parsed `--merge-key` specs for the array engine. Byte formats parse them
     /// against their own key-path separator; a tree has no arrays, so the default
@@ -37,9 +39,9 @@ pub(crate) trait Backend {
         MergeKeys::default()
     }
     /// Error for a DESIRED that is absent/unreadable.
-    fn invalid_desired(path: PathBuf) -> Error;
+    fn error_invalid_desired(path: PathBuf) -> Error;
     /// Error for a DESIRED whose root is not this backend's mapping shape.
-    fn desired_not_mapping(path: PathBuf) -> Error;
+    fn error_desired_not_mapping(path: PathBuf) -> Error;
 
     /// Read a path into a `Node`. `Ok(None)` means absent/coercible-to-empty; an
     /// `Err` is a hard failure (e.g. a non-directory target for the tree backend).
@@ -71,12 +73,12 @@ pub(crate) trait Backend {
 /// The single reconcile-run driver: read the three inputs, reconcile, then
 /// `--diff` / `--check` / `--stdout` / apply. The backend supplies the I/O ends.
 pub(crate) fn run<B: Backend>(cli: &Cli) -> Result<Outcome, Error> {
-    B::check_flags(cli)?;
+    B::check_cli_args(cli)?;
 
     let desired =
-        B::read(cli, &cli.desired)?.ok_or_else(|| B::invalid_desired(cli.desired.clone()))?;
+        B::read(cli, &cli.desired)?.ok_or_else(|| B::error_invalid_desired(cli.desired.clone()))?;
     if !desired.is_map() {
-        return Err(B::desired_not_mapping(cli.desired.clone()));
+        return Err(B::error_desired_not_mapping(cli.desired.clone()));
     }
 
     // Missing/unparseable/non-map TARGET is treated as empty (a hard read error,
@@ -110,7 +112,7 @@ pub(crate) fn run<B: Backend>(cli: &Cli) -> Result<Outcome, Error> {
         eprintln!(
             "config-graft: warning: array `{}` had a contradictory reorder of [{}] \
              between TARGET and DESIRED; resolved deterministically (TARGET order preferred)",
-            c.path.render(B::DIFF_SEP),
+            c.path.render(B::COMPONENT_SEPARATOR),
             elements.join(", ")
         );
     }
@@ -121,7 +123,10 @@ pub(crate) fn run<B: Backend>(cli: &Cli) -> Result<Outcome, Error> {
     let output = B::output_bytes(cli, &result)?;
 
     if cli.diff {
-        print!("{}", crate::diff_text_sep(&target, &result, B::DIFF_SEP));
+        print!(
+            "{}",
+            crate::diff_text_sep(&target, &result, B::COMPONENT_SEPARATOR)
+        );
     }
 
     let changed = B::changed(cli, &target, &result, output.as_deref());
@@ -156,13 +161,13 @@ impl<F: Format> Backend for ByteBackend<F> {
     type Leaf = F::Leaf;
     // Byte formats diff and report conflicts with the format's own key-path
     // separator (`.` for JSON/YAML/TOML, `:` for plist).
-    const DIFF_SEP: &'static str = F::PATH_SEP;
+    const COMPONENT_SEPARATOR: &'static str = F::PATH_SEP;
 
     fn merge_keys(cli: &Cli) -> MergeKeys {
         crate::parse_merge_keys(&cli.merge_key, F::PATH_SEP)
     }
 
-    fn check_flags(cli: &Cli) -> Result<(), Error> {
+    fn check_cli_args(cli: &Cli) -> Result<(), Error> {
         // Format-specific flags must match the resolved format.
         if cli.indent.is_some() && F::KIND != FormatKind::Json {
             return Err(Error::IncompatibleFlag {
@@ -197,11 +202,11 @@ impl<F: Format> Backend for ByteBackend<F> {
         Ok(())
     }
 
-    fn invalid_desired(path: PathBuf) -> Error {
+    fn error_invalid_desired(path: PathBuf) -> Error {
         F::KIND.invalid_desired(path)
     }
 
-    fn desired_not_mapping(path: PathBuf) -> Error {
+    fn error_desired_not_mapping(path: PathBuf) -> Error {
         F::KIND.desired_not_mapping(path)
     }
 
@@ -250,9 +255,9 @@ pub(crate) struct Directory;
 
 impl Backend for Directory {
     type Leaf = DirLeaf;
-    const DIFF_SEP: &'static str = "/";
+    const COMPONENT_SEPARATOR: &'static str = "/";
 
-    fn check_flags(cli: &Cli) -> Result<(), Error> {
+    fn check_cli_args(cli: &Cli) -> Result<(), Error> {
         // Flags that only shape single-file byte output have no meaning for a tree
         // (`--stdout` is rejected by the driver, since a tree has no byte form).
         if cli.indent.is_some() {
@@ -270,14 +275,14 @@ impl Backend for Directory {
         Ok(())
     }
 
-    fn invalid_desired(path: PathBuf) -> Error {
+    fn error_invalid_desired(path: PathBuf) -> Error {
         // Only reached when the read returned `None` (absent); a DESIRED that
         // exists but is not a directory errors out of `read_tree` with a distinct
         // `NotDirectory`.
         Error::MissingDesiredDirectory(path)
     }
 
-    fn desired_not_mapping(path: PathBuf) -> Error {
+    fn error_desired_not_mapping(path: PathBuf) -> Error {
         FormatKind::Directory.desired_not_mapping(path)
     }
 
