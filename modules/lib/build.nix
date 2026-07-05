@@ -1,7 +1,7 @@
 # Assemble `{ options; config; }` for one platform. Called from inside a module,
 # so `config`/`lib`/`pkgs` come from that module's own arguments.
 let
-  inherit (import ./specs.nix) specs isFreeform;
+  inherit (import ./formats.nix) formats isFreeform;
 in
 {
   config,
@@ -33,7 +33,7 @@ let
     if entry.source != null then
       entry.source
     else if isFreeform spec then
-      entry.format.generate "managed-${spec.fmt}-${name}.${spec.ext}" entry.settings
+      entry.format.generate "managed-${spec.format}-${name}.${spec.fileExtension}" entry.settings
     else
       pkgs.writeText "managed-plist-${name}.plist" (
         lib.generators.toPlist { escape = true; } entry.settings
@@ -48,8 +48,8 @@ let
     spec:
     mkOption {
       type = types.raw;
-      default = pkgs.formats.${spec.fmt} { };
-      defaultText = literalExpression "pkgs.formats.${spec.fmt} { }";
+      default = pkgs.formats.${spec.format} { };
+      defaultText = literalExpression "pkgs.formats.${spec.format} { }";
       description = ''
         A `pkgs.formats`-style generator (providing `type` and `generate`) used
         to build {option}`settings`. Override to use a validating format.
@@ -79,15 +79,15 @@ let
             type = settingsType spec config;
             default = { };
             example = spec.settingsExample;
-            description = "Freeform ${spec.fmt} data reconciled into {option}`target`. Empty disables the entry.";
+            description = "Freeform ${spec.format} data reconciled into {option}`target`. Empty disables the entry.";
           };
 
           source = mkOption {
             type = types.nullOr types.path;
             default = null;
-            example = literalExpression "./managed.${spec.ext}";
+            example = literalExpression "./managed.${spec.fileExtension}";
             description = ''
-              A pre-built ${spec.fmt} file to reconcile into {option}`target`,
+              A pre-built ${spec.format} file to reconcile into {option}`target`,
               as an alternative to {option}`settings`, for a DESIRED built some
               other way (another generator, a rendered template, a checked-in
               file, a derivation). Mutually exclusive with {option}`settings`;
@@ -169,7 +169,7 @@ let
       ]);
     };
 
-  built = map perSpec specs;
+  built = map perSpec formats;
 in
 {
   options.${platform.parent} = builtins.listToAttrs (

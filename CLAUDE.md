@@ -39,8 +39,8 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   `darwin.nix` (`environment.managed*`). Each is a thin normal
   `{ config, lib, pkgs, ... }:` module that supplies a *platform* record and calls
   `build` from `modules/lib/`; there is **no dispatch on module type**. `lib/` is
-  split into logical files re-exported by `default.nix`: `specs.nix` (the static
-  per-format `specs`), `build.nix` (the format option/DESIRED helpers + `build`,
+  split into logical files re-exported by `default.nix`: `formats.nix` (the static
+  per-format `formats` descriptors), `build.nix` (the format option/DESIRED helpers + `build`,
   used by all three), `system-platform.nix` (`systemPlatform`, shared by
   `nixos.nix`/`darwin.nix`, which differ only in `wireActivation`), and
   `cfprefsd.nix` (the shared `cfprefsdDomain` option). The home-manager platform has a single

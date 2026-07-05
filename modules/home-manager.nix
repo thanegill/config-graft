@@ -1,5 +1,5 @@
 # home-manager module: declaratively manage config files an application owns and
-# writes to itself, via `home.managed{Json,Plist,Yaml,Toml}`. The per-format specs
+# writes to itself, via `home.managed{Json,Plist,Yaml,Toml}`. The format descriptors
 # and assembly are shared (./lib); the home-manager platform has a single
 # consumer, so it is defined here (mirroring how the system modules supply their
 # own activation wiring). The flake applies this with `self` so the default
@@ -35,8 +35,8 @@ let
       spec:
       lib.mkOption {
         type = lib.types.str;
-        example = homeTargetExample.${spec.fmt};
-        description = "Path of the managed ${spec.fmt} file, relative to the home directory.";
+        example = homeTargetExample.${spec.format};
+        description = "Path of the managed ${spec.format} file, relative to the home directory.";
       };
 
     targetConfig = name: { target = lib.mkDefault name; };
@@ -58,14 +58,15 @@ let
       };
 
     optionDescription = spec: ''
-      ${spec.fmt} configuration files that an application owns and writes to, but
+      ${spec.format} configuration files that an application owns and writes to, but
       which home-manager should partially manage. Each entry deep-merges its
       {option}`settings` into {option}`target` during activation (via
       {command}`config-graft`), keeping keys the app wrote that aren't managed here
       and pruning keys dropped from Nix. All activation is handled by this module.
     '';
 
-    snapshotRel = spec: name: ".local/state/home-manager/managed-${spec.fmt}/${name}.${spec.ext}";
+    snapshotRel =
+      spec: name: ".local/state/home-manager/managed-${spec.format}/${name}.${spec.fileExtension}";
 
     targetPath = config: entry: "${config.home.homeDirectory}/${entry.target}";
 
@@ -131,10 +132,10 @@ let
         else
           ''
             _target=${lib.escapeShellArg target}
-            _i "Reconciling managed ${spec.fmt} file %s" "$_target"
+            _i "Reconciling managed ${spec.format} file %s" "$_target"
 
             run ${lib.getExe entry.package} \
-              --format ${spec.fmt} \
+              --format ${spec.format} \
               "$_target" \
               ${desired} \
               "$_prev"

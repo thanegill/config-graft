@@ -7,7 +7,7 @@
 # rather than here; `systemPlatform` is shared by the two system modules (which
 # differ only in how activation is wired, supplied by each).
 #
-# - `specs.nix`           per-format descriptors (JSON / YAML / TOML / plist)
+# - `formats.nix`         per-format descriptors (JSON / YAML / TOML / plist)
 # - `build.nix`           assemble `{ options; config; }` for one platform
 # - `system-platform.nix` the platform record shared by nixos.nix / darwin.nix
 # - `cfprefsd.nix`        the shared macOS `cfprefsdDomain` option
@@ -26,7 +26,7 @@
 # active entries (e.g. `home.file` built from them), so `mkIf`'s body shape is
 # fixed and `active` (hence `config`) is not forced while keys are determined.
 {
-  inherit (import ./specs.nix) specs;
+  inherit (import ./formats.nix) formats;
   build = import ./build.nix;
   systemPlatform = import ./system-platform.nix;
   cfprefsdDomainOption = import ./cfprefsd.nix;

@@ -2,10 +2,10 @@
 # `pkgs.formats` generator) vs. plist (`lib.generators.toPlist`); `isFreeform` is
 # the predicate `build` and the platforms branch on.
 {
-  specs = [
+  formats = [
     {
-      fmt = "json";
-      ext = "json";
+      format = "json";
+      fileExtension = "json";
       optionName = "managedJson";
       kind = "freeform";
       settingsExample = {
@@ -14,8 +14,8 @@
       };
     }
     {
-      fmt = "yaml";
-      ext = "yaml";
+      format = "yaml";
+      fileExtension = "yaml";
       optionName = "managedYaml";
       kind = "freeform";
       settingsExample = {
@@ -24,8 +24,8 @@
       };
     }
     {
-      fmt = "toml";
-      ext = "toml";
+      format = "toml";
+      fileExtension = "toml";
       optionName = "managedToml";
       kind = "freeform";
       settingsExample = {
@@ -34,8 +34,8 @@
       };
     }
     {
-      fmt = "plist";
-      ext = "plist";
+      format = "plist";
+      fileExtension = "plist";
       optionName = "managedPlist";
       kind = "plist";
       settingsExample = {

@@ -24,8 +24,8 @@ lib: {
     spec:
     lib.mkOption {
       type = lib.types.str;
-      example = systemTargetExample.${spec.fmt};
-      description = "Absolute path of the managed ${spec.fmt} file. Defaults to the attribute name.";
+      example = systemTargetExample.${spec.format};
+      description = "Absolute path of the managed ${spec.format} file. Defaults to the attribute name.";
     };
 
   targetConfig = name: { target = lib.mkDefault name; };
@@ -47,14 +47,14 @@ lib: {
     };
 
   optionDescription = spec: ''
-    System-level ${spec.fmt} configuration files that an application owns and
+    System-level ${spec.format} configuration files that an application owns and
     writes to, but which should be partially managed declaratively. Each entry
     deep-merges its {option}`settings` into the absolute {option}`target` during
     system activation (via {command}`config-graft`), keeping keys the app wrote
     that aren't managed here and pruning keys dropped from Nix.
   '';
 
-  snapshotRel = spec: name: "config-graft/managed-${spec.fmt}/${name}.${spec.ext}";
+  snapshotRel = spec: name: "config-graft/managed-${spec.format}/${name}.${spec.fileExtension}";
 
   targetPath = _config: entry: entry.target;
 
@@ -109,8 +109,8 @@ lib: {
       else
         ''
           _target=${lib.escapeShellArg target}
-          echo "config-graft: reconciling managed ${spec.fmt} file $_target"
-          ${lib.getExe entry.package} --format ${spec.fmt} "$_target" ${desired} "$_prev"
+          echo "config-graft: reconciling managed ${spec.format} file $_target"
+          ${lib.getExe entry.package} --format ${spec.format} "$_target" ${desired} "$_prev"
         ''
     );
 }
