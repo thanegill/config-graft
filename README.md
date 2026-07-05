@@ -166,18 +166,14 @@ apps keep rewriting:
         modules = [
           config-graft.homeManagerModules.default
           {
-            home.managedJson.app = {
-              target = ".config/app/config.json";
-              settings = {
-                theme = "dark";
-                editor.fontSize = 14;
-              };
+            # The attribute name is the target path, relative to $HOME.
+            home.managedJson.".config/app/config.json".settings = {
+              theme = "dark";
+              editor.fontSize = 14;
             };
 
-            home.managedYaml.tool = {
-              target = ".config/tool/config.yaml"; # comments in the live file are preserved
-              settings.plugins = [ "git" ];
-            };
+            # comments in the live file are preserved
+            home.managedYaml.".config/tool/config.yaml".settings.plugins = [ "git" ];
           }
         ];
       };

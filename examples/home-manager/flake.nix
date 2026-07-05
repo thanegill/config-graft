@@ -34,19 +34,15 @@
 
             # Graft a few keys into files the apps keep rewriting: keys the app
             # owns are preserved, keys you drop here are pruned on the next switch
-            # (BASE is the previous generation's snapshot).
-            home.managedJson.app = {
-              target = ".config/app/config.json";
-              settings = {
-                theme = "dark";
-                editor.fontSize = 14;
-              };
+            # (BASE is the previous generation's snapshot). The attribute name is
+            # the target path, relative to $HOME (override with `target` if needed).
+            home.managedJson.".config/app/config.json".settings = {
+              theme = "dark";
+              editor.fontSize = 14;
             };
 
-            home.managedYaml.tool = {
-              target = ".config/tool/config.yaml"; # comments in the live file are preserved
-              settings.plugins = [ "git" ];
-            };
+            # comments in the live file are preserved
+            home.managedYaml.".config/tool/config.yaml".settings.plugins = [ "git" ];
           }
         ];
       };
