@@ -41,6 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contradictory reorder *inside* a matched record (one of its nested arrays) is
   surfaced too, its warning locating it with a `[field=value]` element selector on
   the array key — `servers[name="web"].tags` (`servers[name="web"]:tags` for plist).
+- **Nix flake modules** wrapping the CLI so config files are managed declaratively
+  instead of by hand-written activation scripts. The flake exposes
+  `homeManagerModules.default` (`home.managed{Json,Plist,Yaml,Toml}`, targets
+  relative to `$HOME`) and `nixosModules.default` / `darwinModules.default`
+  (`environment.managed*`, absolute targets, reconciled during system activation),
+  plus an optional `overlays.default`. Each entry reconciles its `settings` — or a
+  pre-built `source` file — into the live file on activation, keeping the app's own
+  keys and pruning keys dropped from Nix, with the previous generation as the BASE
+  snapshot. Entries are keyed by their target path; freeform entries accept a
+  `format` override (any `pkgs.formats` generator, e.g. a validating type); plist
+  entries accept `cfprefsdDomain` to reconcile through `cfprefsd` (macOS only,
+  asserted). The module runs config-graft by store path, so no overlay or `PATH`
+  entry is required. A full consumer flake per platform lives in `examples/`.
 
 ### Changed
 

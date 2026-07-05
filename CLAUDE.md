@@ -42,7 +42,14 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   holds the static `specs` list, the format option/DESIRED helpers + `build` (used
   by all three), and `systemPlatform` (shared by `nixos.nix`/`darwin.nix`, which
   differ only in `wireActivation`). The home-manager platform has a single
-  consumer, so it's defined inline in `home-manager.nix`. Two recursion traps
+  consumer, so it's defined inline in `home-manager.nix`. Each entry's DESIRED
+  comes from `settings` (a `pkgs.formats` generator, overridable per entry via
+  `format`) **or** a pre-built `source` file — mutually exclusive, asserted;
+  `target` defaults to the attribute name (entries keyed by path); `package`
+  defaults to the flake's own build (threaded in via `self`), so no overlay is
+  needed. `cfprefsdDomain` (plist only) is a shared option on both home and system,
+  but `build` emits a build-time assertion that it's only set on a Darwin host.
+  Two recursion traps
   the module system punishes via `_module.freeformType`, both avoided by
   construction: (1) the platform is chosen by the *file*, never `pkgs.stdenv`, so
   config *keys* never depend on `pkgs`; (2) every platform config fragment uses a
