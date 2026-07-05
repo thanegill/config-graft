@@ -693,3 +693,57 @@ fn leftover_temp_name_is_ignored() {
     assert_eq!(read(&target.join(".cg-tmp.leftover.0")), "junk"); // untouched
     assert_eq!(read(&target.join("a.txt")), "x");
 }
+
+// --- Characterization tests: documented limitations, locked so they don't change
+// silently (see SPEC §10). ---
+
+#[test]
+fn hardlink_is_broken_on_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&target.join("a"), "old");
+    fs::hard_link(target.join("a"), target.join("b")).unwrap(); // a and b share an inode
+    write(&desired.join("a"), "new");
+    write(&desired.join("b"), "old"); // b unchanged
+
+    assert!(
+        graft(&[target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    // Rewriting `a` (temp + rename) gives it a fresh inode; the hardlink is broken
+    // and `b` keeps the old content. Hardlinks are not preserved (documented).
+    assert_eq!(read(&target.join("a")), "new");
+    assert_eq!(read(&target.join("b")), "old");
+    assert_ne!(
+        fs::metadata(target.join("a")).unwrap().ino(),
+        fs::metadata(target.join("b")).unwrap().ino()
+    );
+}
+
+#[test]
+fn eacces_mid_walk_refuses_whole_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&target.join("readable.txt"), "x");
+    let locked = target.join("locked");
+    fs::create_dir(&locked).unwrap();
+    write(&locked.join("secret.txt"), "s");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    write(&desired.join("a.txt"), "hi");
+
+    if fs::read_dir(&locked).is_ok() {
+        // Permissions not enforced (running as root); can't exercise EACCES.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("skipping eacces_mid_walk_refuses_whole_run: perms not enforced");
+        return;
+    }
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap(); // for cleanup
+                                                                              // One unreadable directory aborts the whole run (fail-closed, no partial apply).
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!target.join("a.txt").exists());
+}

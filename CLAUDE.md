@@ -30,17 +30,28 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   metadata on a merge (the same "DESIRED wins" rule as a leaf).
 - `src/format/{json,plist,yaml,toml}.rs` — per-format leaf enum + `ValueCodec`
   (native ⇄ `Node`) + `Format` (parse/serialize). `mod.rs` holds the traits,
-  `FormatKind`, `Indent`, `read_file`. Dispatch is **static**: `main` matches the
-  `FormatKind` and monomorphizes `run::<F>()` (no `&dyn Format`).
-- `src/format/directory.rs` — the `--format directory` backend, living beside the
-  format codecs but **not a `Format`** (a
-  tree has no byte stream): `main` dispatches `FormatKind::Directory` to a separate
-  `run_directory` that reuses the shared reconcile engine + diff renderer. A
-  `DirLeaf` file is a **content handle** (len + SHA-256 digest + source path +
-  generic `attrs` map of mode/owner/xattrs), so bytes never enter the tree —
-  `read_tree` streams the digest, `apply_tree` streams source→dest and applies
-  attrs atomically (refuse-on-failure). A directory's own attrs ride on its
-  `MapMeta`; the root is unmanaged unless `--manage-root`. Uses `sha2` + `xattr`.
+  `FormatKind`, `Indent`, `read_file`.
+- `src/backend.rs` — the `Backend` trait is the I/O boundary of a run (read the
+  three inputs → reconcile → diff/check/stdout/apply); one generic `run::<B>`
+  driver owns that spine so **every format shares it**. Dispatch is **static**:
+  `main` matches the `FormatKind` and monomorphizes `run::<ByteBackend<F>>` for the
+  byte formats or `run::<Directory>` for the tree. `ByteBackend<F>(PhantomData<F>)`
+  is a newtype over any `Format` (a blanket `impl<F: Format> Backend for F` would
+  collide with `Directory` under coherence). `dir_policy(cli)` builds the
+  `AttrPolicy` (`--no-owner`/`--xattrs`).
+- `src/format/directory.rs` — the `--format directory` tree backend, living beside
+  the format codecs but **not a `Format`** (a tree has no byte stream); it plugs
+  into the shared `run` via `impl Backend for Directory`. A `DirLeaf` file is a
+  **content handle** (len + SHA-256 digest + source path + generic `attrs` map of
+  mode/owner/xattrs), so bytes never enter the tree — `read_tree` streams the
+  digest, `apply_tree` streams source→dest and applies attrs atomically
+  (refuse-on-failure). An `AttrPolicy { owner, xattrs }` (default: manage
+  everything) threads through read/apply; `xattr_in_scope` filters by
+  `XattrScope`. A directory's own attrs ride on its `MapMeta` (rendered into
+  `--diff` via `Leaf::render_map_meta`); the root is unmanaged unless
+  `--manage-root`. Robustness: case-fold sibling-collision refuse, `MAX_DEPTH`
+  guard, `.cg-tmp.` temp-name skip on read, per-entry parent `fsync`. Uses
+  `sha2` + `xattr`.
 - `src/format/yaml_edit.rs` / `toml_edit_apply.rs` — YAML/TOML writes **edit the
   original document in place** to preserve comments, with a round-trip backstop
   that **refuses rather than corrupt** on anything they can't safely edit.
@@ -57,10 +68,18 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   is structurally unreachable (kept only for `FormatKind` symmetry).
 - Directory mode: `DirLeaf::File` equality is `(len, digest, attrs)` and ignores
   the source path — that path-independence is what keeps re-apply a no-op. Attrs
-  are set on the temp file *before* the rename (order: xattrs, chown, chmod —
-  chown clears setuid), so any attribute failure refuses cleanly. Reading xattrs
-  is best-effort (unsupported FS ⇒ none); applying is strict. Adding a new leaf
-  type means adding its `MapMeta` (`()` unless the format has map metadata).
+  are set on the temp file *before* the rename (order: remove out-of-desired
+  in-scope xattrs, set desired xattrs, chown, chmod — chown clears setuid), so any
+  attribute failure refuses cleanly. `chown` to the caller's own uid/gid is
+  skipped (no-op, avoids needless privilege). Reading xattrs is best-effort
+  (unsupported FS ⇒ none); applying is strict but scoped by `AttrPolicy`. Adding a
+  new leaf type means adding its `MapMeta` (`()` unless the format has map
+  metadata) and, if it carries map metadata, a `render_map_meta`.
+- Directory mode is intentionally non-transactional across files, doesn't preserve
+  hardlinks, and trusts ancestor path components (not the entries it walks). These
+  trade-offs are locked by characterization tests (`hardlink_is_broken_on_rewrite`,
+  `eacces_mid_walk_refuses_whole_run`) and documented in SPEC §10 — don't "fix"
+  them silently.
 - Refactors here are expected to be behavior-preserving — the test suite (unit in
   `src/`, integration in `tests/{json,plist,yaml,toml,directory}.rs` + `tests/common`)
   is the gate.

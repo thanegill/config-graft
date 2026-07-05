@@ -141,11 +141,16 @@ edits). It is opt-in — `directory` is never inferred from a path.
   content identity is a SHA-256 digest — so large trees stay cheap.
 - **Full metadata.** A file's — and a directory's — **mode, owner (uid/gid), and
   extended attributes** are part of its identity: a metadata-only change is a
-  change, and all of it is applied on write. An attribute that can't be set
-  (e.g. no privilege to `chown`, or an xattr the filesystem rejects) **refuses
-  the run** (nothing lands) rather than leaving a half-applied entry.
+  change (it shows up in `--diff`), and all of it is applied on write. An
+  attribute that can't be set (e.g. no privilege to `chown`, or an xattr the
+  filesystem rejects) **refuses the run** (nothing lands) rather than leaving a
+  half-applied entry. Manage-everything by default, with opt-outs: `--no-owner`
+  leaves uid/gid alone, and `--xattrs <all|safe|none>` narrows which extended
+  attributes are reconciled (`safe` skips privileged/system namespaces).
 - **Symlinks** are managed by target and never followed;
-  **FIFOs/sockets/devices** and non-UTF-8 filenames are refused (exit 1).
+  **FIFOs/sockets/devices**, non-UTF-8 filenames, and case-folding sibling name
+  collisions are refused (exit 1). Replacing an app-populated directory with a
+  file is refused rather than deleting content it never managed.
 - The **root** directory (the one you point at) is left untouched by default;
   `--manage-root` reconciles its own attributes too.
 - `--stdout` is unsupported (a tree has no single byte stream); `--indent` /
@@ -155,7 +160,13 @@ edits). It is opt-in — `directory` is never inferred from a path.
 config-graft --format directory dest/ desired/                  # reconcile a tree
 config-graft --format directory --diff --check dest/ desired/   # preview drift
 config-graft --manage-root --format directory dest/ desired/    # also the root's own attrs
+config-graft --format directory --no-owner --xattrs safe dest/ desired/  # narrow metadata scope
 ```
+
+The multi-file apply is best-effort, not one transaction: a crash mid-apply
+leaves a partial (per-file consistent) tree that a re-run completes. Hardlinks
+aren't preserved, the read→apply window is subject to TOCTOU, and an unreadable
+directory aborts the whole run — see [SPEC.md](SPEC.md) §10 for the full list.
 
 ## Develop
 

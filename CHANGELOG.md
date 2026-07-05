@@ -22,9 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   half-applied entry. Symlinks are managed by target and never followed;
   FIFOs/sockets/devices and non-UTF-8 filenames are refused. The root directory's
   own attributes are left untouched unless `--manage-root` is given. Opt-in:
-  `directory` is never inferred from a path.
+  `directory` is never inferred from a path. Metadata drift (mode/owner/xattr, on
+  files and directories) shows up in `--diff`, not just content changes. Replacing
+  an app-populated directory with a file is refused rather than deleting content
+  never under management; sibling names that collide when case-folded, and trees
+  nested past an internal depth limit, are refused; leftover `.cg-tmp.` entries
+  from an interrupted apply are ignored on read. Each entry write fsyncs its parent
+  directory so the rename is crash-durable.
 - `--manage-root` (directory mode) to also reconcile the TARGET directory's own
   mode/owner/xattrs, not just its contents.
+- `--no-owner` and `--xattrs <all|safe|none>` (directory mode) to narrow the
+  metadata reconcile scope. The default manages everything (owner + all xattrs);
+  `--no-owner` leaves uid/gid alone, `--xattrs safe` skips privileged/system
+  namespaces, `--xattrs none` ignores extended attributes. In-scope xattrs on the
+  target but absent from DESIRED are removed (they converge); a `chown` to the
+  caller's own uid/gid is skipped so the common case needs no privilege.
 - **TOML** support alongside JSON, plist, and YAML. The format is inferred from
   TARGET's extension (`.toml`) or forced with `--format toml`. Like YAML, an
   existing TOML target is edited in place (via `toml_edit`) so **comments, blank
