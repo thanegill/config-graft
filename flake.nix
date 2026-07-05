@@ -35,7 +35,7 @@
       # Declarative wrappers exposing `managed{Json,Plist,Yaml,Toml}` -- one per
       # format config-graft reconciles. `home.*` for home-manager,
       # `environment.*` for NixOS / nix-darwin. The three modules share one
-      # assembly (modules/shared.nix). Each is applied with `self` so entries
+      # assembly (modules/lib). Each is applied with `self` so entries
       # default to this flake's build (the activation script calls it by store
       # path) -- no overlay or `PATH` entry needed; override per entry via
       # `package`. Each is exposed under both `default` and the named

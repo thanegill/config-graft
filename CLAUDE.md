@@ -38,10 +38,12 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   one per platform: `home-manager.nix` (`home.managed*`), `nixos.nix` and
   `darwin.nix` (`environment.managed*`). Each is a thin normal
   `{ config, lib, pkgs, ... }:` module that supplies a *platform* record and calls
-  `shared.nix`'s `build`; there is **no dispatch on module type**. `shared.nix`
-  holds the static `specs` list, the format option/DESIRED helpers + `build` (used
-  by all three), and `systemPlatform` (shared by `nixos.nix`/`darwin.nix`, which
-  differ only in `wireActivation`). The home-manager platform has a single
+  `build` from `modules/lib/`; there is **no dispatch on module type**. `lib/` is
+  split into logical files re-exported by `default.nix`: `specs.nix` (the static
+  per-format `specs`), `build.nix` (the format option/DESIRED helpers + `build`,
+  used by all three), `system-platform.nix` (`systemPlatform`, shared by
+  `nixos.nix`/`darwin.nix`, which differ only in `wireActivation`), and
+  `cfprefsd.nix` (the shared `cfprefsdDomain` option). The home-manager platform has a single
   consumer, so it's defined inline in `home-manager.nix`. Each entry's DESIRED
   comes from `settings` (a `pkgs.formats` generator, overridable per entry via
   `format`), or a pre-built `source` file; the two are mutually exclusive (asserted);

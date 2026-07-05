@@ -1,6 +1,6 @@
 # NixOS module: declaratively manage system-level config files an application owns
 # and writes to itself, via `environment.managed{Json,Plist,Yaml,Toml}`. The
-# per-format specs, assembly, and system platform are shared (./shared.nix); this
+# per-format specs, assembly, and system platform are shared (./lib); this
 # file only wires activation the NixOS way, an arbitrary-named activation script
 # per format, run via the activation topological sort. The flake applies this
 # with `self` so the default package comes from this flake's own build, so no
@@ -14,7 +14,7 @@
 }:
 
 let
-  shared = import ./shared.nix;
+  shared = import ./lib;
 
   platform = shared.systemPlatform lib // {
     wireActivation =

@@ -1,6 +1,6 @@
 # home-manager module: declaratively manage config files an application owns and
 # writes to itself, via `home.managed{Json,Plist,Yaml,Toml}`. The per-format specs
-# and assembly are shared (./shared.nix); the home-manager platform has a single
+# and assembly are shared (./lib); the home-manager platform has a single
 # consumer, so it is defined here (mirroring how the system modules supply their
 # own activation wiring). The flake applies this with `self` so the default
 # package comes from this flake's own build, so no overlay or `PATH` entry is needed.
@@ -13,7 +13,7 @@
 }:
 
 let
-  shared = import ./shared.nix;
+  shared = import ./lib;
 
   homeTargetExample = {
     json = ".config/app/config.json";
