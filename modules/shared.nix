@@ -10,8 +10,9 @@
 #
 # A platform record provides: `parent` (the option attrset, e.g. "home"),
 # `targetOption`/`targetConfig`/`extraEntryOptions`/`optionDescription`,
-# `snapshotRel`/`targetPath`, `recordSnapshots`, `wireActivation`, `mkScript`, and
-# `extraConfig` (per-spec `{ spec, active }` -> extra config, e.g. assertions).
+# `snapshotRel`/`targetPath`, `recordSnapshots`, `wireActivation`, and `mkScript`.
+# `build` itself asserts any entry setting `cfprefsdDomain` is on a Darwin host,
+# since that option drives macOS-only tooling on both home and system platforms.
 #
 # Two recursion traps the module system punishes via `_module.freeformType`, both
 # avoided by construction: `build` is called from inside a normal
@@ -72,6 +73,19 @@ let
 
   isFreeform = spec: spec.kind == "freeform";
 
+  # macOS preference-domain option, shared by the home and system platforms (plist
+  # only). Reconciling through `cfprefsd` (`defaults`/`plutil`) is macOS-only; each
+  # platform supplies its own `description`, and `build` asserts a Darwin host when
+  # it's set.
+  cfprefsdDomainOption =
+    lib: description:
+    lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "com.example.app";
+      inherit description;
+    };
+
   systemTargetExample = {
     json = "/etc/app/config.json";
     yaml = "/etc/app/config.yaml";
@@ -99,6 +113,7 @@ let
         mapAttrsToList
         concatStringsSep
         optionalAttrs
+        optionals
         literalExpression
         ;
 
@@ -187,6 +202,21 @@ let
           }) active;
 
           activationText = concatStringsSep "\n" (map (e: e.script) entries);
+
+          # `cfprefsdDomain` (plist only, on any platform that offers it) drives
+          # `defaults`/`plutil`/`cfprefsd` -- macOS-only -- so guard it at build
+          # time rather than failing mid-activation on a non-Darwin host.
+          cfprefsdAssertions = optionals (spec.kind == "plist") (
+            mapAttrsToList (name: entry: {
+              assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
+              message = ''
+                ${platform.parent}.${spec.optionName}."${name}".cfprefsdDomain is set,
+                but cfprefsd, defaults, and plutil exist only on macOS (this
+                configuration targets ${pkgs.stdenv.hostPlatform.system}). Unset it to
+                edit the plist file in place instead.
+              '';
+            }) active
+          );
         in
         {
           inherit (spec) optionName;
@@ -203,7 +233,7 @@ let
               inherit spec;
               text = activationText;
             })
-            (platform.extraConfig { inherit spec active; })
+            { assertions = cfprefsdAssertions; }
           ]);
         };
 
@@ -226,8 +256,9 @@ let
   # points at the previous generation (the symlink swap is activation's last step
   # on both platforms), so the prior snapshot is reachable at
   # `/run/current-system/<snapshot>`. Absent on the first switch (or for a newly
-  # added entry) -> no pruning. No `cfprefsd` path: cfprefsd domains are per-user,
-  # not a system concern. Each system module supplies `wireActivation`.
+  # added entry) -> no pruning. Plist entries may set `cfprefsdDomain` to reconcile
+  # through `cfprefsd` (as root, so system/global domains) instead of editing the
+  # file; `build` asserts a Darwin host. Each system module supplies `wireActivation`.
   systemPlatform = lib: {
     parent = "environment";
 
@@ -241,11 +272,21 @@ let
 
     targetConfig = name: { target = lib.mkDefault name; };
 
-    extraEntryOptions = _: { };
-
-    # No per-entry `cfprefsdDomain` here (system plists edit in place), so nothing
-    # macOS-specific to guard.
-    extraConfig = _: { };
+    extraEntryOptions =
+      spec:
+      lib.optionalAttrs (spec.kind == "plist") {
+        cfprefsdDomain = cfprefsdDomainOption lib ''
+          macOS preference domain backing this system plist (e.g. `com.example.app`
+          for {file}`/Library/Preferences/com.example.app.plist`). When set,
+          {option}`settings` are reconciled through `cfprefsd` during system
+          activation instead of by editing {option}`target` in place:
+          {command}`defaults export` reads the live domain, {command}`config-graft`
+          deep-merges and prunes, and {command}`defaults import` writes it back --
+          so the change isn't lost to cfprefsd's in-memory cache. Runs as root, so
+          it targets system/global domains under {file}`/Library/Preferences`.
+          {option}`target` is ignored in this mode.
+        '';
+      };
 
     optionDescription = spec: ''
       System-level ${spec.fmt} configuration files that an application owns and
@@ -281,13 +322,39 @@ let
         snapshotRel,
         target,
       }:
+      # Previous run's settings = the prior generation's snapshot, reachable at
+      # /run/current-system until activation's final symlink swap. Empty on the
+      # first switch -> no pruning.
       ''
-        _target=${lib.escapeShellArg target}
-        echo "config-graft: reconciling managed ${spec.fmt} file $_target"
         _prev="/run/current-system/${snapshotRel}"
         [[ -e "$_prev" ]] || _prev=""
-        ${lib.getExe entry.package} --format ${spec.fmt} "$_target" ${desired} "$_prev"
-      '';
+      ''
+      + (
+        if spec.kind == "plist" && entry.cfprefsdDomain != null then
+          ''
+            _domain=${lib.escapeShellArg entry.cfprefsdDomain}
+            echo "config-graft: reconciling managed plist domain $_domain"
+
+            # Read the live domain through cfprefsd (not the on-disk file, which may
+            # be staler than cfprefsd's cache). Empty/missing domain -> start from an
+            # empty plist.
+            _live=$(mktemp)
+            /usr/bin/defaults export "$_domain" "$_live" 2>/dev/null || true
+            [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
+
+            # Graft our settings into the live state, then push it back through
+            # cfprefsd so it adopts the merged result.
+            ${lib.getExe entry.package} --format plist "$_live" ${desired} "$_prev"
+            /usr/bin/defaults import "$_domain" "$_live"
+            rm -f "$_live"
+          ''
+        else
+          ''
+            _target=${lib.escapeShellArg target}
+            echo "config-graft: reconciling managed ${spec.fmt} file $_target"
+            ${lib.getExe entry.package} --format ${spec.fmt} "$_target" ${desired} "$_prev"
+          ''
+      );
   };
 
 in
@@ -296,5 +363,6 @@ in
     specs
     build
     systemPlatform
+    cfprefsdDomainOption
     ;
 }

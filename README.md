@@ -130,10 +130,13 @@ The flake ships declarative wrappers so you rarely call the CLI by hand. Each
 pruning keys you drop, with the previous generation as the BASE snapshot.
 
 - `homeManagerModules.default` — `home.managed{Json,Plist,Yaml,Toml}` (targets
-  relative to `$HOME`). The plist option also takes a `cfprefsdDomain` for macOS
-  preference domains.
+  relative to `$HOME`).
 - `nixosModules.default` / `darwinModules.default` — `environment.managed{Json,Plist,Yaml,Toml}`
   (absolute targets, reconciled during system activation).
+- On plist entries, `cfprefsdDomain` reconciles through `cfprefsd`
+  (`defaults`/`plutil`) instead of editing the file — macOS only (asserted at
+  build time); per-user under home-manager, system/global (as root) under
+  nix-darwin.
 - `overlays.default` — optional; adds the `config-graft` CLI to `pkgs` for
   interactive use. The modules don't need it — they run the flake's own build by
   store path. Override a single entry with its `package` option.

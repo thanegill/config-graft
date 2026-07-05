@@ -44,39 +44,17 @@ let
     extraEntryOptions =
       spec:
       lib.optionalAttrs (spec.kind == "plist") {
-        cfprefsdDomain = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
-          example = "com.example.app";
-          description = ''
-            macOS preference domain backing this plist (e.g. `com.example.app` for
-            {file}`~/Library/Preferences/com.example.app.plist`). When set,
-            {option}`settings` are reconciled through `cfprefsd` instead of by
-            editing {option}`target` in place: {command}`defaults export` reads the
-            live domain, {command}`config-graft` deep-merges and prunes, and
-            {command}`defaults import` writes the result back -- so the change isn't
-            lost to cfprefsd's in-memory cache. A running app keeps its own copy of
-            the prefs, so quit it before switching and relaunch afterwards.
-            {option}`target` is ignored in this mode.
-          '';
-        };
-      };
-
-    # `cfprefsdDomain` drives `defaults`/`plutil`/`cfprefsd`, which exist only on
-    # macOS. The option is offered on every platform (the home module is
-    # cross-platform), so guard misuse at build time rather than failing mid-switch.
-    extraConfig =
-      { spec, active }:
-      lib.optionalAttrs (spec.kind == "plist") {
-        assertions = lib.mapAttrsToList (name: entry: {
-          assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
-          message = ''
-            home.${spec.optionName}."${name}".cfprefsdDomain is set, but cfprefsd,
-            defaults, and plutil exist only on macOS (this configuration targets
-            ${pkgs.stdenv.hostPlatform.system}). Unset it to edit the plist file in
-            place instead.
-          '';
-        }) active;
+        cfprefsdDomain = shared.cfprefsdDomainOption lib ''
+          macOS preference domain backing this plist (e.g. `com.example.app` for
+          {file}`~/Library/Preferences/com.example.app.plist`). When set,
+          {option}`settings` are reconciled through `cfprefsd` instead of by
+          editing {option}`target` in place: {command}`defaults export` reads the
+          live domain, {command}`config-graft` deep-merges and prunes, and
+          {command}`defaults import` writes the result back -- so the change isn't
+          lost to cfprefsd's in-memory cache. A running app keeps its own copy of
+          the prefs, so quit it before switching and relaunch afterwards.
+          {option}`target` is ignored in this mode.
+        '';
       };
 
     optionDescription = spec: ''
