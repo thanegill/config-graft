@@ -31,7 +31,7 @@
           # the postActivation phase with the previous generation as BASE. The
           # attribute name is the target's absolute path (override with `target`).
 
-          # config-graft (1): edited in place -- config-graft rewrites the .plist
+          # config-graft (1): edited in place: config-graft rewrites the .plist
           # file directly.
           {
             environment.managedPlist."/Library/Preferences/com.acme.editor.plist".settings = {
@@ -39,7 +39,7 @@
             };
           }
 
-          # config-graft (2): reconciled through cfprefsd -- set `cfprefsdDomain` so
+          # config-graft (2): reconciled through cfprefsd: set `cfprefsdDomain` so
           # the merge goes `defaults export` -> config-graft -> `defaults import`,
           # instead of editing the file (whose on-disk copy cfprefsd may override
           # from cache). Runs as root, so this targets the system/global domain.

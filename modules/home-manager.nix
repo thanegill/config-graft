@@ -3,7 +3,7 @@
 # and assembly are shared (./shared.nix); the home-manager platform has a single
 # consumer, so it is defined here (mirroring how the system modules supply their
 # own activation wiring). The flake applies this with `self` so the default
-# package comes from this flake's own build -- no overlay or `PATH` entry needed.
+# package comes from this flake's own build, so no overlay or `PATH` entry is needed.
 { self }:
 {
   config,
@@ -23,8 +23,8 @@ let
   };
 
   # Snapshot rationale: config-graft needs the settings we applied *last* time as
-  # BASE. We take them from the previous home-manager generation, not mutable state
-  # -- each entry's DESIRED is linked as a `home.file` (the snapshot), so the prior
+  # BASE. We take them from the previous home-manager generation, not mutable state.
+  # Each entry's DESIRED is linked as a `home.file` (the snapshot), so the prior
   # generation's copy is reachable at `$oldGenPath/home-files/<snapshot>` on the
   # next switch (GC-safe: the old generation is a GC root). Unset $oldGenPath on the
   # first switch -> no pruning.
@@ -50,7 +50,7 @@ let
           {option}`settings` are reconciled through `cfprefsd` instead of by
           editing {option}`target` in place: {command}`defaults export` reads the
           live domain, {command}`config-graft` deep-merges and prunes, and
-          {command}`defaults import` writes the result back -- so the change isn't
+          {command}`defaults import` writes the result back, so the change isn't
           lost to cfprefsd's in-memory cache. A running app keeps its own copy of
           the prefs, so quit it before switching and relaunch afterwards.
           {option}`target` is ignored in this mode.

@@ -32,10 +32,10 @@
           # activation with the previous generation as BASE. The attribute name is
           # the target's absolute path (override with `target`).
 
-          # config-graft (1): `format` -- the `pkgs.formats` generator that
+          # config-graft (1): `format`: the `pkgs.formats` generator that
           # serializes `settings` and supplies the type that validates it. Here we
           # wrap the JSON generator's type with an extra check, so `theme` must be
-          # "dark" or "light" -- any other value fails at build time.
+          # "dark" or "light"; any other value fails at build time.
           (
             { lib, pkgs, ... }:
             {

@@ -124,36 +124,47 @@ TOML notes:
 
 ## Nix modules
 
-The flake ships declarative wrappers so you rarely call the CLI by hand. Each
-**format** gets a `managed<Format>` option whose entries reconcile their
-`settings` into a live file on every activation — keeping the app's own keys and
-pruning keys you drop, with the previous generation as the BASE snapshot.
+The Nix flake ships declarative wrappers for managing config files on NixOS,
+nix-darwin, and home-manager. Each **format** gets a `managed<Format>` option
+whose entries reconcile their `settings` into a live file on every activation,
+keeping the app's own keys and pruning keys you drop, with the previous
+generation as the BASE snapshot.
 
-- `homeManagerModules.default` — `home.managed{Json,Plist,Yaml,Toml}` (targets
-  relative to `$HOME`).
-- `nixosModules.default` / `darwinModules.default` — `environment.managed{Json,Plist,Yaml,Toml}`
-  (absolute targets, reconciled during system activation).
-- On plist entries, `cfprefsdDomain` reconciles through `cfprefsd`
-  (`defaults`/`plutil`) instead of editing the file — macOS only (asserted at
-  build time); per-user under home-manager, system/global (as root) under
-  nix-darwin.
-- `overlays.default` — optional; adds the `config-graft` CLI to `pkgs` for
-  interactive use. The modules don't need it — they run the flake's own build by
-  store path. Override a single entry with its `package` option.
+**Start with [`examples/`](examples)**, which has a complete, self-contained
+`flake.nix` for each platform (home-manager, NixOS, nix-darwin).
 
-Each module is also exposed under the name `config-graft` (e.g.
-`homeManagerModules.config-graft`), identical to `default`.
+The flake exposes:
 
-Add the flake as an input and pull in the wrapper for your platform — no overlay
-required. A standalone home-manager `flake.nix` grafting a few keys into files
-apps keep rewriting:
+- `homeManagerModules.default`: `home.managed{Json,Plist,Yaml,Toml}`, targets
+  relative to `$HOME`.
+- `nixosModules.default` / `darwinModules.default`: `environment.managed*`,
+  absolute targets, reconciled during system activation.
+- `overlays.default`: optional. It adds the `config-graft` CLI to `pkgs`; the
+  modules don't need it, since they run the flake's own build by store path.
+
+Each entry takes `settings` (freeform data) or a pre-built `source` file (any
+generator, template, or derivation); an entry with neither is inert. Freeform
+formats accept a `format` override, any `pkgs.formats`-style generator, for a
+validating or specially configured type. `package` overrides the config-graft
+build for one entry. Plist entries accept `cfprefsdDomain` to reconcile through
+`cfprefsd` (`defaults`/`plutil`) instead of editing the file; that path is macOS
+only (asserted at build time), per-user under home-manager and system/global
+under nix-darwin.
+
+A home-manager `flake.nix` sketch:
 
 ```nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    home-manager.url = "github:nix-community/home-manager";
-    config-graft.url = "github:thanegill/config-graft";
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    config-graft = {
+      url = "github:thanegill/config-graft";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -168,14 +179,25 @@ apps keep rewriting:
         pkgs = import nixpkgs { system = "x86_64-linux"; };
         modules = [
           config-graft.homeManagerModules.default
+
+          # your home identity
           {
-            # The attribute name is the target path, relative to $HOME.
+            home.username = "me";
+            home.homeDirectory = "/home/me";
+            home.stateVersion = "24.05";
+          }
+
+          # Graft a few keys into a JSON file the app rewrites; the attribute name
+          # is the target path, relative to $HOME.
+          {
             home.managedJson.".config/app/config.json".settings = {
               theme = "dark";
               editor.fontSize = 14;
             };
+          }
 
-            # comments in the live file are preserved
+          # comments in the live file are preserved
+          {
             home.managedYaml.".config/tool/config.yaml".settings.plugins = [ "git" ];
           }
         ];
@@ -183,23 +205,6 @@ apps keep rewriting:
     };
 }
 ```
-
-For NixOS or nix-darwin, add `config-graft.nixosModules.default` (or
-`darwinModules.default`) to your system's `modules`, then set
-`environment.managed{Json,Plist,Yaml,Toml}` entries with absolute targets. See
-[`examples/`](examples) for a complete flake per platform (home-manager, NixOS,
-nix-darwin).
-
-An entry with empty `settings` is inert. Freeform formats (JSON/YAML/TOML) accept
-a `format` override (any `pkgs.formats`-style generator) for schema-checked
-output. Instead of `settings`, an entry can set `source` to a pre-built file (from
-any generator, template, or derivation) as the managed content. There's a module
-per platform — [`home-manager.nix`](modules/home-manager.nix),
-[`nixos.nix`](modules/nixos.nix),
-[`darwin.nix`](modules/darwin.nix) — each supplying a *platform* record to the
-shared assembly in [`shared.nix`](modules/shared.nix), which holds the per-format
-specs, assembly, and the shared system platform; see it for the option docs and
-the snapshot/prune rationale.
 
 ## Develop
 

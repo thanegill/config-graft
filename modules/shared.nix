@@ -2,10 +2,10 @@
 #
 # Each of those is its own module file (`home-manager.nix`, `nixos.nix`,
 # `darwin.nix`) that supplies a *platform* record and calls `build` here.
-# There is no dispatch on module type in this file -- it holds the per-format
+# There is no dispatch on module type in this file; it holds the per-format
 # `specs`, the format-aware option/DESIRED helpers and assembly (`build`), and
 # `systemPlatform` (shared by the two system modules, which differ only in how
-# activation is wired -- supplied by each). The home-manager platform has a single
+# activation is wired, supplied by each). The home-manager platform has a single
 # consumer, so it lives in `home-manager.nix` rather than here.
 #
 # A platform record provides: `parent` (the option attrset, e.g. "home"),
@@ -118,7 +118,7 @@ let
         ;
 
       # DESIRED store path for one entry: a pre-built `source` file when given,
-      # otherwise generated from `settings` -- a `pkgs.formats` generator for
+      # otherwise generated from `settings`: a `pkgs.formats` generator for
       # freeform formats (overridable per entry via `format`), `lib.generators.toPlist`
       # for plist.
       mkDesired =
@@ -164,7 +164,7 @@ let
                 description = ''
                   The config-graft package used to reconcile this entry. Defaults
                   to this flake's own build, so no overlay or `PATH` entry is
-                  needed -- the activation script calls it by store path.
+                  needed, since the activation script calls it by store path.
                 '';
               };
 
@@ -181,7 +181,7 @@ let
                 example = literalExpression "./managed.${spec.ext}";
                 description = ''
                   A pre-built ${spec.fmt} file to reconcile into {option}`target`,
-                  as an alternative to {option}`settings` -- for a DESIRED built some
+                  as an alternative to {option}`settings`, for a DESIRED built some
                   other way (another generator, a rendered template, a checked-in
                   file, a derivation). Mutually exclusive with {option}`settings`;
                   setting either one makes the entry active.
@@ -220,7 +220,7 @@ let
           activationText = concatStringsSep "\n" (map (e: e.script) entries);
 
           # `cfprefsdDomain` (plist only, on any platform that offers it) drives
-          # `defaults`/`plutil`/`cfprefsd` -- macOS-only -- so guard it at build
+          # `defaults`/`plutil`/`cfprefsd`, which are macOS-only, so guard it at build
           # time rather than failing mid-activation on a non-Darwin host.
           cfprefsdAssertions = optionals (spec.kind == "plist") (
             mapAttrsToList (name: entry: {
@@ -239,7 +239,7 @@ let
             assertion = !(entry.settings != { } && entry.source != null);
             message = ''
               ${platform.parent}.${spec.optionName}."${name}" sets both `settings` and
-              `source`; they are mutually exclusive -- use one.
+              `source`; they are mutually exclusive; use one.
             '';
           }) active;
         in

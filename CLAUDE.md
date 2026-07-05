@@ -44,7 +44,7 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   differ only in `wireActivation`). The home-manager platform has a single
   consumer, so it's defined inline in `home-manager.nix`. Each entry's DESIRED
   comes from `settings` (a `pkgs.formats` generator, overridable per entry via
-  `format`) **or** a pre-built `source` file — mutually exclusive, asserted;
+  `format`), or a pre-built `source` file; the two are mutually exclusive (asserted);
   `target` defaults to the attribute name (entries keyed by path); `package`
   defaults to the flake's own build (threaded in via `self`), so no overlay is
   needed. `cfprefsdDomain` (plist only) is a shared option on both home and system,

@@ -51,7 +51,7 @@
             home.managedYaml.".config/tool/config.yaml".settings.plugins = [ "git" ];
           }
 
-          # config-graft (3): `source` -- reconcile a file built some other way
+          # config-graft (3): `source`: reconcile a file built some other way
           # (checked in here, but it could be any generator, rendered template, or
           # derivation) instead of inline `settings`.
           {

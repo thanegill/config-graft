@@ -1,10 +1,10 @@
 # nix-darwin module: declaratively manage system-level config files an application
 # owns and writes to itself, via `environment.managed{Json,Plist,Yaml,Toml}`. The
 # per-format specs, assembly, and system platform are shared (./shared.nix); this
-# file only wires activation the nix-darwin way -- appended to the fixed
+# file only wires activation the nix-darwin way, appended to the fixed
 # `postActivation` phase, since nix-darwin runs only its predefined phases. The
 # flake applies this with `self` so the default package comes from this flake's
-# own build -- no overlay or `PATH` entry needed.
+# own build, so no overlay or `PATH` entry is needed.
 { self }:
 {
   config,
