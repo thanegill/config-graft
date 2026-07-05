@@ -241,13 +241,13 @@ pub(crate) fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) ->
         }
     }
 
-    // Map-metadata changes (a directory's own attributes). `render_map_meta`
+    // Map-metadata changes (a directory's own attributes). `render_leaf_meta`
     // returns `None` for formats without map metadata, so this is inert for
     // JSON/plist/YAML/TOML.
     let mut old_m = BTreeMap::new();
     let mut new_m = BTreeMap::new();
-    collect_map_metas(old, String::new(), sep, &mut old_m);
-    collect_map_metas(new, String::new(), sep, &mut new_m);
+    collect_leaf_metas(old, String::new(), sep, &mut old_m);
+    collect_leaf_metas(new, String::new(), sep, &mut new_m);
     let keys: HashSet<&String> = old_m.keys().chain(new_m.keys()).collect();
     for k in keys {
         let disp = format!("{k}{sep}"); // trailing separator marks a directory
@@ -270,17 +270,17 @@ pub(crate) fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) ->
     }
 }
 
-/// Collect each map node's own metadata rendering (`render_map_meta`) keyed by its
+/// Collect each map node's own metadata rendering (`render_leaf_meta`) keyed by its
 /// `sep`-joined path (the root is the empty string). Inert for formats whose map
 /// metadata renders to `None`.
-fn collect_map_metas<L: Leaf>(
+fn collect_leaf_metas<L: Leaf>(
     v: &Node<L>,
     path: String,
     sep: &str,
     out: &mut std::collections::BTreeMap<String, String>,
 ) {
     if let Node::Map(map, meta) = v {
-        if let Some(s) = L::render_map_meta(meta) {
+        if let Some(s) = L::render_leaf_meta(meta) {
             out.insert(path.clone(), s);
         }
         for (k, val) in map {
@@ -289,7 +289,7 @@ fn collect_map_metas<L: Leaf>(
             } else {
                 format!("{path}{sep}{k}")
             };
-            collect_map_metas(val, child, sep, out);
+            collect_leaf_metas(val, child, sep, out);
         }
     }
 }

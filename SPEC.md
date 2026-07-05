@@ -197,7 +197,7 @@ filesystem), or a tree nested past an internal depth limit (a stack-overflow
 guard). A TARGET that exists but is not a directory is a hard error (unlike the
 single-file coerce-to-empty rule — we won't silently treat a plain file as an
 empty tree and delete it). Entries whose names use config-graft's reserved
-temp-file prefix (`.cg-tmp.`) are ignored on read — a leftover temp file from an
+temp-file prefix (`.config-graft-tmp.`) are ignored on read — a leftover temp file from an
 interrupted apply is never ingested, diffed, or pruned.
 
 Replacing a **directory with a file/symlink** (a type change) is refused (exit 1)
@@ -326,7 +326,7 @@ Implemented in **Rust** (this repo):
 - `src/value.rs` — the internal value model: a `Leaf` trait and a `Node<L>`
   generic over it. Each format supplies **its own** leaf type (no single enum
   mixing every format's value space), so the encoders are total — a JSON node
-  can't hold a plist `Date`, by construction. A `Leaf::MapMeta` associated type
+  can't hold a plist `Date`, by construction. A `Leaf::LeafMeta` associated type
   rides on every `Node::Map` (unit `()` for JSON/plist/YAML/TOML; a directory's
   own attributes for directory mode) and reconciles through the same engine;
   `Node`'s `Clone`/`PartialEq`/`Debug` are hand-written to carry it.
@@ -338,7 +338,7 @@ Implemented in **Rust** (this repo):
   `read_tree` (streaming the digest, never buffering the bytes) and a minimal-diff
   `apply_tree` that streams bytes source→dest and applies attributes atomically,
   refusing on failure. A directory's own attributes ride on its map node's
-  `MapMeta`; the root is unmanaged unless `--manage-root`. Not a `Format` (a tree
+  `LeafMeta`; the root is unmanaged unless `--manage-root`. Not a `Format` (a tree
   has no byte stream); `main` dispatches `FormatKind::Directory` to a separate
   `run_directory` that reuses the shared reconcile engine and diff renderer. Uses
   the `sha2` and `xattr` crates.

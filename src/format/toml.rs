@@ -24,7 +24,7 @@ pub enum TomlLeaf {
 }
 
 impl Leaf for TomlLeaf {
-    type MapMeta = ();
+    type LeafMeta = ();
     fn render(&self) -> String {
         match self {
             TomlLeaf::Bool(b) => b.to_string(),

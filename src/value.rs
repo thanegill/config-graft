@@ -17,27 +17,27 @@ pub trait Leaf: Clone + PartialEq + std::fmt::Debug {
     /// maps have no metadata (JSON/plist/YAML/TOML); directory mode uses it to
     /// carry a directory's own attributes (mode/owner/xattrs) so they reconcile
     /// through the same engine as file leaves. Part of a map's identity.
-    type MapMeta: Clone + PartialEq + std::fmt::Debug + Default;
+    type LeafMeta: Clone + PartialEq + std::fmt::Debug + Default;
     /// Compact single-line rendering for `--diff`.
     fn render(&self) -> String;
     /// Compact `--diff` rendering of a map node's own metadata, or `None` if this
     /// format's maps carry none (the default — so `--diff` never mentions map
     /// metadata for JSON/plist/YAML/TOML). Directory mode overrides it to render a
     /// directory's own attributes.
-    fn render_map_meta(_meta: &Self::MapMeta) -> Option<String> {
+    fn render_leaf_meta(_meta: &Self::LeafMeta) -> Option<String> {
         None
     }
 }
 
 /// A reconcilable value over a format's leaf type `L`: an ordered string-keyed
-/// map (carrying per-format [`Leaf::MapMeta`]), an array, or an atomic leaf. Maps
+/// map (carrying per-format [`Leaf::LeafMeta`]), an array, or an atomic leaf. Maps
 /// use `IndexMap` for insertion-order preservation and order-stable removal
 /// (`shift_remove`), which prune/collapse/diff/output all rely on.
 ///
 /// `Clone`/`PartialEq`/`Debug` are hand-written rather than derived: `derive`
-/// would not add the `L::MapMeta: Trait` bounds the `Map` field needs.
+/// would not add the `L::LeafMeta: Trait` bounds the `Map` field needs.
 pub enum Node<L: Leaf> {
-    Map(IndexMap<String, Node<L>>, L::MapMeta),
+    Map(IndexMap<String, Node<L>>, L::LeafMeta),
     Array(Vec<Node<L>>),
     Leaf(L),
 }
@@ -77,7 +77,7 @@ impl<L: Leaf> Node<L> {
     /// An empty map node (the "object"/"dictionary"/"mapping" shape) with default
     /// metadata.
     pub fn empty_map() -> Node<L> {
-        Node::Map(IndexMap::new(), L::MapMeta::default())
+        Node::Map(IndexMap::new(), L::LeafMeta::default())
     }
 
     /// Whether this node is a map.

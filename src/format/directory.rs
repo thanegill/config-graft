@@ -45,7 +45,7 @@ const MAX_DEPTH: usize = 100;
 /// Filename prefix for the temp files/symlinks staged during an atomic write.
 /// Skipped on read so a leftover from a crashed run is never ingested as a managed
 /// entry (a real file with this prefix is not managed, which is the intent).
-const TEMP_PREFIX: &str = ".cg-tmp.";
+const TEMP_PREFIX: &str = ".config-graft-tmp.";
 
 /// Which extended attributes are managed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
@@ -69,14 +69,16 @@ pub struct AttrPolicy {
     pub xattrs: XattrScope,
 }
 
-/// Whether an extended attribute named `name` is within `scope`.
-fn xattr_in_scope(name: &str, scope: XattrScope) -> bool {
-    match scope {
-        XattrScope::All => true,
-        XattrScope::None => false,
-        XattrScope::Safe => !["security.", "system.", "trusted.", "com.apple."]
-            .iter()
-            .any(|prefix| name.starts_with(prefix)),
+impl XattrScope {
+    /// Whether an extended attribute named `name` is within this scope.
+    fn in_scope(self, name: &str) -> bool {
+        match self {
+            XattrScope::All => true,
+            XattrScope::None => false,
+            XattrScope::Safe => !["security.", "system.", "trusted.", "com.apple."]
+                .iter()
+                .any(|prefix| name.starts_with(prefix)),
+        }
     }
 }
 
@@ -178,7 +180,7 @@ fn render_attr_summary(attrs: &Attrs) -> String {
 impl Leaf for DirLeaf {
     /// A directory's own attributes (mode/owner/xattrs) ride on its map node, so
     /// they reconcile through the same engine as file leaves.
-    type MapMeta = Attrs;
+    type LeafMeta = Attrs;
 
     /// Compact `--diff` rendering. Never dumps contents (files may be huge or
     /// binary): a file shows its length, mode, owner, and extended attributes
@@ -194,7 +196,7 @@ impl Leaf for DirLeaf {
 
     /// A directory's own attributes, or `None` when unmanaged (empty — e.g. the
     /// root without `--manage-root`), so `--diff` shows directory metadata drift.
-    fn render_map_meta(meta: &Attrs) -> Option<String> {
+    fn render_leaf_meta(meta: &Attrs) -> Option<String> {
         if meta.is_empty() {
             None
         } else {
@@ -334,6 +336,13 @@ fn read_node(path: &Path, policy: AttrPolicy, depth: usize) -> Result<Node<DirLe
 /// mode always; owner (uid/gid) when `policy.owner`; and every extended attribute
 /// the OS reports that is within `policy.xattrs`.
 ///
+/// This is an **allowlist**: only these attributes become part of a leaf's
+/// identity. The *dynamic* stat fields — timestamps (`mtime`/`atime`/`ctime`),
+/// size, inode, link count — are deliberately never captured, so they can't
+/// trigger a rewrite. That is exactly what keeps an unchanged file untouched
+/// (inode and mtime preserved); a file is identified by its contents (len +
+/// digest) plus these managed attributes, not by when it was last written.
+///
 /// Reading extended attributes is best-effort and **filesystem-agnostic**: a
 /// filesystem that doesn't support them (so `listxattr` fails) simply contributes
 /// no `xattr:*` entries. (Applying them, by contrast, is strict — see
@@ -353,7 +362,7 @@ fn read_attrs(path: &Path, meta: &fs::Metadata, policy: AttrPolicy) -> Attrs {
             for name in names {
                 // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
                 if let Some(name) = name.to_str() {
-                    if xattr_in_scope(name, policy.xattrs) {
+                    if policy.xattrs.in_scope(name) {
                         if let Ok(Some(value)) = xattr::get(path, name) {
                             attrs.insert(format!("xattr:{name}"), value);
                         }
@@ -577,7 +586,7 @@ fn apply_attrs(path: &Path, attrs: &Attrs, policy: AttrPolicy) -> Result<(), Err
         if let Ok(names) = xattr::list(path) {
             for name in names {
                 if let Some(name) = name.to_str() {
-                    if xattr_in_scope(name, policy.xattrs) && !desired.contains(name) {
+                    if policy.xattrs.in_scope(name) && !desired.contains(name) {
                         xattr::remove(path, name).map_err(|e| write_err(path, e))?;
                     }
                 }
@@ -585,7 +594,7 @@ fn apply_attrs(path: &Path, attrs: &Attrs, policy: AttrPolicy) -> Result<(), Err
         }
         for (key, value) in attrs {
             if let Some(name) = key.strip_prefix("xattr:") {
-                if xattr_in_scope(name, policy.xattrs) {
+                if policy.xattrs.in_scope(name) {
                     xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
                 }
             }
@@ -791,11 +800,11 @@ mod tests {
     }
 
     #[test]
-    fn render_map_meta_shows_dir_attributes() {
-        let m = DirLeaf::render_map_meta(&attrs(&[("mode", "755"), ("uid", "0"), ("gid", "0")]));
+    fn render_leaf_meta_shows_dir_attributes() {
+        let m = DirLeaf::render_leaf_meta(&attrs(&[("mode", "755"), ("uid", "0"), ("gid", "0")]));
         assert!(m.unwrap().starts_with("dir(0755"));
         // Empty metadata (an unmanaged root) renders nothing.
-        assert_eq!(DirLeaf::render_map_meta(&Attrs::new()), None);
+        assert_eq!(DirLeaf::render_leaf_meta(&Attrs::new()), None);
     }
 
     #[test]
@@ -830,12 +839,12 @@ mod tests {
             "trusted.x",
             "com.apple.quarantine",
         ] {
-            assert!(!xattr_in_scope(name, XattrScope::Safe), "{name}");
-            assert!(xattr_in_scope(name, XattrScope::All), "{name}");
-            assert!(!xattr_in_scope(name, XattrScope::None), "{name}");
+            assert!(!XattrScope::Safe.in_scope(name), "{name}");
+            assert!(XattrScope::All.in_scope(name), "{name}");
+            assert!(!XattrScope::None.in_scope(name), "{name}");
         }
-        assert!(xattr_in_scope("user.foo", XattrScope::Safe));
-        assert!(!xattr_in_scope("user.foo", XattrScope::None));
+        assert!(XattrScope::Safe.in_scope("user.foo"));
+        assert!(!XattrScope::None.in_scope("user.foo"));
     }
 
     #[test]

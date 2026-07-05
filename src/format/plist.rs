@@ -43,7 +43,7 @@ impl std::fmt::Debug for PlistLeaf {
 }
 
 impl Leaf for PlistLeaf {
-    type MapMeta = ();
+    type LeafMeta = ();
     fn render(&self) -> String {
         match self {
             PlistLeaf::Bool(b) => b.to_string(),

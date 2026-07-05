@@ -21,10 +21,10 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
 - `src/value.rs` — `Node<L>` + the `Leaf` trait. **Each format owns its leaf type**
   (`JsonLeaf`/`YamlLeaf`/`PlistLeaf`/`TomlLeaf`/`DirLeaf`), so encoders are total —
   there is no single enum mixing formats. Don't reintroduce one. `Node::Map` also
-  carries a `Leaf::MapMeta` payload (`()` for JSON/plist/YAML/TOML; a directory's
+  carries a `Leaf::LeafMeta` payload (`()` for JSON/plist/YAML/TOML; a directory's
   own attributes for `DirLeaf`), reconciled through the same engine; `Node`'s
   `Clone`/`PartialEq`/`Debug` are **hand-written** because `derive` won't add the
-  `L::MapMeta: Trait` bounds the `Map` field needs.
+  `L::LeafMeta: Trait` bounds the `Map` field needs.
 - `src/reconcile.rs` — the pure three-way merge, generic `<L: Leaf>`, no I/O.
   Managed key paths are the `KeyPath` newtype. `deep_merge` takes DESIRED's map
   metadata on a merge (the same "DESIRED wins" rule as a leaf).
@@ -47,10 +47,10 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   digest, `apply_tree` streams source→dest and applies attrs atomically
   (refuse-on-failure). An `AttrPolicy { owner, xattrs }` (default: manage
   everything) threads through read/apply; `xattr_in_scope` filters by
-  `XattrScope`. A directory's own attrs ride on its `MapMeta` (rendered into
-  `--diff` via `Leaf::render_map_meta`); the root is unmanaged unless
+  `XattrScope`. A directory's own attrs ride on its `LeafMeta` (rendered into
+  `--diff` via `Leaf::render_leaf_meta`); the root is unmanaged unless
   `--manage-root`. Robustness: case-fold sibling-collision refuse, `MAX_DEPTH`
-  guard, `.cg-tmp.` temp-name skip on read, per-entry parent `fsync`. Uses
+  guard, `.config-graft-tmp.` temp-name skip on read, per-entry parent `fsync`. Uses
   `sha2` + `xattr`.
 - `src/format/yaml_edit.rs` / `toml_edit_apply.rs` — YAML/TOML writes **edit the
   original document in place** to preserve comments, with a round-trip backstop
@@ -73,8 +73,8 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   attribute failure refuses cleanly. `chown` to the caller's own uid/gid is
   skipped (no-op, avoids needless privilege). Reading xattrs is best-effort
   (unsupported FS ⇒ none); applying is strict but scoped by `AttrPolicy`. Adding a
-  new leaf type means adding its `MapMeta` (`()` unless the format has map
-  metadata) and, if it carries map metadata, a `render_map_meta`.
+  new leaf type means adding its `LeafMeta` (`()` unless the format has map
+  metadata) and, if it carries map metadata, a `render_leaf_meta`.
 - Directory mode is intentionally non-transactional across files, doesn't preserve
   hardlinks, and trusts ancestor path components (not the entries it walks). These
   trade-offs are locked by characterization tests (`hardlink_is_broken_on_rewrite`,

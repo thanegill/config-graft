@@ -686,11 +686,11 @@ fn leftover_temp_name_is_ignored() {
     write(&desired.join("a.txt"), "x");
     // A crashed run left a temp entry in the target; it must be ignored (not pruned,
     // not surfaced) and survive.
-    write(&target.join(".cg-tmp.leftover.0"), "junk");
+    write(&target.join(".config-graft-tmp.leftover.0"), "junk");
 
     let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(read(&target.join(".cg-tmp.leftover.0")), "junk"); // untouched
+    assert_eq!(read(&target.join(".config-graft-tmp.leftover.0")), "junk"); // untouched
     assert_eq!(read(&target.join("a.txt")), "x");
 }
 

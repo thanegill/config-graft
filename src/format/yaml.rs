@@ -26,7 +26,7 @@ pub enum YamlLeaf {
 }
 
 impl Leaf for YamlLeaf {
-    type MapMeta = ();
+    type LeafMeta = ();
     fn render(&self) -> String {
         match self {
             YamlLeaf::Null => "null".to_string(),

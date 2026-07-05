@@ -22,7 +22,7 @@ pub enum JsonLeaf {
 }
 
 impl Leaf for JsonLeaf {
-    type MapMeta = ();
+    type LeafMeta = ();
     fn render(&self) -> String {
         match self {
             JsonLeaf::Null => "null".to_string(),
