@@ -194,7 +194,16 @@ fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<
     tmp.as_file()
         .set_permissions(fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
+    // fsync the directory so the rename itself survives a crash (content fsync
+    // alone doesn't make the new directory entry durable).
+    fsync_dir(&dir)?;
     Ok(())
+}
+
+/// fsync a directory so its recent entry changes (renames/creates/unlinks) are
+/// durable — a content fsync alone doesn't cover the directory entry.
+pub(crate) fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    fs::File::open(dir)?.sync_all()
 }
 
 /// The directory an atomic write stages its temp file in: the target's parent, or

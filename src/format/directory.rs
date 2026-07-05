@@ -459,6 +459,11 @@ fn apply_dir(
             }
         }
     }
+    // Make this directory's entry changes (renames/creates/unlinks) durable once,
+    // after they've all settled. Nested directories fsync themselves first.
+    if changed {
+        crate::fsync_dir(dir).map_err(|e| write_err(dir, e))?;
+    }
     Ok(changed)
 }
 
@@ -838,6 +843,12 @@ mod tests {
         assert_eq!(find_name_collision(["a", "b", "c"].into_iter()), None);
         assert!(find_name_collision(["Foo", "foo"].into_iter()).is_some());
         assert!(find_name_collision(["a", "A"].into_iter()).is_some());
+    }
+
+    #[test]
+    fn fsync_dir_smoke() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::fsync_dir(dir.path()).unwrap();
     }
 
     #[test]
