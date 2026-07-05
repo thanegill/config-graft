@@ -64,6 +64,10 @@ pub enum Error {
     /// A directory-mode file attribute (mode/uid/gid) held a value that could not
     /// be parsed back to a number.
     InvalidAttribute(String),
+    /// DESIRED declares a path as a file/symlink, but the target directory there
+    /// holds entries never under management — replacing it would delete them, so
+    /// the run is refused.
+    AppDirWouldBeDeleted(PathBuf),
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
@@ -109,6 +113,12 @@ impl fmt::Display for Error {
                 f.write_str("--stdout is not supported with --format directory")
             }
             Error::InvalidAttribute(key) => write!(f, "invalid {key} attribute value"),
+            Error::AppDirWouldBeDeleted(p) => write!(
+                f,
+                "refusing to replace directory {} with a file: it holds entries not \
+                 under management (they would be deleted); remove it by hand to proceed",
+                p.display()
+            ),
         }
     }
 }

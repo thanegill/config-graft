@@ -57,11 +57,13 @@ pub(crate) trait Backend {
         output: Option<&[u8]>,
     ) -> bool;
 
-    /// Apply the reconciled `result` to the target.
+    /// Apply the reconciled `result` to the target. `base` is the reconcile
+    /// ancestor (used by the tree backend to refuse deleting app content).
     fn apply(
         cli: &Cli,
         target: &Node<Self::Leaf>,
         result: &Node<Self::Leaf>,
+        base: Option<&Node<Self::Leaf>>,
         output: Option<&[u8]>,
     ) -> Result<(), Error>;
 }
@@ -140,7 +142,7 @@ pub(crate) fn run<B: Backend>(cli: &Cli) -> Result<Outcome, Error> {
         }
     }
     if changed {
-        B::apply(cli, &target, &result, output.as_deref())?;
+        B::apply(cli, &target, &result, base.as_ref(), output.as_deref())?;
     }
     Ok(Outcome::Applied)
 }
@@ -220,6 +222,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         cli: &Cli,
         _target: &Node<F::Leaf>,
         _result: &Node<F::Leaf>,
+        _base: Option<&Node<F::Leaf>>,
         output: Option<&[u8]>,
     ) -> Result<(), Error> {
         let output = output.expect("byte backend always produces output");
@@ -284,8 +287,9 @@ impl Backend for Directory {
         cli: &Cli,
         target: &Node<DirLeaf>,
         result: &Node<DirLeaf>,
+        base: Option<&Node<DirLeaf>>,
         _output: Option<&[u8]>,
     ) -> Result<(), Error> {
-        directory::apply_tree(&cli.target, Some(target), result).map(|_| ())
+        directory::apply_tree(&cli.target, Some(target), result, base).map(|_| ())
     }
 }

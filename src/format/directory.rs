@@ -300,6 +300,7 @@ pub fn apply_tree(
     root: &Path,
     cur: Option<&Node<DirLeaf>>,
     want: &Node<DirLeaf>,
+    base: Option<&Node<DirLeaf>>,
 ) -> Result<bool, Error> {
     let (want_map, want_meta) = match want {
         Node::Map(m, meta) => (m, meta),
@@ -318,8 +319,19 @@ pub fn apply_tree(
         changed = true;
     }
     let cur_map = cur.and_then(Node::as_map);
-    changed |= apply_dir(root, cur_map, want_map)?;
+    let base_map = base.and_then(Node::as_map);
+    changed |= apply_dir(root, cur_map, want_map, base_map)?;
     Ok(changed)
+}
+
+/// Whether `cur` (a directory subtree read from disk) holds any leaf that is not
+/// present in `base` — i.e. content that was never under management. Used to
+/// refuse deleting an app-populated directory on a directory → file type change.
+fn dir_has_unmanaged(cur: &Node<DirLeaf>, base: Option<&Node<DirLeaf>>) -> bool {
+    crate::reconcile::leaf_paths(cur).iter().any(|p| {
+        base.and_then(|b| crate::reconcile::get_path(b, p))
+            .is_none()
+    })
 }
 
 /// Ensure `root` exists as a directory, creating it (and parents) if missing.
@@ -340,12 +352,14 @@ fn apply_dir(
     dir: &Path,
     cur: Option<&IndexMap<String, Node<DirLeaf>>>,
     want: &IndexMap<String, Node<DirLeaf>>,
+    base: Option<&IndexMap<String, Node<DirLeaf>>>,
 ) -> Result<bool, Error> {
     let mut changed = false;
     for (name, want_child) in want {
         let child = dir.join(name);
         let cur_child = cur.and_then(|m| m.get(name));
-        changed |= apply_node(&child, cur_child, want_child)?;
+        let base_child = base.and_then(|m| m.get(name));
+        changed |= apply_node(&child, cur_child, want_child, base_child)?;
     }
     if let Some(cur) = cur {
         for (name, cur_child) in cur {
@@ -363,6 +377,7 @@ fn apply_node(
     path: &Path,
     cur: Option<&Node<DirLeaf>>,
     want: &Node<DirLeaf>,
+    base: Option<&Node<DirLeaf>>,
 ) -> Result<bool, Error> {
     match want {
         Node::Map(want_map, want_meta) => {
@@ -393,13 +408,18 @@ fn apply_node(
                 }
                 Some(Node::Array(_)) => unreachable!("directory trees contain no arrays"),
             };
-            changed |= apply_dir(path, cur_map, want_map)?;
+            changed |= apply_dir(path, cur_map, want_map, base.and_then(Node::as_map))?;
             Ok(changed)
         }
         Node::Leaf(want_leaf) => match cur {
             Some(Node::Leaf(c)) if c == want_leaf => Ok(false),
-            // Type change (directory -> file/symlink): remove the subtree first.
-            Some(Node::Map(..)) => {
+            // Type change (directory -> file/symlink): remove the subtree first —
+            // but refuse rather than delete a directory holding app-created content
+            // (entries never in BASE), which the preservation guarantee protects.
+            Some(cur_node @ Node::Map(..)) => {
+                if dir_has_unmanaged(cur_node, base) {
+                    return Err(Error::AppDirWouldBeDeleted(path.to_path_buf()));
+                }
                 remove_tree(path)?;
                 write_leaf(path, want_leaf)?;
                 Ok(true)
@@ -694,7 +714,7 @@ mod tests {
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        let changed = apply_tree(&root, None, &want).unwrap();
+        let changed = apply_tree(&root, None, &want, None).unwrap();
         assert!(changed);
 
         // Re-reading the applied tree yields the same Node (round-trip).
@@ -720,13 +740,13 @@ mod tests {
             src1.path(),
             &[("sub/only.txt", "v", 0o644), ("keep.txt", "k", 0o644)],
         );
-        apply_tree(&root, None, &before).unwrap();
+        apply_tree(&root, None, &before, None).unwrap();
         let cur = read_tree(&root, false).unwrap().unwrap();
 
         // want drops sub/only.txt entirely; keep.txt stays.
         let src2 = tempfile::tempdir().unwrap();
         let after = tree(src2.path(), &[("keep.txt", "k", 0o644)]);
-        let changed = apply_tree(&root, Some(&cur), &after).unwrap();
+        let changed = apply_tree(&root, Some(&cur), &after, None).unwrap();
         assert!(changed);
 
         assert!(!root.join("sub").exists());
@@ -739,11 +759,11 @@ mod tests {
         let root = dst.path().join("out");
         let src = tempfile::tempdir().unwrap();
         let want = tree(src.path(), &[("a.txt", "hello", 0o644)]);
-        apply_tree(&root, None, &want).unwrap();
+        apply_tree(&root, None, &want, None).unwrap();
         let cur = read_tree(&root, false).unwrap().unwrap();
         // Nothing changed on a second apply: `cur` (source under `root`) equals
         // `want` (source under `src`) by content+mode despite different paths.
-        assert!(!apply_tree(&root, Some(&cur), &want).unwrap());
+        assert!(!apply_tree(&root, Some(&cur), &want, None).unwrap());
     }
 
     #[test]
@@ -752,12 +772,12 @@ mod tests {
         let root = dst.path().join("out");
         let src1 = tempfile::tempdir().unwrap();
         let before = tree(src1.path(), &[("p", "iamfile", 0o644)]);
-        apply_tree(&root, None, &before).unwrap();
+        apply_tree(&root, None, &before, None).unwrap();
         let cur = read_tree(&root, false).unwrap().unwrap();
 
         let src2 = tempfile::tempdir().unwrap();
         let after = tree(src2.path(), &[("p/inner.txt", "x", 0o644)]);
-        apply_tree(&root, Some(&cur), &after).unwrap();
+        apply_tree(&root, Some(&cur), &after, None).unwrap();
 
         assert!(root.join("p").is_dir());
         assert_eq!(fs::read_to_string(root.join("p/inner.txt")).unwrap(), "x");
@@ -777,7 +797,7 @@ mod tests {
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        apply_tree(&root, None, &want).unwrap();
+        apply_tree(&root, None, &want, None).unwrap();
         assert_eq!(
             xattr::get(root.join("f.txt"), "user.cg_test")
                 .unwrap()
@@ -786,7 +806,7 @@ mod tests {
         );
         // Idempotent: the reapplied tree carries the same attribute, so no rewrite.
         let cur = read_tree(&root, false).unwrap().unwrap();
-        assert!(!apply_tree(&root, Some(&cur), &want).unwrap());
+        assert!(!apply_tree(&root, Some(&cur), &want, None).unwrap());
     }
 
     fn dir_mode(path: &Path) -> u32 {
@@ -803,14 +823,14 @@ mod tests {
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
-        apply_tree(&root, None, &want).unwrap();
+        apply_tree(&root, None, &want, None).unwrap();
         assert_eq!(dir_mode(&root.join("d")), 0o700);
 
         // Drift the applied directory's mode; reconcile must detect and fix it.
         fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o755)).unwrap();
         let cur = read_tree(&root, false).unwrap().unwrap();
         assert_ne!(cur, want); // directory-mode drift is part of the identity
-        assert!(apply_tree(&root, Some(&cur), &want).unwrap());
+        assert!(apply_tree(&root, Some(&cur), &want, None).unwrap());
         assert_eq!(dir_mode(&root.join("d")), 0o700);
     }
 
@@ -826,7 +846,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let cur = read_tree(&root, false).unwrap();
-        apply_tree(&root, cur.as_ref(), &want).unwrap();
+        apply_tree(&root, cur.as_ref(), &want, None).unwrap();
         // The root keeps its own 0700 even though the source root was 0755.
         assert_eq!(dir_mode(&root), 0o700);
     }
@@ -844,7 +864,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let cur = read_tree(&root, true).unwrap();
-        assert!(apply_tree(&root, cur.as_ref(), &want).unwrap());
+        assert!(apply_tree(&root, cur.as_ref(), &want, None).unwrap());
         // The root is now reconciled to the source root's 0750.
         assert_eq!(dir_mode(&root), 0o750);
     }

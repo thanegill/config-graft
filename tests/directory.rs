@@ -157,15 +157,36 @@ fn type_change_file_to_dir() {
 }
 
 #[test]
-fn type_change_dir_to_file() {
+fn refuses_file_over_app_populated_dir() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");
     let desired = dir.path().join("desired");
-    write(&target.join("p/inner.txt"), "was a dir");
+    // The app filled p/ with content never under management (no BASE, not in DESIRED).
+    write(&target.join("p/app.txt"), "app data");
     write(&desired.join("p"), "now a file");
 
     let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(out.status.success());
+    assert_eq!(out.status.code(), Some(1)); // refused, not rm -rf'd
+    assert_eq!(read(&target.join("p/app.txt")), "app data"); // preserved
+}
+
+#[test]
+fn allows_file_over_managed_only_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    let base = dir.path().join("base");
+    // p/ held only managed content (present in BASE), so replacing it is allowed.
+    write(&target.join("p/inner.txt"), "was a dir");
+    write(&base.join("p/inner.txt"), "was a dir");
+    write(&desired.join("p"), "now a file");
+
+    let out = graft(&[
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
     assert!(target.join("p").is_file());
     assert_eq!(read(&target.join("p")), "now a file");
 }
