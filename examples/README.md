@@ -3,7 +3,8 @@
 Each subdirectory is a self-contained flake wiring config-graft into one platform:
 
 - [`home-manager/`](home-manager) — standalone home-manager
-  (`home.managed{Json,Yaml,...}`, targets relative to `$HOME`).
+  (`home.managed{Json,Yaml,...}`, targets relative to `$HOME`); one entry uses
+  `source` (a checked-in file) instead of inline `settings`.
 - [`nixos/`](nixos) — a NixOS host (`environment.managed*`, absolute targets,
   reconciled during system activation).
 - [`nix-darwin/`](nix-darwin) — a nix-darwin host (same `environment.managed*`,

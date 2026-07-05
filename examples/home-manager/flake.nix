@@ -43,6 +43,11 @@
 
             # comments in the live file are preserved
             home.managedYaml.".config/tool/config.yaml".settings.plugins = [ "git" ];
+
+            # `source`: reconcile a file built some other way -- checked in here,
+            # but it could be any generator, rendered template, or derivation --
+            # instead of inline `settings`.
+            home.managedJson.".config/widget/config.json".source = ./widget.json;
           }
         ];
       };
