@@ -3,7 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    config-graft.url = "github:thanegill/config-graft";
+    config-graft = {
+      url = "github:thanegill/config-graft";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =

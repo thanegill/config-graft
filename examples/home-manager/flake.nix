@@ -7,7 +7,10 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    config-graft.url = "github:thanegill/config-graft";
+    config-graft = {
+      url = "github:thanegill/config-graft";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
