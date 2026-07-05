@@ -6,7 +6,8 @@ Each subdirectory is a self-contained flake wiring config-graft into one platfor
   (`home.managed{Json,Yaml,...}`, targets relative to `$HOME`); one entry uses
   `source` (a checked-in file) instead of inline `settings`.
 - [`nixos/`](nixos) — a NixOS host (`environment.managed*`, absolute targets,
-  reconciled during system activation).
+  reconciled during system activation); one entry overrides `format` with a
+  validating `pkgs.formats` generator.
 - [`nix-darwin/`](nix-darwin) — a nix-darwin host (same `environment.managed*`,
   applied in the `postActivation` phase).
 

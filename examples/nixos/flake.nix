@@ -16,28 +16,53 @@
       nixosConfigurations.example = nixpkgs.lib.nixosSystem {
         modules = [
           config-graft.nixosModules.default
-          {
-            nixpkgs.hostPlatform = "x86_64-linux";
+          (
+            { lib, pkgs, ... }:
+            {
+              nixpkgs.hostPlatform = "x86_64-linux";
 
-            # System files an app owns and rewrites; reconciled during activation
-            # with the previous generation as BASE. The attribute name is the
-            # target's absolute path (override with `target` if needed).
-            environment.managedJson."/etc/app/config.json".settings = {
-              theme = "dark";
-              editor.fontSize = 14;
-            };
+              # System files an app owns and rewrites; reconciled during activation
+              # with the previous generation as BASE. The attribute name is the
+              # target's absolute path (override with `target` if needed).
 
-            # comments in the live file are preserved
-            environment.managedToml."/etc/app/config.toml".settings.theme = "dark";
+              # `format`: the `pkgs.formats` generator that serializes `settings`
+              # and supplies the type that validates it. Here we wrap the JSON
+              # generator's type with an extra check, so `theme` must be "dark" or
+              # "light" -- any other value fails at build time.
+              environment.managedJson."/etc/app/config.json" = {
+                format =
+                  let
+                    json = pkgs.formats.json { };
+                  in
+                  json
+                  // {
+                    type = lib.types.addCheck json.type (
+                      v:
+                      !(v ? theme)
+                      || builtins.elem v.theme [
+                        "dark"
+                        "light"
+                      ]
+                    );
+                  };
+                settings = {
+                  theme = "dark";
+                  editor.fontSize = 14;
+                };
+              };
 
-            # --- minimal host stubs so the example evaluates; replace with yours ---
-            boot.loader.grub.enable = false;
-            fileSystems."/" = {
-              device = "/dev/disk/by-label/nixos";
-              fsType = "ext4";
-            };
-            system.stateVersion = "24.05";
-          }
+              # comments in the live file are preserved
+              environment.managedToml."/etc/app/config.toml".settings.theme = "dark";
+
+              # --- minimal host stubs so the example evaluates; replace with yours ---
+              boot.loader.grub.enable = false;
+              fileSystems."/" = {
+                device = "/dev/disk/by-label/nixos";
+                fsType = "ext4";
+              };
+              system.stateVersion = "24.05";
+            }
+          )
         ];
       };
     };
