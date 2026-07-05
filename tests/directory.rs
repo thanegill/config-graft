@@ -514,3 +514,54 @@ fn manage_root_reconciles_the_target_root_mode() {
     .success());
     assert_eq!(mode_of(&target), 0o751);
 }
+
+#[test]
+fn diff_reports_directory_mode_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    // Identical file in both; only the subdirectory's own mode differs.
+    write(&desired.join("d/f.txt"), "x");
+    fs::set_permissions(desired.join("d"), fs::Permissions::from_mode(0o700)).unwrap();
+    write(&target.join("d/f.txt"), "x");
+    fs::set_permissions(target.join("d"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = graft(&[
+        "--diff",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(3)); // metadata drift is pending
+    let diff = String::from_utf8(out.stdout).unwrap();
+    // The directory's own mode change must appear in the diff.
+    assert!(
+        diff.contains("d/") && diff.contains("0755") && diff.contains("0700"),
+        "diff was: {diff:?}"
+    );
+}
+
+#[test]
+fn diff_reports_root_mode_change_with_manage_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&desired.join("f.txt"), "x");
+    fs::set_permissions(&desired, fs::Permissions::from_mode(0o755)).unwrap();
+    write(&target.join("f.txt"), "x");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let out = graft(&[
+        "--manage-root",
+        "--diff",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let diff = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        diff.contains("0755") && diff.contains("0700"),
+        "diff was: {diff:?}"
+    );
+}

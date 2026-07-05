@@ -20,6 +20,13 @@ pub trait Leaf: Clone + PartialEq + std::fmt::Debug {
     type MapMeta: Clone + PartialEq + std::fmt::Debug + Default;
     /// Compact single-line rendering for `--diff`.
     fn render(&self) -> String;
+    /// Compact `--diff` rendering of a map node's own metadata, or `None` if this
+    /// format's maps carry none (the default — so `--diff` never mentions map
+    /// metadata for JSON/plist/YAML/TOML). Directory mode overrides it to render a
+    /// directory's own attributes.
+    fn render_map_meta(_meta: &Self::MapMeta) -> Option<String> {
+        None
+    }
 }
 
 /// A reconcilable value over a format's leaf type `L`: an ordered string-keyed

@@ -97,6 +97,41 @@ impl PartialEq for DirLeaf {
     }
 }
 
+/// Render an attribute map's `mode, uid:gid[, +N xattr]` summary for `--diff`.
+/// Shared by a file leaf and a directory's own metadata.
+fn render_attr_summary(attrs: &Attrs) -> String {
+    let mode = attrs
+        .get("mode")
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .and_then(|s| u32::from_str_radix(s, 8).ok())
+        .map(|m| format!("{:04o}", m & 0o7777))
+        .unwrap_or_else(|| "?".into());
+    let num = |k: &str| {
+        attrs
+            .get(k)
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_else(|| "?".into())
+    };
+    let mut out = format!("{mode}, {}:{}", num("uid"), num("gid"));
+    // Each extended attribute is shown as `name=<digest>` — a short hash of the
+    // value distinguishes a value or rename change in the diff without dumping
+    // (possibly binary or large) bytes. `attrs` is a `BTreeMap`, so ordered.
+    let xattrs: Vec<String> = attrs
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("xattr:").map(|name| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(v, &mut h);
+                format!("{name}={:08x}", std::hash::Hasher::finish(&h) as u32)
+            })
+        })
+        .collect();
+    if !xattrs.is_empty() {
+        out.push_str(&format!(", xattr[{}]", xattrs.join(", ")));
+    }
+    out
+}
+
 impl Leaf for DirLeaf {
     /// A directory's own attributes (mode/owner/xattrs) ride on its map node, so
     /// they reconcile through the same engine as file leaves.
@@ -108,27 +143,19 @@ impl Leaf for DirLeaf {
     fn render(&self) -> String {
         match self {
             DirLeaf::File { len, attrs, .. } => {
-                let mode = attrs
-                    .get("mode")
-                    .and_then(|b| std::str::from_utf8(b).ok())
-                    .and_then(|s| u32::from_str_radix(s, 8).ok())
-                    .map(|m| format!("{:04o}", m & 0o7777))
-                    .unwrap_or_else(|| "?".into());
-                let num = |k: &str| {
-                    attrs
-                        .get(k)
-                        .map(|b| String::from_utf8_lossy(b).into_owned())
-                        .unwrap_or_else(|| "?".into())
-                };
-                let xattrs = attrs.keys().filter(|k| k.starts_with("xattr:")).count();
-                let mut out = format!("file({len} bytes, {mode}, {}:{}", num("uid"), num("gid"));
-                if xattrs > 0 {
-                    out.push_str(&format!(", +{xattrs} xattr"));
-                }
-                out.push(')');
-                out
+                format!("file({len} bytes, {})", render_attr_summary(attrs))
             }
             DirLeaf::Symlink { target } => format!("-> {}", target.display()),
+        }
+    }
+
+    /// A directory's own attributes, or `None` when unmanaged (empty — e.g. the
+    /// root without `--manage-root`), so `--diff` shows directory metadata drift.
+    fn render_map_meta(meta: &Attrs) -> Option<String> {
+        if meta.is_empty() {
+            None
+        } else {
+            Some(format!("dir({})", render_attr_summary(meta)))
         }
     }
 }
@@ -560,19 +587,20 @@ mod tests {
             leaf("/x", "hello world", owner()).render(),
             "file(11 bytes, 0755, 501:20)"
         );
-        assert_eq!(
-            leaf(
-                "/x",
-                "hi",
-                attrs(&[
-                    ("mode", "644"),
-                    ("uid", "0"),
-                    ("gid", "0"),
-                    ("xattr:user.k", "v")
-                ]),
-            )
-            .render(),
-            "file(2 bytes, 0644, 0:0, +1 xattr)"
+        let r = leaf(
+            "/x",
+            "hi",
+            attrs(&[
+                ("mode", "644"),
+                ("uid", "0"),
+                ("gid", "0"),
+                ("xattr:user.k", "v"),
+            ]),
+        )
+        .render();
+        assert!(
+            r.starts_with("file(2 bytes, 0644, 0:0, xattr[user.k="),
+            "{r}"
         );
         assert_eq!(
             DirLeaf::Symlink {
@@ -581,6 +609,31 @@ mod tests {
             .render(),
             "-> /etc/foo"
         );
+    }
+
+    #[test]
+    fn render_distinguishes_xattr_values() {
+        let base = |v: &str| {
+            attrs(&[
+                ("mode", "644"),
+                ("uid", "0"),
+                ("gid", "0"),
+                ("xattr:user.k", v),
+            ])
+        };
+        // A value-only xattr change (same name, same length) must render distinctly.
+        assert_ne!(
+            leaf("/x", "hi", base("v1")).render(),
+            leaf("/x", "hi", base("v2")).render()
+        );
+    }
+
+    #[test]
+    fn render_map_meta_shows_dir_attributes() {
+        let m = DirLeaf::render_map_meta(&attrs(&[("mode", "755"), ("uid", "0"), ("gid", "0")]));
+        assert!(m.unwrap().starts_with("dir(0755"));
+        // Empty metadata (an unmanaged root) renders nothing.
+        assert_eq!(DirLeaf::render_map_meta(&Attrs::new()), None);
     }
 
     #[test]
