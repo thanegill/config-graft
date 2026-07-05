@@ -242,23 +242,48 @@ pub fn read_tree(
     }
 }
 
+/// Two sibling names that fold to the same key (case-insensitively), if any — such
+/// a pair would map to a single file on a case-insensitive filesystem.
+fn find_name_collision<'a>(names: impl Iterator<Item = &'a str>) -> Option<(String, String)> {
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for name in names {
+        if let Some(prev) = seen.insert(name.to_lowercase(), name.to_string()) {
+            return Some((prev, name.to_string()));
+        }
+    }
+    None
+}
+
 /// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
 /// directory's own attributes).
 fn read_dir(dir: &Path, meta: Attrs, policy: AttrPolicy) -> Result<Node<DirLeaf>, Error> {
-    let mut names: Vec<PathBuf> = fs::read_dir(dir)
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| read_err(dir, e))?
         .map(|e| e.map(|e| e.path()).map_err(|e| read_err(dir, e)))
         .collect::<Result<_, _>>()?;
-    names.sort();
+    paths.sort();
 
-    let mut map = IndexMap::with_capacity(names.len());
-    for child in names {
-        let name = match child.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_owned(),
+    // Resolve names first (refusing non-UTF-8), then refuse a case-fold collision
+    // before doing any expensive per-entry reads.
+    let mut children: Vec<(String, PathBuf)> = Vec::with_capacity(paths.len());
+    for path in paths {
+        match path.file_name().and_then(|n| n.to_str()) {
             // A non-UTF-8 filename can't be a String key and wouldn't round-trip.
-            None => return Err(Error::UnsupportedFileType(child)),
-        };
-        map.insert(name, read_node(&child, policy)?);
+            None => return Err(Error::UnsupportedFileType(path)),
+            Some(n) => children.push((n.to_owned(), path)),
+        }
+    }
+    if let Some((a, b)) = find_name_collision(children.iter().map(|(n, _)| n.as_str())) {
+        return Err(Error::NameCollision {
+            dir: dir.to_path_buf(),
+            a,
+            b,
+        });
+    }
+
+    let mut map = IndexMap::with_capacity(children.len());
+    for (name, path) in children {
+        map.insert(name, read_node(&path, policy)?);
     }
     Ok(Node::Map(map, meta))
 }
@@ -783,6 +808,13 @@ mod tests {
         }
         assert!(xattr_in_scope("user.foo", XattrScope::Safe));
         assert!(!xattr_in_scope("user.foo", XattrScope::None));
+    }
+
+    #[test]
+    fn find_name_collision_detects_case_fold_pairs() {
+        assert_eq!(find_name_collision(["a", "b", "c"].into_iter()), None);
+        assert!(find_name_collision(["Foo", "foo"].into_iter()).is_some());
+        assert!(find_name_collision(["a", "A"].into_iter()).is_some());
     }
 
     #[test]

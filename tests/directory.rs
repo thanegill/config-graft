@@ -640,3 +640,22 @@ fn no_owner_applies_without_managing_ownership() {
     ]);
     assert_eq!(check.status.code(), Some(0));
 }
+
+#[test]
+fn refuses_case_fold_sibling_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&desired.join("Foo"), "1");
+    write(&desired.join("foo"), "2");
+    // On a case-insensitive filesystem the two collapse into one entry; only assert
+    // where both actually landed.
+    if fs::read_dir(&desired).unwrap().count() < 2 {
+        eprintln!("skipping refuses_case_fold_sibling_collision: case-insensitive FS");
+        return;
+    }
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("collide"), "got: {err}");
+}
