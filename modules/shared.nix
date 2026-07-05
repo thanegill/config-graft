@@ -117,12 +117,15 @@ let
         literalExpression
         ;
 
-      # DESIRED store path for one entry: a `pkgs.formats` generator for freeform
-      # formats (overridable per entry via `format`), `lib.generators.toPlist` for
-      # plist.
+      # DESIRED store path for one entry: a pre-built `source` file when given,
+      # otherwise generated from `settings` -- a `pkgs.formats` generator for
+      # freeform formats (overridable per entry via `format`), `lib.generators.toPlist`
+      # for plist.
       mkDesired =
         spec: name: entry:
-        if isFreeform spec then
+        if entry.source != null then
+          entry.source
+        else if isFreeform spec then
           entry.format.generate "managed-${spec.fmt}-${name}.${spec.ext}" entry.settings
         else
           pkgs.writeText "managed-plist-${name}.plist" (
@@ -171,6 +174,19 @@ let
                 example = spec.settingsExample;
                 description = "Freeform ${spec.fmt} data reconciled into {option}`target`. Empty disables the entry.";
               };
+
+              source = mkOption {
+                type = types.nullOr types.path;
+                default = null;
+                example = literalExpression "./managed.${spec.ext}";
+                description = ''
+                  A pre-built ${spec.fmt} file to reconcile into {option}`target`,
+                  as an alternative to {option}`settings` -- for a DESIRED built some
+                  other way (another generator, a rendered template, a checked-in
+                  file, a derivation). Mutually exclusive with {option}`settings`;
+                  setting either one makes the entry active.
+                '';
+              };
             }
             // optionalAttrs (isFreeform spec) { format = formatOption spec; }
             // platform.extraEntryOptions spec;
@@ -183,7 +199,7 @@ let
         spec:
         let
           cfg = config.${platform.parent}.${spec.optionName};
-          active = filterAttrs (_: entry: entry.settings != { }) cfg;
+          active = filterAttrs (_: entry: entry.settings != { } || entry.source != null) cfg;
 
           # Per-entry data, built from `active`. It must only feed config *values*,
           # never config *keys* (see the header note on `_module.freeformType`).
@@ -217,6 +233,15 @@ let
               '';
             }) active
           );
+
+          # `settings` and `source` are two ways to build the same DESIRED.
+          sourceAssertions = mapAttrsToList (name: entry: {
+            assertion = !(entry.settings != { } && entry.source != null);
+            message = ''
+              ${platform.parent}.${spec.optionName}."${name}" sets both `settings` and
+              `source`; they are mutually exclusive -- use one.
+            '';
+          }) active;
         in
         {
           inherit (spec) optionName;
@@ -233,7 +258,7 @@ let
               inherit spec;
               text = activationText;
             })
-            { assertions = cfprefsdAssertions; }
+            { assertions = cfprefsdAssertions ++ sourceAssertions; }
           ]);
         };
 

@@ -192,7 +192,9 @@ nix-darwin).
 
 An entry with empty `settings` is inert. Freeform formats (JSON/YAML/TOML) accept
 a `format` override (any `pkgs.formats`-style generator) for schema-checked
-output. There's a module per platform — [`home-manager.nix`](modules/home-manager.nix),
+output. Instead of `settings`, an entry can set `source` to a pre-built file (from
+any generator, template, or derivation) as the managed content. There's a module
+per platform — [`home-manager.nix`](modules/home-manager.nix),
 [`nixos.nix`](modules/nixos.nix),
 [`darwin.nix`](modules/darwin.nix) — each supplying a *platform* record to the
 shared assembly in [`shared.nix`](modules/shared.nix), which holds the per-format
