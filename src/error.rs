@@ -63,11 +63,16 @@ pub enum Error {
     StdoutUnsupportedForDirectory,
     /// A directory-mode file attribute (mode/uid/gid) held a value that could not
     /// be parsed back to a number.
-    InvalidAttribute(String),
+    InvalidAttribute { path: PathBuf, key: String },
     /// DESIRED declares a path as a file/symlink, but the target directory there
     /// holds entries never under management — replacing it would delete them, so
     /// the run is refused.
     AppDirWouldBeDeleted(PathBuf),
+    /// A `--format directory` DESIRED path does not exist.
+    MissingDesiredDirectory(PathBuf),
+    /// Internal invariant: a directory tree contained a node it never can (an array
+    /// node, or a non-map root). Kept as a typed error rather than a panic.
+    DirectoryTreeInvariant,
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
@@ -112,7 +117,15 @@ impl fmt::Display for Error {
             Error::StdoutUnsupportedForDirectory => {
                 f.write_str("--stdout is not supported with --format directory")
             }
-            Error::InvalidAttribute(key) => write!(f, "invalid {key} attribute value"),
+            Error::InvalidAttribute { path, key } => {
+                write!(f, "invalid {key} attribute value for {}", path.display())
+            }
+            Error::MissingDesiredDirectory(p) => {
+                write!(f, "DESIRED directory does not exist: {}", p.display())
+            }
+            Error::DirectoryTreeInvariant => {
+                f.write_str("internal error: unexpected directory-tree node")
+            }
             Error::AppDirWouldBeDeleted(p) => write!(
                 f,
                 "refusing to replace directory {} with a file: it holds entries not \

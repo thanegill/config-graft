@@ -138,8 +138,8 @@ impl Leaf for DirLeaf {
     type MapMeta = Attrs;
 
     /// Compact `--diff` rendering. Never dumps contents (files may be huge or
-    /// binary): a file shows its length, mode, owner, and extended-attribute
-    /// count; a symlink its target.
+    /// binary): a file shows its length, mode, owner, and extended attributes
+    /// (each as `name=<value-digest>`); a symlink its target.
     fn render(&self) -> String {
         match self {
             DirLeaf::File { len, attrs, .. } => {
@@ -304,7 +304,7 @@ pub fn apply_tree(
 ) -> Result<bool, Error> {
     let (want_map, want_meta) = match want {
         Node::Map(m, meta) => (m, meta),
-        _ => unreachable!("directory reconcile result is a map"),
+        _ => return Err(Error::DirectoryTreeInvariant),
     };
     ensure_root(root)?;
     let mut changed = false;
@@ -406,7 +406,7 @@ fn apply_node(
                     changed = true;
                     None
                 }
-                Some(Node::Array(_)) => unreachable!("directory trees contain no arrays"),
+                Some(Node::Array(_)) => return Err(Error::DirectoryTreeInvariant),
             };
             changed |= apply_dir(path, cur_map, want_map, base.and_then(Node::as_map))?;
             Ok(changed)
@@ -430,7 +430,7 @@ fn apply_node(
                 Ok(true)
             }
         },
-        Node::Array(_) => unreachable!("directory trees contain no arrays"),
+        Node::Array(_) => Err(Error::DirectoryTreeInvariant),
     }
 }
 
@@ -471,12 +471,12 @@ fn apply_attrs(path: &Path, attrs: &Attrs) -> Result<(), Error> {
             xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
         }
     }
-    let uid = attr_num(attrs, "uid", 10)?;
-    let gid = attr_num(attrs, "gid", 10)?;
+    let uid = attr_num(path, attrs, "uid", 10)?;
+    let gid = attr_num(path, attrs, "gid", 10)?;
     if uid.is_some() || gid.is_some() {
         chown(path, uid, gid).map_err(|e| write_err(path, e))?;
     }
-    if let Some(mode) = attr_num(attrs, "mode", 8)? {
+    if let Some(mode) = attr_num(path, attrs, "mode", 8)? {
         fs::set_permissions(path, fs::Permissions::from_mode(mode))
             .map_err(|e| write_err(path, e))?;
     }
@@ -486,14 +486,17 @@ fn apply_attrs(path: &Path, attrs: &Attrs) -> Result<(), Error> {
 /// Parse a numeric attribute (`mode` in octal, `uid`/`gid` in decimal) from the
 /// map, if present. These are our own canonical encodings, so a parse failure is
 /// a corrupt/handmade leaf and surfaces as [`Error::InvalidAttribute`].
-fn attr_num(attrs: &Attrs, key: &str, radix: u32) -> Result<Option<u32>, Error> {
+fn attr_num(path: &Path, attrs: &Attrs, key: &str, radix: u32) -> Result<Option<u32>, Error> {
     match attrs.get(key) {
         None => Ok(None),
         Some(bytes) => std::str::from_utf8(bytes)
             .ok()
             .and_then(|s| u32::from_str_radix(s, radix).ok())
             .map(Some)
-            .ok_or_else(|| Error::InvalidAttribute(key.to_string())),
+            .ok_or_else(|| Error::InvalidAttribute {
+                path: path.to_path_buf(),
+                key: key.to_string(),
+            }),
     }
 }
 
@@ -557,7 +560,7 @@ fn remove_node(path: &Path, node: &Node<DirLeaf>) -> Result<bool, Error> {
             fs::remove_dir(path).map_err(|e| write_err(path, e))?;
         }
         Node::Leaf(_) => remove_leaf(path)?,
-        Node::Array(_) => unreachable!("directory trees contain no arrays"),
+        Node::Array(_) => return Err(Error::DirectoryTreeInvariant),
     }
     Ok(true)
 }
@@ -654,6 +657,30 @@ mod tests {
         assert!(m.unwrap().starts_with("dir(0755"));
         // Empty metadata (an unmanaged root) renders nothing.
         assert_eq!(DirLeaf::render_map_meta(&Attrs::new()), None);
+    }
+
+    #[test]
+    fn array_node_is_rejected_not_panicked() {
+        // A directory tree never contains an array, but a stray one must surface as
+        // a typed error, not a panic.
+        let dir = tempfile::tempdir().unwrap();
+        let want = Node::Array(vec![]);
+        assert!(matches!(
+            apply_node(&dir.path().join("x"), None, &want, None),
+            Err(Error::DirectoryTreeInvariant)
+        ));
+    }
+
+    #[test]
+    fn invalid_attribute_error_names_the_path() {
+        let bad = attrs(&[("mode", "not-octal")]);
+        match attr_num(Path::new("/some/file"), &bad, "mode", 8) {
+            Err(Error::InvalidAttribute { path, key }) => {
+                assert_eq!(path, Path::new("/some/file"));
+                assert_eq!(key, "mode");
+            }
+            other => panic!("expected InvalidAttribute, got {other:?}"),
+        }
     }
 
     #[test]

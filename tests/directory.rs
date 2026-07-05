@@ -313,10 +313,24 @@ fn non_directory_target_errors() {
 }
 
 #[test]
-fn missing_desired_errors() {
+fn missing_desired_error_is_distinct() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");
     let desired = dir.path().join("desired"); // does not exist
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    // A *missing* DESIRED says so, distinct from a DESIRED that is a plain file.
+    assert!(err.contains("does not exist"), "got: {err}");
+}
+
+#[test]
+fn non_directory_desired_says_not_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    fs::write(&desired, "i am a file").unwrap(); // exists, but not a directory
 
     let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));

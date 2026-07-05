@@ -259,7 +259,10 @@ impl Backend for Directory {
     }
 
     fn invalid_desired(path: PathBuf) -> Error {
-        FormatKind::Directory.invalid_desired(path)
+        // Only reached when the read returned `None` (absent); a DESIRED that
+        // exists but is not a directory errors out of `read_tree` with a distinct
+        // `NotDirectory`.
+        Error::MissingDesiredDirectory(path)
     }
 
     fn desired_not_mapping(path: PathBuf) -> Error {
