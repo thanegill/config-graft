@@ -37,6 +37,16 @@ type Digest = [u8; 32];
 /// `attribute name -> raw value` (see [`DirLeaf`] for the well-known keys).
 type Attrs = BTreeMap<String, Vec<u8>>;
 
+/// Maximum directory nesting depth read (refused beyond, to avoid a stack overflow
+/// on a pathologically deep tree). The apply/remove walks are bounded by the read
+/// tree, so limiting the read bounds all recursion.
+const MAX_DEPTH: usize = 100;
+
+/// Filename prefix for the temp files/symlinks staged during an atomic write.
+/// Skipped on read so a leftover from a crashed run is never ingested as a managed
+/// entry (a real file with this prefix is not managed, which is the intent).
+const TEMP_PREFIX: &str = ".cg-tmp.";
+
 /// Which extended attributes are managed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
 pub enum XattrScope {
@@ -234,7 +244,7 @@ pub fn read_tree(
             } else {
                 Attrs::new()
             };
-            Ok(Some(read_dir(path, meta, policy)?))
+            Ok(Some(read_dir(path, meta, policy, 0)?))
         }
         Ok(_) => Err(Error::NotDirectory(path.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -256,20 +266,30 @@ fn find_name_collision<'a>(names: impl Iterator<Item = &'a str>) -> Option<(Stri
 
 /// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
 /// directory's own attributes).
-fn read_dir(dir: &Path, meta: Attrs, policy: AttrPolicy) -> Result<Node<DirLeaf>, Error> {
+fn read_dir(
+    dir: &Path,
+    meta: Attrs,
+    policy: AttrPolicy,
+    depth: usize,
+) -> Result<Node<DirLeaf>, Error> {
+    if depth > MAX_DEPTH {
+        return Err(Error::TreeTooDeep(dir.to_path_buf()));
+    }
     let mut paths: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| read_err(dir, e))?
         .map(|e| e.map(|e| e.path()).map_err(|e| read_err(dir, e)))
         .collect::<Result<_, _>>()?;
     paths.sort();
 
-    // Resolve names first (refusing non-UTF-8), then refuse a case-fold collision
-    // before doing any expensive per-entry reads.
+    // Resolve names first (refusing non-UTF-8, skipping our own temp files), then
+    // refuse a case-fold collision before doing any expensive per-entry reads.
     let mut children: Vec<(String, PathBuf)> = Vec::with_capacity(paths.len());
     for path in paths {
         match path.file_name().and_then(|n| n.to_str()) {
             // A non-UTF-8 filename can't be a String key and wouldn't round-trip.
             None => return Err(Error::UnsupportedFileType(path)),
+            // A leftover temp from a crashed run is not a managed entry.
+            Some(n) if n.starts_with(TEMP_PREFIX) => continue,
             Some(n) => children.push((n.to_owned(), path)),
         }
     }
@@ -283,13 +303,13 @@ fn read_dir(dir: &Path, meta: Attrs, policy: AttrPolicy) -> Result<Node<DirLeaf>
 
     let mut map = IndexMap::with_capacity(children.len());
     for (name, path) in children {
-        map.insert(name, read_node(&path, policy)?);
+        map.insert(name, read_node(&path, policy, depth)?);
     }
     Ok(Node::Map(map, meta))
 }
 
 /// Classify one tree entry (not following symlinks).
-fn read_node(path: &Path, policy: AttrPolicy) -> Result<Node<DirLeaf>, Error> {
+fn read_node(path: &Path, policy: AttrPolicy, depth: usize) -> Result<Node<DirLeaf>, Error> {
     let meta = fs::symlink_metadata(path).map_err(|e| read_err(path, e))?;
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -297,7 +317,7 @@ fn read_node(path: &Path, policy: AttrPolicy) -> Result<Node<DirLeaf>, Error> {
         Ok(Node::Leaf(DirLeaf::Symlink { target }))
     } else if ft.is_dir() {
         // A nested directory carries its own attributes (unlike the root).
-        read_dir(path, read_attrs(path, &meta, policy), policy)
+        read_dir(path, read_attrs(path, &meta, policy), policy, depth + 1)
     } else if ft.is_file() {
         Ok(Node::Leaf(DirLeaf::File {
             source: path.to_path_buf(),
@@ -522,7 +542,10 @@ fn write_file(dest: &Path, source: &Path, attrs: &Attrs, policy: AttrPolicy) -> 
     let dir = crate::dest_dir(dest);
     fs::create_dir_all(&dir).map_err(|e| write_err(&dir, e))?;
     let mut src = fs::File::open(source).map_err(|e| read_err(source, e))?;
-    let mut tmp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| write_err(dest, e))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .tempfile_in(&dir)
+        .map_err(|e| write_err(dest, e))?;
     io::copy(&mut src, tmp.as_file_mut()).map_err(|e| write_err(dest, e))?;
     tmp.as_file().sync_all().map_err(|e| write_err(dest, e))?;
     // Attributes go on the temp file, before the rename, so a failure to set any
@@ -618,7 +641,7 @@ fn atomic_symlink(path: &Path, target: &Path) -> io::Result<()> {
     // symlink(2) fails with AlreadyExists rather than clobbering, so a counter
     // finds a free temp name without needing randomness.
     for n in 0u32.. {
-        let tmp = dir.join(format!(".{base}.cg-tmp.{n}"));
+        let tmp = dir.join(format!("{TEMP_PREFIX}{base}.{n}"));
         match symlink(target, &tmp) {
             Ok(()) => {
                 if let Err(e) = fs::rename(&tmp, path) {

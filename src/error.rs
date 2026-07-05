@@ -76,6 +76,9 @@ pub enum Error {
     /// Two sibling names collide when case-folded, so they would map to one file on
     /// a case-insensitive filesystem — refused rather than silently landing one.
     NameCollision { dir: PathBuf, a: String, b: String },
+    /// A `--format directory` tree is nested deeper than the supported limit
+    /// (refused rather than risk a stack overflow).
+    TreeTooDeep(PathBuf),
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
@@ -135,6 +138,9 @@ impl fmt::Display for Error {
                  map to one file on a case-insensitive filesystem); refusing",
                 dir.display()
             ),
+            Error::TreeTooDeep(p) => {
+                write!(f, "directory tree nested too deeply at {}", p.display())
+            }
             Error::AppDirWouldBeDeleted(p) => write!(
                 f,
                 "refusing to replace directory {} with a file: it holds entries not \

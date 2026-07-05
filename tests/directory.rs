@@ -659,3 +659,37 @@ fn refuses_case_fold_sibling_collision() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("collide"), "got: {err}");
 }
+
+#[test]
+fn refuses_excessively_deep_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    let mut p = desired.clone();
+    for _ in 0..150 {
+        p = p.join("d"); // deeper than MAX_DEPTH
+    }
+    fs::create_dir_all(&p).unwrap();
+    fs::write(p.join("f.txt"), "x").unwrap();
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}"); // clean error, not a crash
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("deep"), "got: {err}");
+}
+
+#[test]
+fn leftover_temp_name_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&desired.join("a.txt"), "x");
+    // A crashed run left a temp entry in the target; it must be ignored (not pruned,
+    // not surfaced) and survive.
+    write(&target.join(".cg-tmp.leftover.0"), "junk");
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read(&target.join(".cg-tmp.leftover.0")), "junk"); // untouched
+    assert_eq!(read(&target.join("a.txt")), "x");
+}
