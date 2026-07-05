@@ -62,6 +62,23 @@ let
         };
       };
 
+    # `cfprefsdDomain` drives `defaults`/`plutil`/`cfprefsd`, which exist only on
+    # macOS. The option is offered on every platform (the home module is
+    # cross-platform), so guard misuse at build time rather than failing mid-switch.
+    extraConfig =
+      { spec, active }:
+      lib.optionalAttrs (spec.kind == "plist") {
+        assertions = lib.mapAttrsToList (name: entry: {
+          assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
+          message = ''
+            home.${spec.optionName}."${name}".cfprefsdDomain is set, but cfprefsd,
+            defaults, and plutil exist only on macOS (this configuration targets
+            ${pkgs.stdenv.hostPlatform.system}). Unset it to edit the plist file in
+            place instead.
+          '';
+        }) active;
+      };
+
     optionDescription = spec: ''
       ${spec.fmt} configuration files that an application owns and writes to, but
       which home-manager should partially manage. Each entry deep-merges its

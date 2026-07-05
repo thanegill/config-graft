@@ -10,7 +10,8 @@
 #
 # A platform record provides: `parent` (the option attrset, e.g. "home"),
 # `targetOption`/`targetConfig`/`extraEntryOptions`/`optionDescription`,
-# `snapshotRel`/`targetPath`, `recordSnapshots`, `wireActivation`, and `mkScript`.
+# `snapshotRel`/`targetPath`, `recordSnapshots`, `wireActivation`, `mkScript`, and
+# `extraConfig` (per-spec `{ spec, active }` -> extra config, e.g. assertions).
 #
 # Two recursion traps the module system punishes via `_module.freeformType`, both
 # avoided by construction: `build` is called from inside a normal
@@ -202,6 +203,7 @@ let
               inherit spec;
               text = activationText;
             })
+            (platform.extraConfig { inherit spec active; })
           ]);
         };
 
@@ -240,6 +242,10 @@ let
     targetConfig = name: { target = lib.mkDefault name; };
 
     extraEntryOptions = _: { };
+
+    # No per-entry `cfprefsdDomain` here (system plists edit in place), so nothing
+    # macOS-specific to guard.
+    extraConfig = _: { };
 
     optionDescription = spec: ''
       System-level ${spec.fmt} configuration files that an application owns and
