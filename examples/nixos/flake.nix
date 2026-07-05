@@ -20,20 +20,15 @@
             nixpkgs.hostPlatform = "x86_64-linux";
 
             # System files an app owns and rewrites; reconciled during activation
-            # with the previous generation as BASE. `target` is an absolute path;
-            # the attribute name ("app") is just an identifier.
-            environment.managedJson.app = {
-              target = "/etc/app/config.json";
-              settings = {
-                theme = "dark";
-                editor.fontSize = 14;
-              };
+            # with the previous generation as BASE. The attribute name is the
+            # target's absolute path (override with `target` if needed).
+            environment.managedJson."/etc/app/config.json".settings = {
+              theme = "dark";
+              editor.fontSize = 14;
             };
 
-            environment.managedToml.app = {
-              target = "/etc/app/config.toml";
-              settings.theme = "dark"; # comments in the live file are preserved
-            };
+            # comments in the live file are preserved
+            environment.managedToml."/etc/app/config.toml".settings.theme = "dark";
 
             # --- minimal host stubs so the example evaluates; replace with yours ---
             boot.loader.grub.enable = false;

@@ -234,10 +234,10 @@ let
       lib.mkOption {
         type = lib.types.str;
         example = systemTargetExample.${spec.fmt};
-        description = "Absolute path of the managed ${spec.fmt} file.";
+        description = "Absolute path of the managed ${spec.fmt} file. Defaults to the attribute name.";
       };
 
-    targetConfig = _: { };
+    targetConfig = name: { target = lib.mkDefault name; };
 
     extraEntryOptions = _: { };
 
