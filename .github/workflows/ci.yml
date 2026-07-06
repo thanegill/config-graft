@@ -31,3 +31,17 @@ jobs:
 
       - name: Flake check
         run: nix flake check
+
+      # Evaluate the example toplevels against this checkout (not the published,
+      # private flake) so a module regression fails the PR. drvPath eval is
+      # cross-platform, so all four run on the ubuntu runner without a macOS matrix.
+      - name: Evaluate examples
+        run: |
+          for attr in \
+            'home-manager#homeConfigurations.alice.activationPackage' \
+            'home-manager#homeConfigurations.alice-darwin.activationPackage' \
+            'nixos#nixosConfigurations.example.config.system.build.toplevel' \
+            'nix-darwin#darwinConfigurations.example.config.system.build.toplevel'; do
+            nix eval "./examples/${attr}.drvPath" \
+              --override-input config-graft path:"$GITHUB_WORKSPACE"
+          done
