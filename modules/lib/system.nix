@@ -68,6 +68,45 @@ let
       };
     };
 
+  # The `--format directory` option: reconcile a whole `source` tree into an
+  # absolute target directory. Distinct from the byte formats (no `settings`).
+  directoryOption = lib.mkOption {
+    default = { };
+    description = ''
+      System-level directory *trees* an application owns and writes to, which should
+      be partially managed declaratively. Each entry reconciles its {option}`source`
+      tree into the absolute {option}`target` during system activation (via
+      {command}`config-graft --format directory`): files the app created are kept,
+      files dropped from {option}`source` are pruned, and per-file mode/owner/xattrs
+      are reconciled.
+    '';
+    type = configGraftLib.directoryEntryType {
+      inherit lib pkgs;
+      defaultPackage = config.environment.managed.package;
+      targetOption = lib.mkOption {
+        type = lib.types.str;
+        example = "/etc/app";
+        description = "Absolute path of the managed directory. Defaults to the attribute name.";
+      };
+      sourceDescription = ''
+        The directory tree reconciled into {option}`target` (a path, or a derivation
+        that builds one). Its files' modes/owner become the desired attributes; system
+        activation runs as root, so a store-owned (root) tree applies as-is.
+      '';
+    };
+  };
+
+  # Directory entries (all active — `source` is required), each with its snapshot
+  # path and reconcile script. `entry.target` is absolute.
+  directoryEntries = lib.mapAttrsToList (name: entry: {
+    inherit entry;
+    snapshotRel = "config-graft/managed-directory/${configGraftLib.safeName name}";
+    script = configGraftLib.mkDirectoryReconcileScript {
+      inherit lib entry;
+      target = entry.target;
+    };
+  }) config.environment.managedDirectory;
+
   # The active entries of every format, flattened, each carrying its snapshot path
   # and DESIRED. Values only; never used to build config *keys*.
   activeByFormat = map (format: {
@@ -123,6 +162,14 @@ let
         target = e.entry.target;
       }
     ) entries
+    + lib.concatMapStringsSep "\n" (
+      e:
+      ''
+        _prev="/run/current-system/${e.snapshotRel}"
+        [[ -e "$_prev" ]] || _prev=""
+      ''
+      + e.script
+    ) directoryEntries
   );
 in
 {
@@ -134,6 +181,8 @@ in
       }) formats
     )
     // {
+      managedDirectory = directoryOption;
+
       managed.package = lib.mkOption {
         type = lib.types.package;
         default = defaultPackage;
@@ -145,12 +194,18 @@ in
       };
     };
 
-  config = lib.mkIf (entries != [ ]) {
-    # Embed each DESIRED into the toplevel closure at its snapshot path.
-    system.systemBuilderCommands = lib.concatMapStrings (e: ''
-      mkdir -p "$(dirname "$out/${e.snapshotRel}")"
-      ln -s ${e.desired} $out/${e.snapshotRel}
-    '') entries;
+  config = lib.mkIf (entries != [ ] || directoryEntries != [ ]) {
+    # Embed each DESIRED into the toplevel closure at its snapshot path (a directory
+    # DESIRED is a symlink to its store tree, which config-graft follows as BASE).
+    system.systemBuilderCommands =
+      lib.concatMapStrings (e: ''
+        mkdir -p "$(dirname "$out/${e.snapshotRel}")"
+        ln -s ${e.desired} $out/${e.snapshotRel}
+      '') entries
+      + lib.concatMapStrings (e: ''
+        mkdir -p "$(dirname "$out/${e.snapshotRel}")"
+        ln -s ${e.entry.source} $out/${e.snapshotRel}
+      '') directoryEntries;
 
     # Each wrapper places the activation script its own way (see `activationWiring`).
     system.activationScripts = activationWiring activationScript;
@@ -169,19 +224,22 @@ in
         }
       ) activeByFormat
       ++ (
-        # config-graft reconciles a mutable file in place; `environment.etc` symlinks
-        # an immutable store path into /etc. Reject a target that is also an etc file.
+        # config-graft reconciles a mutable file/tree in place; `environment.etc`
+        # symlinks an immutable store path into /etc. Reject a target that is also an
+        # etc entry (byte formats and directories alike).
         let
           etcTargets = map (e: "/etc/${e.target}") (lib.attrValues config.environment.etc);
+          managedTargets = map (e: e.entry.target) (entries ++ directoryEntries);
         in
-        map (e: {
-          assertion = !(lib.elem e.entry.target etcTargets);
+        map (target: {
+          assertion = !(lib.elem target etcTargets);
           message = ''
-            `environment.etc` and a config-graft `managed<Format>` entry both manage
-            `${e.entry.target}`. `environment.etc` creates an immutable store symlink,
-            while config-graft reconciles a mutable file in place; declare it in one.
+            `environment.etc` and a config-graft `managed<Format>`/`managedDirectory`
+            entry both manage `${target}`. `environment.etc` creates an immutable store
+            symlink, while config-graft reconciles a mutable path in place; declare it
+            in one.
           '';
-        }) entries
+        }) managedTargets
       );
   };
 }

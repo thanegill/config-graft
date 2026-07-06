@@ -349,8 +349,9 @@ Implemented in **Rust** (this repo):
   defining its leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and
   `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind`
   selector, `Indent`, and `read_file`. The node type varies per format, so
-  dispatch is **static**: `main` resolves the `FormatKind` and monomorphizes
-  `run::<F>()`.
+  dispatch is **static** through the `Backend` trait's provided `run`: `main`
+  resolves the `FormatKind` and calls `ByteBackend::<F>::run` (or `Directory::run`
+  for a tree, §5b).
 - `src/format/yaml_edit.rs` — the comment-preserving YAML writer: a structural
   diff of the original vs reconciled `Node<YamlLeaf>` trees drives minimal
   byte-span edits against the original text (spans from `saphyr`'s `MarkedYaml`),

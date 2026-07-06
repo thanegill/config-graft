@@ -4,12 +4,15 @@ Each subdirectory is a self-contained flake wiring config-graft into one platfor
 
 - [`home-manager/flake.nix`](home-manager/flake.nix): standalone home-manager
   (`home.managed{Json,Yaml,...}`, targets relative to `$HOME`); one entry uses
-  `source` (a checked-in file) instead of inline `settings`. A second,
-  aarch64-darwin, configuration (`alice-darwin`) demonstrates per-user
-  `cfprefsdDomain` (reconciling a macOS preference domain through cfprefsd).
+  `source` (a checked-in file) instead of inline `settings`, and one uses
+  `managedDirectory` (`--format directory`) to reconcile a whole source tree into
+  a target directory. A second, aarch64-darwin, configuration (`alice-darwin`)
+  demonstrates per-user `cfprefsdDomain` (reconciling a macOS preference domain
+  through cfprefsd).
 - [`nixos/flake.nix`](nixos/flake.nix): a NixOS host (`environment.managed*`,
   absolute targets, reconciled during system activation); one entry overrides
-  `format` with a validating `pkgs.formats` generator.
+  `format` with a validating `pkgs.formats` generator, and one uses
+  `environment.managedDirectory` to reconcile a source tree.
 - [`nix-darwin/flake.nix`](nix-darwin/flake.nix): a nix-darwin host (same
   `environment.managed*`, applied in the `postActivation` phase).
 

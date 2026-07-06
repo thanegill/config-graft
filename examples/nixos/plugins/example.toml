@@ -1,0 +1,4 @@
+# Sample file in a config-graft `managedDirectory` source tree, reconciled into
+# /etc/app/plugins during system activation.
+name = "example"
+enabled = true

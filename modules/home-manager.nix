@@ -68,6 +68,58 @@ let
       };
     };
 
+  # The `--format directory` option: reconcile a whole `source` tree into a target
+  # directory. Distinct from the byte formats (no `settings`), so it lives beside
+  # the format loop rather than in it.
+  directoryOption = lib.mkOption {
+    default = { };
+    description = ''
+      Directory *trees* an application owns and writes to, which home-manager should
+      partially manage. Each entry reconciles its {option}`source` tree into
+      {option}`target` during activation (via {command}`config-graft --format
+      directory`): files the app created are kept, files dropped from {option}`source`
+      are pruned, and per-file mode/xattrs (and, unless {option}`noOwner`, owner) are
+      reconciled. All activation is handled by this module.
+    '';
+    type = configGraftLib.directoryEntryType {
+      inherit lib pkgs;
+      defaultPackage = config.home.managed.package;
+      targetOption = lib.mkOption {
+        type = lib.types.str;
+        example = ".config/app";
+        description = "Path of the managed directory, relative to the home directory.";
+      };
+      sourceDescription = ''
+        The directory tree reconciled into {option}`target` (a path, or a derivation
+        that builds one). Its files' modes become the desired modes, so build it with
+        the modes you want; a plain store copy is root-owned and read-only, so on this
+        (non-root) activation set {option}`noOwner`.
+      '';
+    };
+  };
+
+  # Active directory entries (all of them — `source` is required), each with its
+  # snapshot path and reconcile script.
+  directoryEntries = lib.mapAttrs (
+    name: entry:
+    let
+      snapshotRel = ".local/state/home-manager/managed-directory/${configGraftLib.safeName name}";
+      target = "${config.home.homeDirectory}/${entry.target}";
+    in
+    {
+      inherit snapshotRel;
+      source = entry.source;
+      script = ''
+        _prev=""
+        if [[ -v oldGenPath && -e "$oldGenPath/home-files/${snapshotRel}" ]]; then
+          _prev="$oldGenPath/home-files/${snapshotRel}"
+          verboseEcho "Pruning against previous snapshot $_prev"
+        fi
+      ''
+      + configGraftLib.mkDirectoryReconcileScript { inherit lib entry target; };
+    }
+  ) config.home.managedDirectory;
+
   # All activation is handled here (unlike the system modules, which hand a text
   # blob to their platform's activation phase).
   mkScript =
@@ -139,8 +191,11 @@ let
     }
   ) formats;
 
-  # Managed targets (relative to $HOME) across all formats, for the overlap guard.
-  managedTargets = lib.concatMap (x: lib.mapAttrsToList (_: entry: entry.target) x.active) byFormat;
+  # Managed targets (relative to $HOME) across all formats + directories, for the
+  # overlap guard.
+  managedTargets =
+    lib.concatMap (x: lib.mapAttrsToList (_: entry: entry.target) x.active) byFormat
+    ++ lib.mapAttrsToList (_: entry: entry.target) config.home.managedDirectory;
 in
 {
   options.home =
@@ -151,6 +206,8 @@ in
       }) formats
     )
     // {
+      managedDirectory = directoryOption;
+
       managed.package = lib.mkOption {
         type = lib.types.package;
         default = defaultPackage;
@@ -163,11 +220,16 @@ in
     };
 
   config = {
-    # Link each DESIRED as a `home.file` snapshot, readable as BASE next switch.
+    # Link each DESIRED as a `home.file` snapshot, readable as BASE next switch (a
+    # directory DESIRED becomes a symlink to the store tree, which config-graft
+    # follows as the BASE root).
     home.file = builtins.listToAttrs (
       lib.concatMap (
         x: lib.mapAttrsToList (_: e: lib.nameValuePair e.snapshotRel { source = e.desired; }) x.entries
       ) byFormat
+      ++ lib.mapAttrsToList (
+        _: e: lib.nameValuePair e.snapshotRel { source = e.source; }
+      ) directoryEntries
     );
 
     # One activation entry per format (a static key), defined only when it has entries.
@@ -180,6 +242,16 @@ in
           )
         );
       }) byFormat
+      ++ [
+        {
+          name = "managedDirectory";
+          value = lib.mkIf (directoryEntries != { }) (
+            lib.hm.dag.entryAfter [ "writeBoundary" ] (
+              lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) directoryEntries)
+            )
+          );
+        }
+      ]
     );
 
     assertions =

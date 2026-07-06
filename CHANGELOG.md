@@ -78,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries take `cfprefsdDomain` (macOS). Runs config-graft by store path, defaulting
   to this flake's own build; override it per entry or module-wide via
   `managed.package`. See `examples/` for a full flake per platform.
+- `managedDirectory` (all three platforms) for `--format directory`: reconcile a
+  whole `source` *tree* into a target directory — files the app adds are kept,
+  files dropped from `source` are pruned, and per-file mode/owner/xattrs are
+  reconciled. Directory-specific options `manageRoot`, `noOwner` (set it on a
+  non-root home-manager activation, since a store-built source is root-owned), and
+  `xattrs` (`all`/`safe`/`none`) map to the CLI flags.
 
 ### Changed
 

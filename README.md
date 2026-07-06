@@ -139,21 +139,27 @@ generation as the BASE snapshot.
 
 The flake exposes:
 
-- `homeManagerModules.default`: `home.managed{Json,Plist,Yaml,Toml}`, targets
-  relative to `$HOME`.
+- `homeManagerModules.default`: `home.managed{Json,Plist,Yaml,Toml}` and
+  `home.managedDirectory`, targets relative to `$HOME`.
 - `nixosModules.default` / `darwinModules.default`: `environment.managed*`,
   absolute targets, reconciled during system activation.
 - `overlays.default`: optional. It adds the `config-graft` CLI to `pkgs`; the
   modules don't need it, since they run the flake's own build by store path.
 
-Each entry takes `settings` (freeform data) or a pre-built `source` file (any
-generator, template, or derivation); an entry with neither is inert. Freeform
-formats accept a `format` override, any `pkgs.formats`-style generator, for a
-validating or specially configured type. `package` overrides the config-graft
-build for one entry. Plist entries accept `cfprefsdDomain` to reconcile through
-`cfprefsd` (`defaults`/`plutil`) instead of editing the file; that path is macOS
-only (asserted at build time), per-user under home-manager and system/global
-under nix-darwin.
+Each byte-format entry takes `settings` (freeform data) or a pre-built `source`
+file (any generator, template, or derivation); an entry with neither is inert.
+Freeform formats accept a `format` override, any `pkgs.formats`-style generator,
+for a validating or specially configured type. `package` overrides the
+config-graft build for one entry. Plist entries accept `cfprefsdDomain` to
+reconcile through `cfprefsd` (`defaults`/`plutil`) instead of editing the file;
+that path is macOS only (asserted at build time), per-user under home-manager and
+system/global under nix-darwin.
+
+`managedDirectory` is the `--format directory` wrapper: each entry reconciles a
+`source` directory *tree* into `target`, keeping app-created files and pruning
+files dropped from `source`. It takes `manageRoot`, `noOwner` (set it on a
+non-root home-manager activation — a store-built source is root-owned), and
+`xattrs` (`all`/`safe`/`none`) in place of `settings`.
 
 A home-manager `flake.nix` sketch:
 

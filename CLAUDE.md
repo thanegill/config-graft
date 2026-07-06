@@ -34,10 +34,10 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   (native ⇄ `Node`) + `Format` (parse/serialize). `mod.rs` holds the traits,
   `FormatKind`, `Indent`, `read_file`.
 - `src/backend.rs` — the `Backend` trait is the I/O boundary of a run (read the
-  three inputs → reconcile → diff/check/stdout/apply); one generic `run::<B>`
-  driver owns that spine so **every format shares it**. Dispatch is **static**:
-  `main` matches the `FormatKind` and monomorphizes `run::<ByteBackend<F>>` for the
-  byte formats or `run::<Directory>` for the tree. `ByteBackend<F>(PhantomData<F>)`
+  three inputs → reconcile → diff/check/stdout/apply); its provided `Backend::run`
+  method owns that spine so **every format shares it**. Dispatch is **static**:
+  `main` matches the `FormatKind` and calls `ByteBackend::<F>::run(&cli)` for the
+  byte formats or `Directory::run(&cli)` for the tree. `ByteBackend<F>(PhantomData<F>)`
   is a newtype over any `Format` (a blanket `impl<F: Format> Backend for F` would
   collide with `Directory` under coherence). `dir_policy(cli)` builds the
   `AttrPolicy` (`--no-owner`/`--xattrs`).
@@ -86,7 +86,12 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   via `format`), or a pre-built `source` file; the two are mutually exclusive
   (asserted); `target` defaults to the attribute name (entries keyed by path);
   `package` defaults to the flake's own build (threaded in via `self`), so no
-  overlay is needed. `cfprefsdDomain` (plist only) is offered on both home and
+  overlay is needed. **`managedDirectory`** (`--format directory`) lives *beside*
+  the `formats` loop, not in it (a tree has no `settings`/generator): `common.nix`
+  provides `directoryEntryType` (its `source` is a required directory, plus
+  `manageRoot`/`noOwner`/`xattrs`) and `mkDirectoryReconcileScript`; each module
+  wires it as a parallel track (its own snapshot + activation entry). `cfprefsdDomain`
+  (plist only) is offered on both home and
   system, guarded by a build-time assertion (`mkAssertions`) that it's only set on a
   Darwin host. Each module also asserts a managed target isn't also declared in
   `home.file` / `environment.etc` (those create an immutable store symlink;

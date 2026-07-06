@@ -57,6 +57,17 @@
           {
             home.managedJson.".config/widget/config.json".source = ./widget.json;
           }
+
+          # config-graft (4): `--format directory`: reconcile a whole *tree* into a
+          # target directory. Files the app adds under it are kept; files you drop
+          # from `source` are pruned on the next switch. A store-built `source` is
+          # root-owned, so `noOwner` on this (non-root) home-manager activation.
+          {
+            home.managedDirectory.".config/app/plugins" = {
+              source = ./plugins;
+              noOwner = true;
+            };
+          }
         ];
       };
 
