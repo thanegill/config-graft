@@ -198,7 +198,7 @@ pub fn reconcile<L: Leaf>(
         ancestors.dedup();
         ancestors.sort_by_key(|p| std::cmp::Reverse(p.len()));
         for anc in &ancestors {
-            if matches!(get_path(&result, anc), Some(Node::Map(o, _)) if o.is_empty()) {
+            if matches!(get_path(&result, anc), Some(Node::Map(o)) if o.is_empty()) {
                 del_path(&mut result, anc);
             }
         }
@@ -218,7 +218,7 @@ pub fn leaf_paths<L: Leaf>(v: &Node<L>) -> Vec<KeyPath> {
 
 fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
     match v {
-        Node::Map(map, _) => {
+        Node::Map(map) => {
             for (k, val) in map {
                 prefix.push(k.clone());
                 collect(val, prefix, out);
@@ -273,8 +273,8 @@ pub fn deep_merge<L: Leaf>(
     path: &mut KeyPath,
 ) -> Vec<Conflict<L>> {
     match desired {
-        Node::Map(d, d_meta) => {
-            if let Node::Map(t, t_meta) = target {
+        Node::Map(d) => {
+            if let Node::Map(t) = target {
                 let mut conflicts = Vec::new();
                 for (k, dv) in d {
                     let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
@@ -290,10 +290,6 @@ pub fn deep_merge<L: Leaf>(
                         t.insert(k.clone(), dv.clone());
                     }
                 }
-                // A declared map's own metadata is taken from DESIRED (the same
-                // "DESIRED wins" rule as a leaf conflict), so a managed directory
-                // ends up with DESIRED's attributes. `()` for formats without any.
-                t_meta.clone_from(d_meta);
                 return conflicts;
             }
         }
@@ -317,14 +313,14 @@ pub fn deep_merge<L: Leaf>(
 /// Recursively sort every object's keys (for `--sort-keys`).
 pub fn sort_keys<L: Leaf>(v: &Node<L>) -> Node<L> {
     match v {
-        Node::Map(map, meta) => {
+        Node::Map(map) => {
             let mut entries: Vec<(&String, &Node<L>)> = map.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
             let mut sorted = IndexMap::with_capacity(entries.len());
             for (k, val) in entries {
                 sorted.insert(k.clone(), sort_keys(val));
             }
-            Node::Map(sorted, meta.clone())
+            Node::Map(sorted)
         }
         Node::Array(arr) => Node::Array(arr.iter().map(|v| sort_keys(v)).collect()),
         other => other.clone(),

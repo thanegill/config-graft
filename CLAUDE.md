@@ -20,14 +20,16 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
 
 - `src/value.rs` — `Node<L>` + the `Leaf` trait. **Each format owns its leaf type**
   (`JsonLeaf`/`YamlLeaf`/`PlistLeaf`/`TomlLeaf`/`DirLeaf`), so encoders are total —
-  there is no single enum mixing formats. Don't reintroduce one. `Node::Map` also
-  carries a `Leaf::LeafMeta` payload (`()` for JSON/plist/YAML/TOML; a directory's
-  own attributes for `DirLeaf`), reconciled through the same engine; `Node`'s
-  `Clone`/`PartialEq`/`Debug` are **hand-written** because `derive` won't add the
-  `L::LeafMeta: Trait` bounds the `Map` field needs.
+  there is no single enum mixing formats. Don't reintroduce one. `Node::Map` carries
+  **no side payload** — it's a plain `#[derive]`'d enum. A format that needs
+  per-directory metadata (directory mode's mode/owner/xattrs) stores it as an
+  ordinary leaf under a reserved empty-string key, so it reconciles through the same
+  machinery as any entry (no `Leaf::LeafMeta` associated type, no hand-written
+  `Node` impls).
 - `src/reconcile.rs` — the pure three-way merge, generic `<L: Leaf>`, no I/O.
-  Managed key paths are the `KeyPath` newtype. `deep_merge` takes DESIRED's map
-  metadata on a merge (the same "DESIRED wins" rule as a leaf).
+  Managed key paths are the `KeyPath` newtype. A directory's own attributes are
+  just a leaf under the reserved key, so they prune/merge like any entry with no
+  special engine path (DESIRED wins on conflict, as for any leaf).
 - `src/format/{json,plist,yaml,toml}.rs` — per-format leaf enum + `ValueCodec`
   (native ⇄ `Node`) + `Format` (parse/serialize). `mod.rs` holds the traits,
   `FormatKind`, `Indent`, `read_file`.
@@ -46,9 +48,11 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   mode/owner/xattrs), so bytes never enter the tree — `read_tree` streams the
   digest, `apply_tree` streams source→dest and applies attrs atomically
   (refuse-on-failure). An `AttrPolicy { owner, xattrs }` (default: manage
-  everything) threads through read/apply; `xattr_in_scope` filters by
-  `XattrScope`. A directory's own attrs ride on its `LeafMeta` (rendered into
-  `--diff` via `Leaf::render_leaf_meta`); the root is unmanaged unless
+  everything) threads through read/apply; `XattrScope::in_scope` filters xattrs.
+  A directory's own attrs are a `DirLeaf::DirAttributes` leaf under the reserved
+  empty-string key (`DIR_ATTRS_KEY`) in its map; `apply_dir` extracts it and
+  applies it to the directory (never as a file), and every entry-iterating site
+  (`apply_dir`, `remove_node`) skips that key. The root is unmanaged unless
   `--manage-root`. Robustness: case-fold sibling-collision refuse, `MAX_DEPTH`
   guard, `.config-graft-tmp.` temp-name skip on read, per-entry parent `fsync`. Uses
   `sha2` + `xattr`.
@@ -72,9 +76,9 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   in-scope xattrs, set desired xattrs, chown, chmod — chown clears setuid), so any
   attribute failure refuses cleanly. `chown` to the caller's own uid/gid is
   skipped (no-op, avoids needless privilege). Reading xattrs is best-effort
-  (unsupported FS ⇒ none); applying is strict but scoped by `AttrPolicy`. Adding a
-  new leaf type means adding its `LeafMeta` (`()` unless the format has map
-  metadata) and, if it carries map metadata, a `render_leaf_meta`.
+  (unsupported FS ⇒ none); applying is strict but scoped by `AttrPolicy`. Because
+  a directory's attrs are a reserved-key leaf, an **empty declared directory is
+  prunable** (it has a managed leaf path), unlike a JSON `{}` value.
 - Directory mode is intentionally non-transactional across files, doesn't preserve
   hardlinks, and trusts ancestor path components (not the entries it walks). These
   trade-offs are locked by characterization tests (`hardlink_is_broken_on_rewrite`,

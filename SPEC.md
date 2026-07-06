@@ -257,7 +257,7 @@ ever pruned.
 
 - Because removal is snapshot-driven (not null-sentinel), the tool **cannot set a managed key to `null`-meaning-delete**; `null` is a real value. This is intentional and the inverse of RFC 7386's limitation.
 - Atomic arrays mean you can't manage a single element of an app-written list; you own the whole array or none of it.
-- **Directory mode (§5b):** the multi-file apply is best-effort, not transactional (§8) — re-run to complete a partial apply. An **empty declared directory** is created but is effectively **unprunable** (it has no managed leaf path to diff against, the same way a key whose value is `{}` can't be pruned). Further directory-mode trade-offs, all intentional (each is locked by a characterization test so it can't regress silently):
+- **Directory mode (§5b):** the multi-file apply is best-effort, not transactional (§8) — re-run to complete a partial apply. An **empty declared directory** is created *and* is prunable: a directory carries its own attributes as a reserved-key leaf, so even an empty one has a managed leaf path and is removed when dropped from DESIRED (unlike a JSON key whose value is `{}`, which has no leaf path and can't be pruned). Further directory-mode trade-offs, all intentional (each is locked by a characterization test so it can't regress silently):
   - **Hardlinks are not preserved.** A changed file is rewritten via a fresh temp file and `rename`, giving it a new inode; any other name hardlinked to the old inode keeps the old content. config-graft treats each path independently and does not detect or re-link shared inodes.
   - **Read/apply is a two-step, so it's subject to TOCTOU.** The tree is read, reconciled, then applied; a concurrent writer that changes a file between the read and the overwrite can have its change clobbered (or, for a type change, trigger the app-content refuse spuriously). Point config-graft at a tree no other process is mutating.
   - **An I/O error mid-walk aborts the whole run** (fail-closed): if a directory can't be read (e.g. `EACCES`), config-graft refuses rather than reconcile a partial view of the tree that would look like the unreadable entries were deleted.
@@ -326,10 +326,10 @@ Implemented in **Rust** (this repo):
 - `src/value.rs` — the internal value model: a `Leaf` trait and a `Node<L>`
   generic over it. Each format supplies **its own** leaf type (no single enum
   mixing every format's value space), so the encoders are total — a JSON node
-  can't hold a plist `Date`, by construction. A `Leaf::LeafMeta` associated type
-  rides on every `Node::Map` (unit `()` for JSON/plist/YAML/TOML; a directory's
-  own attributes for directory mode) and reconciles through the same engine;
-  `Node`'s `Clone`/`PartialEq`/`Debug` are hand-written to carry it.
+  can't hold a plist `Date`, by construction. `Node::Map` carries no side payload,
+  so `Node` is a plain `#[derive]`'d enum; a format that needs per-directory
+  metadata (directory mode) stores it as an ordinary leaf under a reserved key
+  rather than on the map itself.
 - `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
   unit-tested against §12. Managed key paths are a `KeyPath` newtype.
 - `src/format/directory.rs` — the `--format directory` backend (§5b): a `DirLeaf` leaf
@@ -337,11 +337,12 @@ Implemented in **Rust** (this repo):
   path + a generic attribute map of mode/owner/xattrs) or a symlink; a recursive
   `read_tree` (streaming the digest, never buffering the bytes) and a minimal-diff
   `apply_tree` that streams bytes source→dest and applies attributes atomically,
-  refusing on failure. A directory's own attributes ride on its map node's
-  `LeafMeta`; the root is unmanaged unless `--manage-root`. Not a `Format` (a tree
-  has no byte stream); `main` dispatches `FormatKind::Directory` to a separate
-  `run_directory` that reuses the shared reconcile engine and diff renderer. Uses
-  the `sha2` and `xattr` crates.
+  refusing on failure. A directory's own attributes are a `DirLeaf::DirAttributes`
+  leaf under a reserved empty-string key in its map (the write path applies it to
+  the directory rather than creating a file); the root is unmanaged unless
+  `--manage-root`. Not a `Format` (a tree has no byte stream); it plugs into the
+  shared reconcile-run driver via a `Backend` impl, reusing the reconcile engine
+  and diff renderer. Uses the `sha2` and `xattr` crates.
 - `src/format/` — one module per format (`json`/`plist`/`yaml`/`toml`), each
   defining its leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and
   `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind`

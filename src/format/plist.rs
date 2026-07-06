@@ -43,7 +43,6 @@ impl std::fmt::Debug for PlistLeaf {
 }
 
 impl Leaf for PlistLeaf {
-    type LeafMeta = ();
     fn render(&self) -> String {
         match self {
             PlistLeaf::Bool(b) => b.to_string(),
@@ -69,7 +68,7 @@ impl ValueCodec for Plist {
                 for (k, v) in d {
                     map.insert(k.clone(), Plist::decode(v)?);
                 }
-                Node::Map(map, ())
+                Node::Map(map)
             }
             plist::Value::Array(a) => {
                 Node::Array(a.iter().map(Plist::decode).collect::<Option<_>>()?)
@@ -93,7 +92,7 @@ impl ValueCodec for Plist {
 
     fn encode(node: &Node<PlistLeaf>) -> plist::Value {
         match node {
-            Node::Map(m, ()) => {
+            Node::Map(m) => {
                 let mut dict = plist::Dictionary::new();
                 for (k, v) in m {
                     dict.insert(k.clone(), Plist::encode(v));

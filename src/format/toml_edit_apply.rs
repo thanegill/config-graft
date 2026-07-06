@@ -52,7 +52,7 @@ fn merge_table(table: &mut Table, desired: &IndexMap<String, Node<TomlLeaf>>) {
 
     for (k, node) in desired {
         // Existing sub-table + desired map: recurse to preserve inner formatting.
-        if let (Some(Item::Table(sub)), Node::Map(m, ())) = (table.get_mut(k), node) {
+        if let (Some(Item::Table(sub)), Node::Map(m)) = (table.get_mut(k), node) {
             merge_table(sub, m);
             continue;
         }

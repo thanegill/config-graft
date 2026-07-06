@@ -26,7 +26,6 @@ pub enum YamlLeaf {
 }
 
 impl Leaf for YamlLeaf {
-    type LeafMeta = ();
     fn render(&self) -> String {
         match self {
             YamlLeaf::Null => "null".to_string(),
@@ -55,7 +54,7 @@ impl ValueCodec for Yaml {
                     };
                     map.insert(key, Yaml::decode(val)?);
                 }
-                Some(Node::Map(map, ()))
+                Some(Node::Map(map))
             }
             saphyr::Yaml::Sequence(a) => {
                 let mut out = Vec::with_capacity(a.len());
@@ -78,7 +77,7 @@ impl ValueCodec for Yaml {
 
     fn encode(node: &Node<YamlLeaf>) -> saphyr::Yaml<'static> {
         match node {
-            Node::Map(m, ()) => {
+            Node::Map(m) => {
                 let mut map = saphyr::Mapping::new();
                 for (k, v) in m {
                     map.insert(yaml_string(k.clone()), Yaml::encode(v));

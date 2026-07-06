@@ -22,7 +22,6 @@ pub enum JsonLeaf {
 }
 
 impl Leaf for JsonLeaf {
-    type LeafMeta = ();
     fn render(&self) -> String {
         match self {
             JsonLeaf::Null => "null".to_string(),
@@ -47,7 +46,7 @@ impl ValueCodec for Json {
                 for (k, v) in m {
                     map.insert(k.clone(), Json::decode(v)?);
                 }
-                Node::Map(map, ())
+                Node::Map(map)
             }
             Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect::<Option<_>>()?),
             Value::Null => Node::Leaf(JsonLeaf::Null),
@@ -66,7 +65,7 @@ impl ValueCodec for Json {
     fn encode(node: &Node<JsonLeaf>) -> serde_json::Value {
         use serde_json::Value;
         match node {
-            Node::Map(m, ()) => {
+            Node::Map(m) => {
                 let mut obj = serde_json::Map::with_capacity(m.len());
                 for (k, v) in m {
                     obj.insert(k.clone(), Json::encode(v));

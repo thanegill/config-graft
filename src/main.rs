@@ -219,44 +219,35 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 /// A compact, leaf-level diff (`+` added, `-` removed, `~` changed) with path
 /// components joined by `sep` (`.` for byte formats, `/` for a directory tree).
 /// Arrays and scalars are atomic leaves, matching the reconcile semantics.
+///
+/// A directory's own attributes are an ordinary leaf under an empty-string key
+/// (see `format::directory`), so they diff here like any other leaf — the empty
+/// final path component renders as a trailing `/` (or a bare `/` for the root),
+/// which reads naturally as "this directory".
 pub(crate) fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) -> String {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::HashSet;
     // Each entry is (sort key, formatted line); sorting by the path key keeps a
     // directory's own line just before its children.
     let mut lines: Vec<(String, String)> = Vec::new();
 
-    // Leaf-level changes (files / scalars / arrays are atomic leaves).
     let old_leaves: HashSet<KeyPath> = leaf_paths(old).into_iter().collect();
     let new_leaves: HashSet<KeyPath> = leaf_paths(new).into_iter().collect();
     for p in old_leaves.union(&new_leaves) {
         let key = p.render(sep);
+        // An empty rendered path is a directory's own-attributes leaf at the root;
+        // show the separator so it isn't a blank label.
+        let disp = if key.is_empty() {
+            sep.to_string()
+        } else {
+            key.clone()
+        };
         match (get_path(old, p), get_path(new, p)) {
-            (None, Some(n)) => lines.push((key.clone(), format!("+ {key} = {}", compact(n)))),
-            (Some(o), None) => lines.push((key.clone(), format!("- {key} = {}", compact(o)))),
+            (None, Some(n)) => lines.push((key.clone(), format!("+ {disp} = {}", compact(n)))),
+            (Some(o), None) => lines.push((key.clone(), format!("- {disp} = {}", compact(o)))),
             (Some(o), Some(n)) if o != n => lines.push((
                 key.clone(),
-                format!("~ {key}: {} => {}", compact(o), compact(n)),
+                format!("~ {disp}: {} => {}", compact(o), compact(n)),
             )),
-            _ => {}
-        }
-    }
-
-    // Map-metadata changes (a directory's own attributes). `render_leaf_meta`
-    // returns `None` for formats without map metadata, so this is inert for
-    // JSON/plist/YAML/TOML.
-    let mut old_m = BTreeMap::new();
-    let mut new_m = BTreeMap::new();
-    collect_leaf_metas(old, String::new(), sep, &mut old_m);
-    collect_leaf_metas(new, String::new(), sep, &mut new_m);
-    let keys: HashSet<&String> = old_m.keys().chain(new_m.keys()).collect();
-    for k in keys {
-        let disp = format!("{k}{sep}"); // trailing separator marks a directory
-        match (old_m.get(k), new_m.get(k)) {
-            (None, Some(n)) => lines.push((k.clone(), format!("+ {disp} = {n}"))),
-            (Some(o), None) => lines.push((k.clone(), format!("- {disp} = {o}"))),
-            (Some(o), Some(n)) if o != n => {
-                lines.push((k.clone(), format!("~ {disp}: {o} => {n}")))
-            }
             _ => {}
         }
     }
@@ -270,36 +261,12 @@ pub(crate) fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) ->
     }
 }
 
-/// Collect each map node's own metadata rendering (`render_leaf_meta`) keyed by its
-/// `sep`-joined path (the root is the empty string). Inert for formats whose map
-/// metadata renders to `None`.
-fn collect_leaf_metas<L: Leaf>(
-    v: &Node<L>,
-    path: String,
-    sep: &str,
-    out: &mut std::collections::BTreeMap<String, String>,
-) {
-    if let Node::Map(map, meta) = v {
-        if let Some(s) = L::render_leaf_meta(meta) {
-            out.insert(path.clone(), s);
-        }
-        for (k, val) in map {
-            let child = if path.is_empty() {
-                k.clone()
-            } else {
-                format!("{path}{sep}{k}")
-            };
-            collect_leaf_metas(val, child, sep, out);
-        }
-    }
-}
-
 /// Render a node as a compact, single-line token for `--diff`. JSON-representable
 /// values match `serde_json`'s compact form; plist-only leaves get a readable
 /// `<date …>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
 pub(crate) fn compact<L: Leaf>(v: &Node<L>) -> String {
     match v {
-        Node::Map(m, _) => {
+        Node::Map(m) => {
             let inner: Vec<String> = m
                 .iter()
                 .map(|(k, val)| format!("{}:{}", quote(k), compact(val)))

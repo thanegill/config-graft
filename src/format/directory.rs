@@ -47,6 +47,13 @@ const MAX_DEPTH: usize = 100;
 /// entry (a real file with this prefix is not managed, which is the intent).
 const TEMP_PREFIX: &str = ".config-graft-tmp.";
 
+/// Reserved map key under which a directory's own attributes ride, as an ordinary
+/// [`DirLeaf::DirAttributes`] leaf. The empty string can never be a real directory
+/// entry (`readdir` never yields it), so it can't collide with a managed file —
+/// which lets a directory's metadata reconcile through the same engine as its
+/// entries, with no per-map side payload on [`Node`](crate::value::Node).
+const DIR_ATTRS_KEY: &str = "";
+
 /// Which extended attributes are managed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
 pub enum XattrScope {
@@ -117,6 +124,11 @@ pub enum DirLeaf {
     Symlink {
         target: PathBuf,
     },
+    /// A directory's *own* attributes (mode/owner/xattrs), stored under the
+    /// reserved [`DIR_ATTRS_KEY`] in the directory's map. Not a filesystem object
+    /// itself — the write path applies it to the containing directory rather than
+    /// creating a file for it.
+    DirAttributes(Attrs),
 }
 
 impl PartialEq for DirLeaf {
@@ -137,8 +149,19 @@ impl PartialEq for DirLeaf {
                 },
             ) => l1 == l2 && d1 == d2 && a1 == a2,
             (DirLeaf::Symlink { target: t1 }, DirLeaf::Symlink { target: t2 }) => t1 == t2,
+            (DirLeaf::DirAttributes(a1), DirLeaf::DirAttributes(a2)) => a1 == a2,
             _ => false,
         }
+    }
+}
+
+/// The attribute map inside a [`DirLeaf::DirAttributes`] node, if that's what this
+/// (optional) node is — used to pull a directory's own attributes out of its map's
+/// reserved entry.
+fn dir_attrs(node: Option<&Node<DirLeaf>>) -> Option<&Attrs> {
+    match node {
+        Some(Node::Leaf(DirLeaf::DirAttributes(a))) => Some(a),
+        _ => None,
     }
 }
 
@@ -178,29 +201,17 @@ fn render_attr_summary(attrs: &Attrs) -> String {
 }
 
 impl Leaf for DirLeaf {
-    /// A directory's own attributes (mode/owner/xattrs) ride on its map node, so
-    /// they reconcile through the same engine as file leaves.
-    type LeafMeta = Attrs;
-
     /// Compact `--diff` rendering. Never dumps contents (files may be huge or
     /// binary): a file shows its length, mode, owner, and extended attributes
-    /// (each as `name=<value-digest>`); a symlink its target.
+    /// (each as `name=<value-digest>`); a symlink its target; a directory's own
+    /// attributes their `dir(...)` summary.
     fn render(&self) -> String {
         match self {
             DirLeaf::File { len, attrs, .. } => {
                 format!("file({len} bytes, {})", render_attr_summary(attrs))
             }
             DirLeaf::Symlink { target } => format!("-> {}", target.display()),
-        }
-    }
-
-    /// A directory's own attributes, or `None` when unmanaged (empty — e.g. the
-    /// root without `--manage-root`), so `--diff` shows directory metadata drift.
-    fn render_leaf_meta(meta: &Attrs) -> Option<String> {
-        if meta.is_empty() {
-            None
-        } else {
-            Some(format!("dir({})", render_attr_summary(meta)))
+            DirLeaf::DirAttributes(attrs) => format!("dir({})", render_attr_summary(attrs)),
         }
     }
 }
@@ -303,11 +314,20 @@ fn read_dir(
         });
     }
 
-    let mut map = IndexMap::with_capacity(children.len());
+    let mut map = IndexMap::with_capacity(children.len() + 1);
+    // The directory's own attributes ride first, as the reserved-key leaf, so its
+    // `--diff` line sorts just before its entries. Empty `meta` (the root without
+    // `--manage-root`) means the directory's attributes are unmanaged — no entry.
+    if !meta.is_empty() {
+        map.insert(
+            DIR_ATTRS_KEY.to_string(),
+            Node::Leaf(DirLeaf::DirAttributes(meta)),
+        );
+    }
     for (name, path) in children {
         map.insert(name, read_node(&path, policy, depth)?);
     }
-    Ok(Node::Map(map, meta))
+    Ok(Node::Map(map))
 }
 
 /// Classify one tree entry (not following symlinks).
@@ -401,26 +421,17 @@ pub fn apply_tree(
     base: Option<&Node<DirLeaf>>,
     policy: AttrPolicy,
 ) -> Result<bool, Error> {
-    let (want_map, want_meta) = match want {
-        Node::Map(m, meta) => (m, meta),
+    let want_map = match want {
+        Node::Map(m) => m,
         _ => return Err(Error::DirectoryTreeInvariant),
     };
     ensure_root(root)?;
-    let mut changed = false;
-    // The root's own attributes are empty unless `--manage-root`; apply them only
-    // when present and drifted, so by default the target directory is untouched.
-    let cur_meta = cur.and_then(|c| match c {
-        Node::Map(_, meta) => Some(meta),
-        _ => None,
-    });
-    if !want_meta.is_empty() && cur_meta != Some(want_meta) {
-        apply_attrs(root, want_meta, policy)?;
-        changed = true;
-    }
+    // The root is reconciled like any directory: `apply_dir` applies its own
+    // attributes from the reserved-key entry (present only with `--manage-root`, so
+    // by default the target directory is untouched) and then its contents.
     let cur_map = cur.and_then(Node::as_map);
     let base_map = base.and_then(Node::as_map);
-    changed |= apply_dir(root, cur_map, want_map, base_map, policy)?;
-    Ok(changed)
+    apply_dir(root, cur_map, want_map, base_map, policy)
 }
 
 /// Whether `cur` (a directory subtree read from disk) holds any leaf that is not
@@ -455,7 +466,19 @@ fn apply_dir(
     policy: AttrPolicy,
 ) -> Result<bool, Error> {
     let mut changed = false;
+    // The directory's own attributes live in the reserved-key entry; apply them to
+    // `dir` itself (not as a file) when they drifted. An absent want-entry (the
+    // root without `--manage-root`) leaves the directory untouched.
+    if let Some(want_attrs) = dir_attrs(want.get(DIR_ATTRS_KEY)) {
+        if dir_attrs(cur.and_then(|m| m.get(DIR_ATTRS_KEY))) != Some(want_attrs) {
+            apply_attrs(dir, want_attrs, policy)?;
+            changed = true;
+        }
+    }
     for (name, want_child) in want {
+        if name == DIR_ATTRS_KEY {
+            continue; // handled above — not a real entry
+        }
         let child = dir.join(name);
         let cur_child = cur.and_then(|m| m.get(name));
         let base_child = base.and_then(|m| m.get(name));
@@ -463,7 +486,7 @@ fn apply_dir(
     }
     if let Some(cur) = cur {
         for (name, cur_child) in cur {
-            if !want.contains_key(name) {
+            if name != DIR_ATTRS_KEY && !want.contains_key(name) {
                 changed |= remove_node(&dir.join(name), cur_child)?;
             }
         }
@@ -486,29 +509,21 @@ fn apply_node(
     policy: AttrPolicy,
 ) -> Result<bool, Error> {
     match want {
-        Node::Map(want_map, want_meta) => {
+        Node::Map(want_map) => {
             let mut changed = false;
+            // Ensure the directory exists; its own attributes and contents are then
+            // reconciled by `apply_dir` (the attributes via the reserved-key entry).
             let cur_map = match cur {
-                Some(Node::Map(m, cur_meta)) => {
-                    // Only touch the directory's attributes if they drifted. An
-                    // empty `want_meta` (the root) makes this a no-op.
-                    if cur_meta != want_meta {
-                        apply_attrs(path, want_meta, policy)?;
-                        changed = true;
-                    }
-                    Some(m)
-                }
+                Some(Node::Map(m)) => Some(m),
                 // Type change (file/symlink -> directory): drop the leaf first.
                 Some(Node::Leaf(_)) => {
                     remove_leaf(path)?;
                     mkdir(path)?;
-                    apply_attrs(path, want_meta, policy)?;
                     changed = true;
                     None
                 }
                 None => {
                     mkdir(path)?;
-                    apply_attrs(path, want_meta, policy)?;
                     changed = true;
                     None
                 }
@@ -546,6 +561,9 @@ fn write_leaf(path: &Path, leaf: &DirLeaf, policy: AttrPolicy) -> Result<(), Err
     match leaf {
         DirLeaf::File { source, attrs, .. } => write_file(path, source, attrs, policy),
         DirLeaf::Symlink { target } => atomic_symlink(path, target).map_err(|e| write_err(path, e)),
+        // A directory's own attributes are never a real entry (they live under the
+        // reserved key and are applied to the directory by `apply_dir`).
+        DirLeaf::DirAttributes(_) => Err(Error::DirectoryTreeInvariant),
     }
 }
 
@@ -695,8 +713,11 @@ fn remove_tree(path: &Path) -> Result<(), Error> {
 /// so it only deletes what we knew was there.
 fn remove_node(path: &Path, node: &Node<DirLeaf>) -> Result<bool, Error> {
     match node {
-        Node::Map(m, _) => {
+        Node::Map(m) => {
             for (name, child) in m {
+                if name == DIR_ATTRS_KEY {
+                    continue; // virtual attrs entry, not a real file
+                }
                 remove_node(&path.join(name), child)?;
             }
             fs::remove_dir(path).map_err(|e| write_err(path, e))?;
@@ -800,11 +821,17 @@ mod tests {
     }
 
     #[test]
-    fn render_leaf_meta_shows_dir_attributes() {
-        let m = DirLeaf::render_leaf_meta(&attrs(&[("mode", "755"), ("uid", "0"), ("gid", "0")]));
-        assert!(m.unwrap().starts_with("dir(0755"));
-        // Empty metadata (an unmanaged root) renders nothing.
-        assert_eq!(DirLeaf::render_leaf_meta(&Attrs::new()), None);
+    fn dir_attributes_leaf_renders_dir_summary() {
+        let m =
+            DirLeaf::DirAttributes(attrs(&[("mode", "755"), ("uid", "0"), ("gid", "0")])).render();
+        assert!(m.starts_with("dir(0755"), "{m}");
+        // A directory with managed attributes carries a reserved-key attrs leaf;
+        // an unmanaged root (empty attrs) carries none.
+        assert!(dir_attrs(Some(&Node::Leaf(DirLeaf::DirAttributes(attrs(&[(
+            "mode", "755"
+        )])))))
+        .is_some());
+        assert!(dir_attrs(Some(&Node::Leaf(DirLeaf::Symlink { target: "x".into() }))).is_none());
     }
 
     #[test]

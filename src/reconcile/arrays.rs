@@ -176,7 +176,7 @@ fn render_value<L: Leaf>(v: &Node<L>) -> String {
             let inner: Vec<String> = a.iter().map(render_value).collect();
             format!("[{}]", inner.join(","))
         }
-        Node::Map(m, _) => {
+        Node::Map(m) => {
             let inner: Vec<String> = m
                 .iter()
                 .map(|(k, val)| format!("{k}={}", render_value(val)))

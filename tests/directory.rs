@@ -481,6 +481,36 @@ fn empty_declared_dir_is_created() {
 }
 
 #[test]
+fn empty_declared_dir_is_prunable() {
+    // In the reserved-key representation a directory carries an attributes leaf
+    // under an empty-string key, so even an *empty* declared directory has a
+    // managed leaf path — which means it can be pruned when dropped (unlike the
+    // map-metadata design, where an empty directory had no leaf path and stuck).
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let d1 = dir.path().join("d1");
+    let d2 = dir.path().join("d2");
+    fs::create_dir_all(d1.join("sub")).unwrap(); // d1 declares an empty dir `sub`
+    fs::create_dir_all(&d2).unwrap(); // d2 drops it
+
+    assert!(graft(&[target.to_str().unwrap(), d1.to_str().unwrap()])
+        .status
+        .success());
+    assert!(target.join("sub").is_dir());
+
+    // Re-apply with d1 as BASE and d2 (which drops `sub`) as DESIRED.
+    assert!(graft(&[
+        "--base",
+        d1.to_str().unwrap(),
+        target.to_str().unwrap(),
+        d2.to_str().unwrap(),
+    ])
+    .status
+    .success());
+    assert!(!target.join("sub").exists());
+}
+
+#[test]
 fn apply_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");
