@@ -11,7 +11,8 @@ mod error;
 mod format;
 mod reconcile;
 mod value;
-use backend::{Backend, ByteBackend};
+use backend::{Backend, ByteBackend, Directory};
+use format::directory::XattrScope;
 use format::{FormatKind, Indent, Json, Plist, Toml, Yaml};
 use reconcile::{get_path, leaf_paths, ArrayStrategy, KeyPath, MergeKeys};
 use value::{Leaf, Node};
@@ -92,6 +93,23 @@ pub(crate) struct Cli {
     /// --merge-key spec.containers=name`.
     #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
+
+    /// Also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs),
+    /// not just its contents. `--format directory` only — passing it with another
+    /// format is an error.
+    #[arg(long = "manage-root")]
+    pub(crate) manage_root: bool,
+
+    /// Don't reconcile file/directory ownership (uid/gid). `--format directory`
+    /// only — passing it with another format is an error.
+    #[arg(long = "no-owner")]
+    pub(crate) no_owner: bool,
+
+    /// Which extended attributes to reconcile: `all` (default), `safe` (a
+    /// conservative allowlist that skips privileged/system namespaces), or `none`.
+    /// `--format directory` only — passing it with another format is an error.
+    #[arg(long = "xattrs", value_name = "SCOPE")]
+    pub(crate) xattrs: Option<XattrScope>,
 }
 
 /// Parse `--merge-key` specs into [`MergeKeys`]. Each spec is `FIELD` / `f1,f2`
@@ -143,6 +161,7 @@ fn main() {
         FormatKind::Plist => ByteBackend::<Plist>::run(&cli),
         FormatKind::Yaml => ByteBackend::<Yaml>::run(&cli),
         FormatKind::Toml => ByteBackend::<Toml>::run(&cli),
+        FormatKind::Directory => Directory::run(&cli),
     };
     match result {
         Ok(outcome) => process::exit(outcome.code()),
@@ -175,9 +194,11 @@ fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<
     tmp.as_file()
         .set_permissions(fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
-    // fsync the directory so the rename itself survives a crash (content fsync
-    // alone doesn't make the new directory entry durable).
-    fsync_dir(&dir)?;
+    // fsync the directory so the rename itself survives a crash (content fsync alone
+    // doesn't make the new directory entry durable). Best-effort: the rename already
+    // landed, so a filesystem that can't fsync a directory (e.g. some network mounts)
+    // must not turn a successful write into an error.
+    let _ = fsync_dir(&dir);
     Ok(())
 }
 
@@ -207,33 +228,35 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 /// which reads naturally as "this directory".
 pub(crate) fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) -> String {
     use std::collections::HashSet;
-    // Each entry is (sort key, formatted line); sorting by the path key keeps a
-    // directory's own line just before its children.
-    let mut lines: Vec<(String, String)> = Vec::new();
+    // Each entry is (key path, formatted line). Ordering is by the path's *segments*
+    // (not the rendered string), so a key that itself contains the format separator
+    // can't reorder against a nested path that renders identically; it also keeps a
+    // directory's own line (its final segment empty) just before its children.
+    let mut lines: Vec<(KeyPath, String)> = Vec::new();
 
     let old_leaves: HashSet<KeyPath> = leaf_paths(old).into_iter().collect();
     let new_leaves: HashSet<KeyPath> = leaf_paths(new).into_iter().collect();
     for p in old_leaves.union(&new_leaves) {
-        let key = p.render(sep);
+        let rendered = p.render(sep);
         // An empty rendered path is a directory's own-attributes leaf at the root;
         // show the separator so it isn't a blank label.
-        let disp = if key.is_empty() {
+        let disp = if rendered.is_empty() {
             sep.to_string()
         } else {
-            key.clone()
+            rendered
         };
         match (get_path(old, p), get_path(new, p)) {
-            (None, Some(n)) => lines.push((key.clone(), format!("+ {disp} = {}", compact(n)))),
-            (Some(o), None) => lines.push((key.clone(), format!("- {disp} = {}", compact(o)))),
+            (None, Some(n)) => lines.push((p.clone(), format!("+ {disp} = {}", compact(n)))),
+            (Some(o), None) => lines.push((p.clone(), format!("- {disp} = {}", compact(o)))),
             (Some(o), Some(n)) if o != n => lines.push((
-                key.clone(),
+                p.clone(),
                 format!("~ {disp}: {} => {}", compact(o), compact(n)),
             )),
             _ => {}
         }
     }
 
-    lines.sort();
+    lines.sort_by(|a, b| a.0.cmp(&b.0));
     if lines.is_empty() {
         String::new()
     } else {

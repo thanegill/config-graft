@@ -528,6 +528,31 @@ fn diff_reports_added_removed_changed() {
 }
 
 #[test]
+fn diff_orders_by_path_components_not_rendered_string() {
+    // A top-level key that contains the separator (`a.b`) and a nested path
+    // (`a` -> `z`) both render as the dotted string `a.?`; diff ordering must be by
+    // path *segments* so it's deterministic and independent of the rendered form.
+    // Sorting the rendered strings would put `a.b` first; segment order
+    // `["a","z"] < ["a.b"]` puts the nested leaf first.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, "{}").unwrap();
+    fs::write(&desired, r#"{"a":{"z":1},"a.b":2}"#).unwrap();
+
+    let out = run(&[
+        "--diff",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    let diff = String::from_utf8(out.stdout).unwrap();
+    let az = diff.find("+ a.z = 1").expect("a.z line present");
+    let ab = diff.find("+ a.b = 2").expect("a.b line present");
+    assert!(az < ab, "expected a.z before a.b:\n{diff}");
+}
+
+#[test]
 fn preserves_existing_file_mode() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();

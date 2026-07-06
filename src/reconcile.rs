@@ -136,7 +136,7 @@ pub struct Options {
 /// A `merge` array conflict: at `path`, TARGET and DESIRED reordered `elements`
 /// contradictorily (a cross-over move). The reconcile still resolves the order
 /// deterministically; this records where and what so a caller can surface it.
-pub struct Conflict<L> {
+pub struct Conflict<L: Leaf> {
     /// The object path of the conflicted array.
     pub path: KeyPath,
     /// The elements caught in the contradictory reorder (in membership order).
@@ -156,8 +156,8 @@ pub fn reconcile<L: Leaf>(
     opts: &Options,
 ) -> (Node<L>, Vec<Conflict<L>>) {
     let mut result = match target {
-        Node::Map(_) => target.clone(),
-        _ => Node::Map(IndexMap::new()),
+        Node::Map(..) => target.clone(),
+        _ => Node::empty_map(),
     };
 
     // 1-3: prune leaves we managed before (present in BASE) but no longer do

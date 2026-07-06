@@ -41,8 +41,8 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 
 ### Arguments
 
-- `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent.
-- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping / TOML table.
+- `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent. With `--format directory` it is a directory tree (§5b).
+- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping / TOML table (or, with `--format directory`, a directory).
 - `BASE` — path to the previous snapshot. Optional; absent/empty/invalid ⇒ no pruning (first-run behavior).
 
 ### Options
@@ -56,8 +56,11 @@ config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
 - `--array-strategy <merge|replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `merge` (three-way, move-aware against BASE; **the default**), `replace` (atomic), `concat` (append, keeping order and duplicates), or `set` (two-way union, ignoring order and dropping duplicates).
 - `--merge-key <[PATH=]FIELD>` — for `merge`, identify object-array elements by a field so keyed records are merged in place instead of matched by whole value (see §5). `FIELD` / `f1,f2` (candidate fields, first present wins) applies to any object-array; `PATH=FIELD` scopes it to the array at `PATH` — its full path from the document root, segments joined by the format separator (`.`, or `:` for plist). Repeatable.
-- `--format <json|plist|yaml|toml>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a).
+- `--format <json|plist|yaml|toml|directory>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a). `directory` is never inferred — it must be passed explicitly, and makes TARGET/DESIRED/BASE *directories* rather than files (§5b).
 - `--plist-binary` — write plist output as binary instead of XML. **Plist only** — passing it with another format is an error (exit 1).
+- `--manage-root` — also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs), not just its contents. **`--format directory` only** — passing it with another format is an error (exit 1). Off by default (§5b).
+- `--no-owner` — don't reconcile file/directory ownership (uid/gid); leave it to the filesystem. **`--format directory` only** (error otherwise). Owner is managed by default (§5b).
+- `--xattrs <all|safe|none>` — which extended attributes to reconcile: `all` (default, today's behavior), `safe` (a conservative allowlist that skips privileged/system namespaces — Linux `security.*`/`system.*`/`trusted.*`, macOS `com.apple.*` system attrs), or `none`. **`--format directory` only** (error otherwise). Out-of-scope xattrs are neither captured nor removed — they're left as-is (§5b).
 
 ### Exit codes
 
@@ -135,6 +138,87 @@ forced with `--format`.
   can't make safely. A TOML document's root is always a table, so a desired TOML
   file that parses is always a valid mapping. `--indent` does not apply.
 
+## 5b. Directory mode (`--format directory`)
+
+Instead of a single file, TARGET / DESIRED / BASE are **directory trees**, and
+config-graft reconciles *which files exist and their contents* — the same
+three-way merge, one filesystem level up. It is opt-in (`--format directory` is
+never inferred). The tree maps onto the same value model as every other format:
+
+- a **directory** is the map/object shape (the container that merges); it also
+  carries its **own metadata** (mode/owner/xattrs), reconciled the same way a
+  file's is. The **root** directory (the target you point at) is the exception:
+  by default its own attributes are left alone — config-graft never chmod/chown's
+  the directory you aim it at, only what lives inside — but `--manage-root`
+  reconciles the root too (useful when you own the whole tree; note a DESIRED tree
+  owned by another user, e.g. a Nix store path, then needs privilege to apply);
+- a **regular file** is an atomic leaf carrying its whole contents **and its
+  metadata** (see below) — config-graft never merges *within* a file, and a
+  metadata-only change counts as a change;
+- a **symlink** is an atomic leaf carrying its target; it is **never followed**
+  (a symlink to a directory is a leaf, not a directory), and dangling links are
+  fine. Symlinks carry no metadata.
+
+A file's contents are held as a **content handle** (length + SHA-256 digest +
+source path), not loaded into memory — so the tree costs O(number of files), and
+bytes stream straight from the source to the destination on write. A file's
+**metadata** is a generic, filesystem-agnostic map of `name → value`, so new
+attribute kinds need no type change. Tracked by default: **mode** (permission
+bits, incl. setuid/sticky), **owner** (`uid`/`gid`), and every **extended
+attribute** the OS reports. All of it is part of the file's identity: two files
+are equal only if content *and* every tracked attribute match, so a metadata-only
+change is a change and shows up in `--diff` (the attribute summary is rendered
+per file and per directory, so mode/owner/xattr drift is visible, not just
+content).
+
+The default is **manage everything, opt out**: `--no-owner` drops uid/gid from
+both read and apply, and `--xattrs <all|safe|none>` narrows which extended
+attributes are in scope (`all` is the default; `safe` skips privileged/system
+namespaces; `none` ignores xattrs entirely). Attributes outside the active scope
+are left exactly as they are — neither captured into the tree nor removed on
+apply.
+
+Reading extended attributes is best-effort — a filesystem that doesn't support
+them contributes none. **Applying** metadata is strict: attributes are set on the
+temp file *before* the atomic rename, and any failure (e.g. no privilege to
+`chown`, or a filesystem that can't store an xattr) **refuses the run** (exit 1,
+nothing landed) rather than leaving a partially-attributed file. In-scope xattrs
+present on the target but absent from DESIRED are removed, so xattrs converge. A
+`chown` to the caller's own uid/gid is skipped (it would be a no-op), which avoids
+a gratuitous privilege requirement in the common case; a DESIRED tree owned by a
+*different* user (e.g. a Nix store path owned by root) still needs privilege to
+apply — run as that owner, keep ownership matching the target, or pass
+`--no-owner`.
+
+Reads **do not follow** symlinks inside the tree and **refuse (exit 1, nothing
+written)** on a FIFO/socket/device, a non-UTF-8 filename, two sibling names that
+collide when case-folded (they would map to one file on a case-insensitive
+filesystem), or a tree nested past an internal depth limit (a stack-overflow
+guard). A TARGET that exists but is not a directory is a hard error (unlike the
+single-file coerce-to-empty rule — we won't silently treat a plain file as an
+empty tree and delete it). Entries whose names use config-graft's reserved
+temp-file prefix (`.config-graft-tmp.`) are ignored on read — a leftover temp file from an
+interrupted apply is never ingested, diffed, or pruned.
+
+Replacing a **directory with a file/symlink** (a type change) is refused (exit 1)
+when the on-disk directory holds entries that were never under management (absent
+from BASE and DESIRED) — deleting it would destroy app-created content, so
+config-graft stops rather than guess; remove the directory by hand to proceed. A
+directory holding only managed entries is replaced normally.
+
+Writes are **minimal and in place** (like YAML/TOML, not like JSON's canonical
+rewrite): config-graft diffs the reconciled tree against the current one and only
+creates/updates/deletes what changed, so **app-owned files keep their inode and
+mtime**. Each individual file write is atomic (temp-in-same-dir + `fsync` + set
+attributes + `rename`); each directory is then `fsync`ed once, after its entry
+changes settle, so those renames are crash-durable (best-effort — a filesystem
+that can't `fsync` a directory doesn't fail the apply); see §8 and §10 for the
+cross-file-atomicity trade-off.
+`--stdout` is unsupported (a tree has no single byte stream); `--indent` /
+`--plist-binary` error as with any non-matching format; `--array-strategy` /
+`--sort-keys` are inert (a tree has no arrays, and on-disk order isn't stored);
+`--manage-root` / `--no-owner` / `--xattrs` shape the metadata reconcile above.
+
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
 A managed key is removed **only** when:
@@ -148,7 +232,7 @@ ever pruned.
 
 ## 7. File handling & robustness
 
-- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary / YAML mapping / TOML table. (Exception: a non-empty YAML or TOML target that can't be edited safely is **refused**, not overwritten — see §5a.)
+- **Missing/unparseable/non-object TARGET** ⇒ treated as `{}` (TARGET becomes a copy of DESIRED, structurally). "Object" here means a JSON object / plist dictionary / YAML mapping / TOML table. (Exception: a non-empty YAML or TOML target that can't be edited safely is **refused**, not overwritten — see §5a. In directory mode a *missing* TARGET is likewise treated as empty, but a TARGET that exists and is **not** a directory is **refused**, not coerced — see §5b.)
 - **Missing/empty/unparseable/non-object BASE** ⇒ pruning disabled (first run).
 - **Invalid DESIRED** ⇒ hard error (exit 1); TARGET untouched.
 - Parent directories of TARGET created as needed.
@@ -156,9 +240,10 @@ ever pruned.
 
 ## 8. Atomicity & formatting
 
-- Write to a temp file in TARGET's directory, `fsync`, then `rename(2)` over TARGET (atomic; no torn writes).
+- Write to a temp file in TARGET's directory, `fsync`, then `rename(2)` over TARGET (atomic; no torn writes), then `fsync` TARGET's directory so the new entry is durable across a crash.
 - Preserve TARGET's existing file mode; default `0644` for new files.
 - Deterministic output: stable key ordering (per `--sort-keys`), fixed indentation, single trailing newline. Running twice with the same inputs is a no-op (idempotent) and `--check`-clean; an unchanged result skips the write entirely.
+- **Directory mode (§5b):** each file/symlink is written atomically the same way, with its reconciled metadata set on the temp file *before* the rename (§5b), so an attribute failure refuses cleanly and leaves nothing on disk; a newly-created directory is made with the process umask and then reconciled to DESIRED's mode/owner/xattrs (the per-directory attribute apply is a small sequence of `chmod`/`chown`/`setxattr`, not itself atomic — a crash between them leaves the directory with some attributes applied, which a re-run completes). The *whole-tree* apply is **not one transaction** — a crash mid-apply leaves a partial (though per-file consistent) tree, which a re-run completes idempotently (§10).
 
 ## 9. Non-goals
 
@@ -174,6 +259,11 @@ ever pruned.
 
 - Because removal is snapshot-driven (not null-sentinel), the tool **cannot set a managed key to `null`-meaning-delete**; `null` is a real value. This is intentional and the inverse of RFC 7386's limitation.
 - Atomic arrays mean you can't manage a single element of an app-written list; you own the whole array or none of it.
+- **Directory mode (§5b):** the multi-file apply is best-effort, not transactional (§8) — re-run to complete a partial apply. An **empty declared directory** is created *and* is prunable: a directory carries its own attributes as a reserved-key leaf, so even an empty one has a managed leaf path and is removed when dropped from DESIRED (unlike a JSON key whose value is `{}`, which has no leaf path and can't be pruned). Further directory-mode trade-offs, all intentional (each is locked by a characterization test so it can't regress silently):
+  - **Hardlinks are not preserved.** A changed file is rewritten via a fresh temp file and `rename`, giving it a new inode; any other name hardlinked to the old inode keeps the old content. config-graft treats each path independently and does not detect or re-link shared inodes.
+  - **Read/apply is a two-step, so it's subject to TOCTOU.** The tree is read, reconciled, then applied; a concurrent writer that changes a file between the read and the overwrite can have its change clobbered (or, for a type change, trigger the app-content refuse spuriously). Point config-graft at a tree no other process is mutating.
+  - **An I/O error mid-walk aborts the whole run** (fail-closed): if a directory can't be read (e.g. `EACCES`), config-graft refuses rather than reconcile a partial view of the tree that would look like the unreadable entries were deleted.
+  - **Ancestor path components are trusted.** The refusal to follow symlinks applies to entries *inside* the tree; the path you point config-graft at (and its parents) is used as given. Don't aim it through an attacker-controlled symlinked parent.
 
 ## 11. Examples
 
@@ -219,7 +309,17 @@ to value matching when not all keyed)**; **default array-strategy is `merge`**;
 non-object/missing/invalid TARGET coerced to empty; missing/invalid BASE (no
 prune); usage error exit 2; invalid `--array-strategy` exit 2; `--check`
 idempotence; `--stdout` leaves TARGET untouched; `--sort-keys`/`--indent`
-output; `--diff` add/remove/change lines; file mode preserved.
+output; `--diff` add/remove/change lines; file mode preserved. **Directory mode
+(§5b):** first-apply creates the tree; app-owned file preserved (inode kept);
+prune dropped file on unchanged; keep user-edited file on prune; prune collapses
+empty parent; `--no-prune` keeps dropped file; file↔dir type change both ways;
+symlink create/update/dangling; symlink-to-dir not followed; refuse special file
+(exit 1); non-directory TARGET refused (exit 1); `--check` pending exit 3 (tree
+untouched); `--diff` with `/`-joined paths; mode set on create and on mode-only
+change; empty declared dir created; re-apply idempotent; **file owner/xattrs
+tracked and round-tripped; directory mode reconciled with drift corrected; root
+attributes unmanaged by default and managed with `--manage-root`; `--manage-root`
+rejected for non-directory formats (exit 1).**
 
 ## 13. Implementation
 
@@ -228,9 +328,23 @@ Implemented in **Rust** (this repo):
 - `src/value.rs` — the internal value model: a `Leaf` trait and a `Node<L>`
   generic over it. Each format supplies **its own** leaf type (no single enum
   mixing every format's value space), so the encoders are total — a JSON node
-  can't hold a plist `Date`, by construction.
+  can't hold a plist `Date`, by construction. `Node::Map` carries no side payload,
+  so `Node` is a plain `#[derive]`'d enum; a format that needs per-directory
+  metadata (directory mode) stores it as an ordinary leaf under a reserved key
+  rather than on the map itself.
 - `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
   unit-tested against §12. Managed key paths are a `KeyPath` newtype.
+- `src/format/directory.rs` — the `--format directory` backend (§5b): an `FsLeaf` leaf
+  that stores each file as a **content handle** (length + SHA-256 digest + source
+  path + a generic attribute map of mode/owner/xattrs) or a symlink; a recursive
+  `read_tree` (streaming the digest, never buffering the bytes) and a minimal-diff
+  `apply_tree` that streams bytes source→dest and applies attributes atomically,
+  refusing on failure. A directory's own attributes are a `FsLeaf::DirectoryAttributes`
+  leaf under a reserved empty-string key in its map (the write path applies it to
+  the directory rather than creating a file); the root is unmanaged unless
+  `--manage-root`. Not a `Format` (a tree has no byte stream); it plugs into the
+  shared reconcile-run driver via a `Backend` impl, reusing the reconcile engine
+  and diff renderer. Uses the `sha2` and `xattr` crates.
 - `src/format/` — one module per format (`json`/`plist`/`yaml`/`toml`), each
   defining its leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and
   `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind`

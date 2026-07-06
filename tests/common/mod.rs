@@ -1,5 +1,9 @@
 //! Shared helpers for the per-format integration tests. (As `tests/common/mod.rs`
 //! it is a module, not its own test binary.)
+//!
+//! Each test binary uses a different subset of these helpers, so unused ones are
+//! expected per-binary rather than genuinely dead.
+#![allow(dead_code)]
 
 use std::process::Command;
 

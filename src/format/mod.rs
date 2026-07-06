@@ -5,7 +5,11 @@
 //! Reconciliation is homogeneous — one format governs TARGET, DESIRED, BASE, and
 //! the output — so there is never a cross-format conversion. Each format lives in
 //! its own module ([`json`], [`plist`], [`yaml`]); this module holds the shared
-//! [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] selector.
+//! [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] selector. The
+//! [`directory`] module is the odd one out: `--format directory` reconciles a
+//! whole tree, which has no single byte stream, so it does **not** implement the
+//! byte-oriented [`Format`] trait — it provides its own tree reader/writer and
+//! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +18,7 @@ use clap::ValueEnum;
 use crate::error::Error;
 use crate::value::{Leaf, Node};
 
+pub(crate) mod directory;
 pub(crate) mod json;
 pub(crate) mod plist;
 pub(crate) mod toml;
@@ -34,6 +39,9 @@ pub enum FormatKind {
     Plist,
     Yaml,
     Toml,
+    /// Reconcile a directory *tree* rather than a single file. Not a byte-oriented
+    /// [`Format`]; `main` dispatches it to a separate directory backend.
+    Directory,
 }
 
 impl FormatKind {
@@ -58,6 +66,8 @@ impl FormatKind {
             FormatKind::Plist => Error::InvalidPlist(path),
             FormatKind::Yaml => Error::InvalidYaml(path),
             FormatKind::Toml => Error::InvalidToml(path),
+            // DESIRED "doesn't parse as a directory" == it isn't one.
+            FormatKind::Directory => Error::NotDirectory(path),
         }
     }
 
@@ -69,6 +79,9 @@ impl FormatKind {
             FormatKind::Plist => Error::NotPlistDictionary(path),
             FormatKind::Yaml => Error::NotYamlMapping(path),
             FormatKind::Toml => Error::NotTomlTable(path),
+            // A real directory's root is always a Map, so this is unreachable in
+            // practice (like NotTomlTable); kept for FormatKind symmetry.
+            FormatKind::Directory => Error::NotDirectory(path),
         }
     }
 }
