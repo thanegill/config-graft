@@ -110,6 +110,11 @@ in
   # command) and `_i` (info log): home-manager provides these in its activation
   # context, and the system module defines pass-through shims. The caller sets
   # `_prev` (the BASE snapshot path) beforehand and passes the resolved `target`.
+  #
+  # Shell vars are `_`-prefixed because home-manager runs this inline in its
+  # activation shell, shared with every other module's activation code, so bare
+  # names like `prev`/`target`/`domain` could clobber or be clobbered by another
+  # module's variables. (The system side runs its own script, where it's harmless.)
   mkReconcileScript =
     {
       lib,
