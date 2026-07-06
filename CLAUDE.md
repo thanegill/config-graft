@@ -50,9 +50,13 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   (refuse-on-failure). An `AttrPolicy { owner, xattrs }` (default: manage
   everything) threads through read/apply; `XattrScope::in_scope` filters xattrs.
   A directory's own attrs are a `DirLeaf::DirAttributes` leaf under the reserved
-  empty-string key (`DIR_ATTRS_KEY`) in its map; `apply_dir` extracts it and
-  applies it to the directory (never as a file), and every entry-iterating site
-  (`apply_dir`, `remove_node`) skips that key. The root is unmanaged unless
+  empty-string key (`DIR_ATTRS_KEY`) in its map — that's the *reconcile* shape
+  (read/diff/prune treat it as a normal leaf). The *write* path never touches that
+  key: `apply_tree` calls `parse` once at the boundary to lift each directory's
+  attrs into a type-guarded `FsTree { Dir { attrs, entries }, File, Symlink }`, so
+  `apply_dir`/`apply_node`/`remove_node` build paths only from real entries and
+  **cannot** express attrs-as-an-entry (illegal states unrepresentable). `parse` is
+  the single place the reserved key is interpreted. The root is unmanaged unless
   `--manage-root`. Robustness: case-fold sibling-collision refuse, `MAX_DEPTH`
   guard, `.config-graft-tmp.` temp-name skip on read, per-entry parent `fsync`. Uses
   `sha2` + `xattr`.

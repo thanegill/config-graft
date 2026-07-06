@@ -406,6 +406,72 @@ fn hash_file(path: &Path) -> Result<Digest, Error> {
     Ok(digest)
 }
 
+/// The write path's view of a reconciled tree, parsed once from `Node<DirLeaf>` at
+/// the apply boundary (see [`parse`]).
+///
+/// This is the type guard that makes the reserved-key convention safe: a
+/// directory's own attributes and its entries are **distinct fields** here, not
+/// two kinds of map entry, so there is no way to express "attributes as a named
+/// entry" — and therefore no way for the apply/remove code below to build a
+/// filesystem path from a directory's attributes. The reserved key is interpreted
+/// in exactly one place ([`parse`]); everything downstream is checked by the type
+/// system. Borrows from the `Node`, so it costs no clones.
+enum FsTree<'a> {
+    Dir {
+        /// The directory's own attributes (`--manage-root` / nested dirs), or
+        /// `None` when unmanaged (e.g. the root by default).
+        attrs: Option<&'a Attrs>,
+        entries: IndexMap<&'a str, FsTree<'a>>,
+    },
+    File {
+        source: &'a Path,
+        len: u64,
+        digest: &'a Digest,
+        attrs: &'a Attrs,
+    },
+    Symlink {
+        target: &'a Path,
+    },
+}
+
+/// Parse a reconciled `Node<DirLeaf>` into an [`FsTree`], lifting each directory's
+/// reserved-key attributes leaf into the `Dir.attrs` field and dropping it from the
+/// entries. This is the single point that interprets [`DIR_ATTRS_KEY`]; a malformed
+/// tree (a `DirAttributes` leaf anywhere but the reserved key, or an array node) is
+/// rejected here rather than mishandled later.
+fn parse(node: &Node<DirLeaf>) -> Result<FsTree<'_>, Error> {
+    match node {
+        Node::Map(map) => {
+            let mut attrs = None;
+            let mut entries = IndexMap::with_capacity(map.len());
+            for (k, v) in map {
+                if k == DIR_ATTRS_KEY {
+                    attrs = Some(dir_attrs(Some(v)).ok_or(Error::DirectoryTreeInvariant)?);
+                } else {
+                    entries.insert(k.as_str(), parse(v)?);
+                }
+            }
+            Ok(FsTree::Dir { attrs, entries })
+        }
+        Node::Leaf(DirLeaf::File {
+            source,
+            len,
+            digest,
+            attrs,
+        }) => Ok(FsTree::File {
+            source,
+            len: *len,
+            digest,
+            attrs,
+        }),
+        Node::Leaf(DirLeaf::Symlink { target }) => Ok(FsTree::Symlink { target }),
+        // A DirAttributes leaf outside the reserved key, or an array, is malformed.
+        Node::Leaf(DirLeaf::DirAttributes(_)) | Node::Array(_) => {
+            Err(Error::DirectoryTreeInvariant)
+        }
+    }
+}
+
 /// Apply the reconciled tree `want` under `root`, given `cur` (the tree as it was
 /// read from disk). Computes the minimal diff and touches only what changed:
 /// creates/updates changed files and directories top-down, then prunes dropped
@@ -421,27 +487,49 @@ pub fn apply_tree(
     base: Option<&Node<DirLeaf>>,
     policy: AttrPolicy,
 ) -> Result<bool, Error> {
-    let want_map = match want {
-        Node::Map(m) => m,
-        _ => return Err(Error::DirectoryTreeInvariant),
-    };
     ensure_root(root)?;
-    // The root is reconciled like any directory: `apply_dir` applies its own
-    // attributes from the reserved-key entry (present only with `--manage-root`, so
-    // by default the target directory is untouched) and then its contents.
-    let cur_map = cur.and_then(Node::as_map);
-    let base_map = base.and_then(Node::as_map);
-    apply_dir(root, cur_map, want_map, base_map, policy)
+    // Parse the sentinel representation into the type-guarded `FsTree` once, here at
+    // the boundary; the apply walk below can no longer confuse a directory's
+    // attributes with an entry. `base` stays a `Node` — it is only read (never used
+    // to build a write path), for the app-content refuse check.
+    let want = parse(want)?;
+    let cur = cur.map(parse).transpose()?;
+    apply_dir(root, cur.as_ref(), &want, base, policy)
 }
 
 /// Whether `cur` (a directory subtree read from disk) holds any leaf that is not
-/// present in `base` — i.e. content that was never under management. Used to
-/// refuse deleting an app-populated directory on a directory → file type change.
-fn dir_has_unmanaged(cur: &Node<DirLeaf>, base: Option<&Node<DirLeaf>>) -> bool {
-    crate::reconcile::leaf_paths(cur).iter().any(|p| {
-        base.and_then(|b| crate::reconcile::get_path(b, p))
+/// present in `base` — i.e. content that was never under management. Used to refuse
+/// deleting an app-populated directory on a directory → file type change. A
+/// directory's own attributes count as a leaf path too (`DIR_ATTRS_KEY`), so an
+/// app-created *empty* subdirectory also counts as unmanaged content — mirroring
+/// the reserved-key leaf that `reconcile::leaf_paths` would have seen.
+fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<DirLeaf>>) -> bool {
+    fn unmanaged_at(path: &[String], base: Option<&Node<DirLeaf>>) -> bool {
+        base.and_then(|b| crate::reconcile::get_path(b, path))
             .is_none()
-    })
+    }
+    fn walk(node: &FsTree, path: &mut Vec<String>, base: Option<&Node<DirLeaf>>) -> bool {
+        match node {
+            FsTree::File { .. } | FsTree::Symlink { .. } => unmanaged_at(path, base),
+            FsTree::Dir { attrs, entries } => {
+                if attrs.is_some() {
+                    path.push(DIR_ATTRS_KEY.to_string());
+                    let unmanaged = unmanaged_at(path, base);
+                    path.pop();
+                    if unmanaged {
+                        return true;
+                    }
+                }
+                entries.iter().any(|(name, child)| {
+                    path.push((*name).to_string());
+                    let r = walk(child, path, base);
+                    path.pop();
+                    r
+                })
+            }
+        }
+    }
+    walk(cur, &mut Vec::new(), base)
 }
 
 /// Ensure `root` exists as a directory, creating it (and parents) if missing.
@@ -456,37 +544,43 @@ fn ensure_root(root: &Path) -> Result<(), Error> {
     }
 }
 
-/// Reconcile the entries of one directory: create/update every `want` child, then
-/// remove every `cur` child that `want` dropped.
+/// Reconcile the entries of one directory: apply its own attributes, create/update
+/// every `want` child, then remove every `cur` child that `want` dropped. `want`
+/// and `cur` are [`FsTree::Dir`]s, so their `entries` cannot contain a directory's
+/// attributes — the create/remove loops build paths only from real entry names.
 fn apply_dir(
     dir: &Path,
-    cur: Option<&IndexMap<String, Node<DirLeaf>>>,
-    want: &IndexMap<String, Node<DirLeaf>>,
-    base: Option<&IndexMap<String, Node<DirLeaf>>>,
+    cur: Option<&FsTree>,
+    want: &FsTree,
+    base: Option<&Node<DirLeaf>>,
     policy: AttrPolicy,
 ) -> Result<bool, Error> {
+    let (want_attrs, want_entries) = match want {
+        FsTree::Dir { attrs, entries } => (*attrs, entries),
+        _ => return Err(Error::DirectoryTreeInvariant),
+    };
+    let cur_dir = match cur {
+        Some(FsTree::Dir { attrs, entries }) => Some((*attrs, entries)),
+        _ => None,
+    };
+
     let mut changed = false;
-    // The directory's own attributes live in the reserved-key entry; apply them to
-    // `dir` itself (not as a file) when they drifted. An absent want-entry (the
-    // root without `--manage-root`) leaves the directory untouched.
-    if let Some(want_attrs) = dir_attrs(want.get(DIR_ATTRS_KEY)) {
-        if dir_attrs(cur.and_then(|m| m.get(DIR_ATTRS_KEY))) != Some(want_attrs) {
+    // Apply the directory's own attributes to `dir` itself when they drifted. Absent
+    // (the root without `--manage-root`) leaves the directory untouched.
+    if let Some(want_attrs) = want_attrs {
+        if cur_dir.and_then(|(a, _)| a) != Some(want_attrs) {
             apply_attrs(dir, want_attrs, policy)?;
             changed = true;
         }
     }
-    for (name, want_child) in want {
-        if name == DIR_ATTRS_KEY {
-            continue; // handled above — not a real entry
-        }
-        let child = dir.join(name);
-        let cur_child = cur.and_then(|m| m.get(name));
-        let base_child = base.and_then(|m| m.get(name));
-        changed |= apply_node(&child, cur_child, want_child, base_child, policy)?;
+    for (name, want_child) in want_entries {
+        let cur_child = cur_dir.and_then(|(_, e)| e.get(name));
+        let base_child = base.and_then(Node::as_map).and_then(|m| m.get(*name));
+        changed |= apply_node(&dir.join(name), cur_child, want_child, base_child, policy)?;
     }
-    if let Some(cur) = cur {
-        for (name, cur_child) in cur {
-            if name != DIR_ATTRS_KEY && !want.contains_key(name) {
+    if let Some((_, cur_entries)) = cur_dir {
+        for (name, cur_child) in cur_entries {
+            if !want_entries.contains_key(name) {
                 changed |= remove_node(&dir.join(name), cur_child)?;
             }
         }
@@ -503,20 +597,20 @@ fn apply_dir(
 /// create/update/type-change case.
 fn apply_node(
     path: &Path,
-    cur: Option<&Node<DirLeaf>>,
-    want: &Node<DirLeaf>,
+    cur: Option<&FsTree>,
+    want: &FsTree,
     base: Option<&Node<DirLeaf>>,
     policy: AttrPolicy,
 ) -> Result<bool, Error> {
     match want {
-        Node::Map(want_map) => {
+        FsTree::Dir { .. } => {
             let mut changed = false;
             // Ensure the directory exists; its own attributes and contents are then
-            // reconciled by `apply_dir` (the attributes via the reserved-key entry).
-            let cur_map = match cur {
-                Some(Node::Map(m)) => Some(m),
+            // reconciled by `apply_dir`.
+            let cur_dir = match cur {
+                Some(c @ FsTree::Dir { .. }) => Some(c),
                 // Type change (file/symlink -> directory): drop the leaf first.
-                Some(Node::Leaf(_)) => {
+                Some(_) => {
                     remove_leaf(path)?;
                     mkdir(path)?;
                     changed = true;
@@ -527,44 +621,58 @@ fn apply_node(
                     changed = true;
                     None
                 }
-                Some(Node::Array(_)) => return Err(Error::DirectoryTreeInvariant),
             };
-            changed |= apply_dir(path, cur_map, want_map, base.and_then(Node::as_map), policy)?;
+            changed |= apply_dir(path, cur_dir, want, base, policy)?;
             Ok(changed)
         }
-        Node::Leaf(want_leaf) => match cur {
-            Some(Node::Leaf(c)) if c == want_leaf => Ok(false),
-            // Type change (directory -> file/symlink): remove the subtree first —
-            // but refuse rather than delete a directory holding app-created content
-            // (entries never in BASE), which the preservation guarantee protects.
-            Some(cur_node @ Node::Map(..)) => {
-                if dir_has_unmanaged(cur_node, base) {
-                    return Err(Error::AppDirWouldBeDeleted(path.to_path_buf()));
-                }
-                remove_tree(path)?;
-                write_leaf(path, want_leaf, policy)?;
+        FsTree::File {
+            source,
+            len,
+            digest,
+            attrs,
+        } => match cur {
+            Some(FsTree::File {
+                len: cl,
+                digest: cd,
+                attrs: ca,
+                ..
+            }) if cl == len && cd == digest && ca == attrs => Ok(false),
+            Some(cur @ FsTree::Dir { .. }) => {
+                clear_dir_for_leaf(path, cur, base)?;
+                write_file(path, source, attrs, policy)?;
                 Ok(true)
             }
-            // New, or a differing file/symlink: (over)write atomically.
             _ => {
-                write_leaf(path, want_leaf, policy)?;
+                write_file(path, source, attrs, policy)?;
                 Ok(true)
             }
         },
-        Node::Array(_) => Err(Error::DirectoryTreeInvariant),
+        FsTree::Symlink { target } => match cur {
+            Some(FsTree::Symlink { target: ct }) if ct == target => Ok(false),
+            Some(cur @ FsTree::Dir { .. }) => {
+                clear_dir_for_leaf(path, cur, base)?;
+                atomic_symlink(path, target).map_err(|e| write_err(path, e))?;
+                Ok(true)
+            }
+            _ => atomic_symlink(path, target)
+                .map(|()| true)
+                .map_err(|e| write_err(path, e)),
+        },
     }
 }
 
-/// Write a leaf (file or symlink) at `path`, atomically replacing whatever plain
-/// file/symlink is there.
-fn write_leaf(path: &Path, leaf: &DirLeaf, policy: AttrPolicy) -> Result<(), Error> {
-    match leaf {
-        DirLeaf::File { source, attrs, .. } => write_file(path, source, attrs, policy),
-        DirLeaf::Symlink { target } => atomic_symlink(path, target).map_err(|e| write_err(path, e)),
-        // A directory's own attributes are never a real entry (they live under the
-        // reserved key and are applied to the directory by `apply_dir`).
-        DirLeaf::DirAttributes(_) => Err(Error::DirectoryTreeInvariant),
+/// For a directory → file/symlink type change: remove the subtree so the leaf can
+/// take its place, but refuse rather than delete a directory holding app-created
+/// content (entries never in BASE), which the preservation guarantee protects.
+fn clear_dir_for_leaf(
+    path: &Path,
+    cur: &FsTree,
+    base: Option<&Node<DirLeaf>>,
+) -> Result<(), Error> {
+    if fstree_has_unmanaged(cur, base) {
+        return Err(Error::AppDirWouldBeDeleted(path.to_path_buf()));
     }
+    remove_tree(path)
 }
 
 /// Atomically write a file at `dest`, streaming its bytes from `source` (never
@@ -711,19 +819,17 @@ fn remove_tree(path: &Path) -> Result<(), Error> {
 /// Remove the pruned node `node` at `path`, bottom-up: a directory's children are
 /// removed before the (now-empty) directory itself. Guided by the snapshot node,
 /// so it only deletes what we knew was there.
-fn remove_node(path: &Path, node: &Node<DirLeaf>) -> Result<bool, Error> {
+fn remove_node(path: &Path, node: &FsTree) -> Result<bool, Error> {
     match node {
-        Node::Map(m) => {
-            for (name, child) in m {
-                if name == DIR_ATTRS_KEY {
-                    continue; // virtual attrs entry, not a real file
-                }
+        // `entries` holds only real children (the attributes are a separate field),
+        // so the recursion builds paths only from actual filenames.
+        FsTree::Dir { entries, .. } => {
+            for (name, child) in entries {
                 remove_node(&path.join(name), child)?;
             }
             fs::remove_dir(path).map_err(|e| write_err(path, e))?;
         }
-        Node::Leaf(_) => remove_leaf(path)?,
-        Node::Array(_) => return Err(Error::DirectoryTreeInvariant),
+        FsTree::File { .. } | FsTree::Symlink { .. } => remove_leaf(path)?,
     }
     Ok(true)
 }
@@ -835,15 +941,24 @@ mod tests {
     }
 
     #[test]
-    fn array_node_is_rejected_not_panicked() {
-        // A directory tree never contains an array, but a stray one must surface as
-        // a typed error, not a panic.
-        let dir = tempfile::tempdir().unwrap();
-        let want = Node::Array(vec![]);
+    fn malformed_node_is_rejected_not_panicked() {
+        // A directory tree never contains an array, nor a DirAttributes leaf outside
+        // the reserved key. `parse` (the write-path boundary) must reject both as a
+        // typed error, not a panic — after which the `FsTree` type makes them
+        // unrepresentable downstream.
         assert!(matches!(
-            apply_node(&dir.path().join("x"), None, &want, None, POLICY),
+            parse(&Node::Array(vec![])),
             Err(Error::DirectoryTreeInvariant)
         ));
+        let stray = Node::Map(
+            [(
+                "f".to_string(),
+                Node::Leaf(DirLeaf::DirAttributes(Attrs::new())),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(matches!(parse(&stray), Err(Error::DirectoryTreeInvariant)));
     }
 
     #[test]
