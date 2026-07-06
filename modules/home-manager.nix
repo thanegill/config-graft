@@ -101,7 +101,8 @@ let
         ;
     };
 
-  managedConfig =
+  # Per-format active entries, each with its snapshot path, DESIRED, and script.
+  byFormat = map (
     format:
     let
       active = lib.filterAttrs (
@@ -135,24 +136,13 @@ let
         }
       ) active;
     in
-    lib.mkIf (active != { }) {
-      # Link each DESIRED as a `home.file` snapshot, readable as BASE next switch.
-      home.file = lib.mapAttrs' (_: e: lib.nameValuePair e.snapshotRel { source = e.desired; }) entries;
+    {
+      inherit format active entries;
+    }
+  ) formats;
 
-      home.activation.${format.optionName} = lib.hm.dag.entryAfter [ "writeBoundary" ] (
-        lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) entries)
-      );
-
-      assertions = configGraftLib.mkAssertions {
-        inherit
-          lib
-          pkgs
-          format
-          active
-          ;
-        parent = "home";
-      };
-    };
+  # Managed targets (relative to $HOME) across all formats, for the overlap guard.
+  managedTargets = lib.concatMap (x: lib.mapAttrsToList (_: entry: entry.target) x.active) byFormat;
 in
 {
   options.home = builtins.listToAttrs (
@@ -162,32 +152,44 @@ in
     }) formats
   );
 
-  config = lib.mkMerge (
-    (map managedConfig formats)
-    ++ [
-      {
-        # config-graft reconciles a mutable file in place; `home.file` symlinks an
-        # immutable store path. The same path can't be both, so reject the overlap.
-        assertions =
-          let
-            managedTargets = lib.concatMap (
-              format:
-              lib.mapAttrsToList (_: entry: entry.target) (
-                lib.filterAttrs (
-                  _: entry: entry.settings != { } || entry.source != null
-                ) config.home.${format.optionName}
-              )
-            ) formats;
-          in
-          map (path: {
-            assertion = !(config.home.file ? ${path});
-            message = ''
-              `home.file."${path}"` and a config-graft `managed<Format>` entry both
-              manage `${path}`. `home.file` creates an immutable store symlink, while
-              config-graft reconciles a mutable file in place; declare it in one.
-            '';
-          }) managedTargets;
-      }
-    ]
-  );
+  config = {
+    # Link each DESIRED as a `home.file` snapshot, readable as BASE next switch.
+    home.file = builtins.listToAttrs (
+      lib.concatMap (
+        x: lib.mapAttrsToList (_: e: lib.nameValuePair e.snapshotRel { source = e.desired; }) x.entries
+      ) byFormat
+    );
+
+    # One activation entry per format (a static key), defined only when it has entries.
+    home.activation = builtins.listToAttrs (
+      map (x: {
+        name = x.format.optionName;
+        value = lib.mkIf (x.active != { }) (
+          lib.hm.dag.entryAfter [ "writeBoundary" ] (
+            lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) x.entries)
+          )
+        );
+      }) byFormat
+    );
+
+    assertions =
+      lib.concatMap (
+        x:
+        configGraftLib.mkAssertions {
+          inherit lib pkgs;
+          inherit (x) format active;
+          parent = "home";
+        }
+      ) byFormat
+      # config-graft reconciles a mutable file in place; `home.file` symlinks an
+      # immutable store path. The same path can't be both, so reject the overlap.
+      ++ map (path: {
+        assertion = !(config.home.file ? ${path});
+        message = ''
+          `home.file."${path}"` and a config-graft `managed<Format>` entry both
+          manage `${path}`. `home.file` creates an immutable store symlink, while
+          config-graft reconciles a mutable file in place; declare it in one.
+        '';
+      }) managedTargets;
+  };
 }
