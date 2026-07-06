@@ -46,9 +46,9 @@ let
         inherit
           lib
           pkgs
-          defaultPackage
           format
           ;
+        defaultPackage = config.home.managed.package;
         targetOption = lib.mkOption {
           type = lib.types.str;
           example = homeTargetExample.${format.name};
@@ -89,7 +89,7 @@ let
         verboseEcho "Pruning against previous snapshot $_prev"
       fi
     ''
-    + configGraftLib.mkConfigGraftActivationScript {
+    + configGraftLib.mkEntryReconcileScript {
       inherit
         lib
         format
@@ -110,7 +110,7 @@ let
       entries = lib.mapAttrs (
         name: entry:
         let
-          snapshotRel = ".local/state/home-manager/managed-${format.name}/${name}.${format.fileExtension}";
+          snapshotRel = ".local/state/home-manager/managed-${format.name}/${configGraftLib.safeName name}";
           desired = configGraftLib.mkDesired {
             inherit
               lib
@@ -143,12 +143,24 @@ let
   managedTargets = lib.concatMap (x: lib.mapAttrsToList (_: entry: entry.target) x.active) byFormat;
 in
 {
-  options.home = builtins.listToAttrs (
-    map (format: {
-      name = format.optionName;
-      value = managedOption format;
-    }) formats
-  );
+  options.home =
+    builtins.listToAttrs (
+      map (format: {
+        name = format.optionName;
+        value = managedOption format;
+      }) formats
+    )
+    // {
+      managed.package = lib.mkOption {
+        type = lib.types.package;
+        default = defaultPackage;
+        defaultText = lib.literalExpression "config-graft.packages.\${system}.default";
+        description = ''
+          Default config-graft package for every `home.managed*` entry. Defaults to this
+          flake's own build; override a single entry with its `package` option.
+        '';
+      };
+    };
 
   config = {
     # Link each DESIRED as a `home.file` snapshot, readable as BASE next switch.

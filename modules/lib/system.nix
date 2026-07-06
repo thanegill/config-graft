@@ -46,9 +46,9 @@ let
         inherit
           lib
           pkgs
-          defaultPackage
           format
           ;
+        defaultPackage = config.environment.managed.package;
         targetOption = lib.mkOption {
           type = lib.types.str;
           example = systemTargetExample.${format.name};
@@ -81,7 +81,7 @@ let
     { format, active }:
     lib.mapAttrsToList (name: entry: {
       inherit format entry;
-      snapshotRel = "config-graft/managed-${format.name}/${name}.${format.fileExtension}";
+      snapshotRel = "config-graft/managed-${format.name}/${configGraftLib.safeName name}";
       desired = configGraftLib.mkDesired {
         inherit
           lib
@@ -117,7 +117,7 @@ let
         _prev="/run/current-system/${e.snapshotRel}"
         [[ -e "$_prev" ]] || _prev=""
       ''
-      + configGraftLib.mkConfigGraftActivationScript {
+      + configGraftLib.mkEntryReconcileScript {
         inherit lib;
         inherit (e) format entry desired;
         target = e.entry.target;
@@ -126,12 +126,24 @@ let
   );
 in
 {
-  options.environment = builtins.listToAttrs (
-    map (format: {
-      name = format.optionName;
-      value = managedOption format;
-    }) formats
-  );
+  options.environment =
+    builtins.listToAttrs (
+      map (format: {
+        name = format.optionName;
+        value = managedOption format;
+      }) formats
+    )
+    // {
+      managed.package = lib.mkOption {
+        type = lib.types.package;
+        default = defaultPackage;
+        defaultText = lib.literalExpression "config-graft.packages.\${system}.default";
+        description = ''
+          Default config-graft package for every `environment.managed*` entry. Defaults
+          to this flake's own build; override a single entry with its `package` option.
+        '';
+      };
+    };
 
   config = lib.mkIf (entries != [ ]) {
     # Embed each DESIRED into the toplevel closure at its snapshot path.

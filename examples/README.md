@@ -4,7 +4,9 @@ Each subdirectory is a self-contained flake wiring config-graft into one platfor
 
 - [`home-manager/flake.nix`](home-manager/flake.nix): standalone home-manager
   (`home.managed{Json,Yaml,...}`, targets relative to `$HOME`); one entry uses
-  `source` (a checked-in file) instead of inline `settings`.
+  `source` (a checked-in file) instead of inline `settings`. A second,
+  aarch64-darwin, configuration (`alice-darwin`) demonstrates per-user
+  `cfprefsdDomain` (reconciling a macOS preference domain through cfprefsd).
 - [`nixos/flake.nix`](nixos/flake.nix): a NixOS host (`environment.managed*`,
   absolute targets, reconciled during system activation); one entry overrides
   `format` with a validating `pkgs.formats` generator.
@@ -18,8 +20,15 @@ to apply and nothing to put on `PATH`.
 ## Trying one
 
 The examples pull config-graft from its published source
-(`config-graft.url = "github:thanegill/config-graft"`). To try one against a local
-checkout instead, override the input:
+(`config-graft.url = "github:thanegill/config-graft"`). That repository is
+**private**, so an unauthenticated `nix` cannot fetch it (a bare
+`nix eval ./examples/...` 404s on the GitHub API). To evaluate against the
+published flake you need repo access plus a nix token
+(`--option access-tokens github.com=...`, or `access-tokens` in `nix.conf`), or a
+`git+ssh://` input URL. Overriding the input with a local checkout (below) sidesteps
+this entirely.
+
+To try one against a local checkout, override the input:
 
 ```sh
 nix eval ./examples/home-manager#homeConfigurations.alice.activationPackage.drvPath \
@@ -30,6 +39,7 @@ Evaluate a build without applying it, e.g.:
 
 ```sh
 nix eval ./examples/home-manager#homeConfigurations.alice.activationPackage.drvPath
+nix eval ./examples/home-manager#homeConfigurations.alice-darwin.activationPackage.drvPath
 nix eval ./examples/nixos#nixosConfigurations.example.config.system.build.toplevel.drvPath
 nix eval ./examples/nix-darwin#darwinConfigurations.example.config.system.build.toplevel.drvPath
 ```

@@ -59,5 +59,37 @@
           }
         ];
       };
+
+      # Activate with: home-manager switch --flake .#alice-darwin
+      #
+      # macOS-only: `cfprefsdDomain` reconciles a per-user preference domain through
+      # cfprefsd (defaults export -> config-graft -> defaults import) instead of
+      # editing the plist file in place, so a running app's cached prefs adopt the
+      # merged result. It asserts a Darwin host, so it lives in its own aarch64-darwin
+      # configuration rather than the linux `alice` above.
+      homeConfigurations."alice-darwin" = home-manager.lib.homeManagerConfiguration {
+        pkgs = import nixpkgs { system = "aarch64-darwin"; };
+
+        modules = [
+          config-graft.homeManagerModules.default
+
+          # --- minimal home stub so the example evaluates; replace with yours ---
+          {
+            home.username = "alice";
+            home.homeDirectory = "/Users/alice";
+            home.stateVersion = "24.05";
+          }
+
+          {
+            home.managedPlist."Library/Preferences/com.example.app.plist" = {
+              cfprefsdDomain = "com.example.app";
+              settings = {
+                ShowStatusBar = true;
+                FontSize = 13;
+              };
+            };
+          }
+        ];
+      };
     };
 }
