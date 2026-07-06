@@ -47,8 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   optional `overlays.default`. Each entry reconciles `settings` (or a pre-built
   `source` file) into the live file on activation, pruning keys dropped from Nix
   against the previous generation. Freeform entries take a `format` override; plist
-  entries take `cfprefsdDomain` (macOS). Runs config-graft by store path; see
-  `examples/` for a full flake per platform.
+  entries take `cfprefsdDomain` (macOS). Runs config-graft by store path, defaulting
+  to this flake's own build; override it per entry or module-wide via
+  `managed.package`. See `examples/` for a full flake per platform.
 
 ### Changed
 

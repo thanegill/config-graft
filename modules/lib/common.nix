@@ -4,7 +4,16 @@
 # store path, the reconcile script, and the build-time assertions. Every format is
 # uniform, serialized by its `pkgs.formats.<name>` generator (`format.name` is the
 # format name, e.g. "json"; the entry's `format` option is that generator).
+let
+  # An entry's attribute name may be a path (e.g. ".config/app/config.json"). Turn it
+  # into a flat, filesystem-safe id for snapshot and DESIRED filenames: no "/" (so no
+  # nested dirs or a leading "//"), and no doubled extension since the name already
+  # ends in one.
+  safeName = builtins.replaceStrings [ "/" ] [ "-" ];
+in
 {
+  inherit safeName;
+
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
   # generated from `settings` by the entry's `pkgs.formats` generator.
   mkDesired =
@@ -18,7 +27,7 @@
     if entry.source != null then
       entry.source
     else
-      entry.format.generate "managed-${format.name}-${name}.${format.fileExtension}" entry.settings;
+      entry.format.generate "managed-${format.name}-${safeName name}" entry.settings;
 
   # The `attrsOf submodule` type for one format's entries. Every option is the same
   # on every platform except `target` (relative vs absolute) and the `cfprefsdDomain`
@@ -47,9 +56,10 @@
               default = defaultPackage;
               defaultText = literalExpression "config-graft.packages.\${system}.default";
               description = ''
-                The config-graft package used to reconcile this entry. Defaults to
-                this flake's own build, so no overlay or `PATH` entry is needed,
-                since the activation script calls it by store path.
+                The config-graft package used to reconcile this entry. Defaults to the
+                module-level `managed.package` (this flake's own build), which the
+                activation script calls by store path, so no overlay or `PATH` entry is
+                needed.
               '';
             };
 
@@ -108,7 +118,7 @@
   # activation shell, shared with every other module's activation code, so bare
   # names like `prev`/`target`/`domain` could clobber or be clobbered by another
   # module's variables. (The system side runs its own script, where it's harmless.)
-  mkConfigGraftActivationScript =
+  mkEntryReconcileScript =
     {
       lib,
       format,
