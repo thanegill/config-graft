@@ -20,9 +20,7 @@
 }:
 let
   configGraftLib = import ./lib;
-
-  # `configGraftLib.formats` is keyed by name; add the key back as `name`.
-  formats = lib.mapAttrsToList (name: spec: spec // { inherit name; }) configGraftLib.formats;
+  inherit (configGraftLib) formats;
 
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 

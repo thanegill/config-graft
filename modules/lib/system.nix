@@ -14,11 +14,7 @@
 # a build-time assertion requires a Darwin host.
 let
   configGraftLib = import ./.;
-
-  # `configGraftLib.formats` is keyed by name; add the key back as `name`.
-  formats = builtins.attrValues (
-    builtins.mapAttrs (name: spec: spec // { inherit name; }) configGraftLib.formats
-  );
+  inherit (configGraftLib) formats;
 
   systemTargetExample = {
     json = "/etc/app/config.json";

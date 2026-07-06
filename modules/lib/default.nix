@@ -16,5 +16,9 @@
 # not forced while keys are determined.
 (import ./common.nix)
 // {
-  formats = import ./formats.nix;
+  # `formats.nix` is keyed by format name; re-export as a list of descriptors that
+  # carry the name (as `name`), so consumers iterate without re-adding it.
+  formats = builtins.attrValues (
+    builtins.mapAttrs (name: spec: spec // { inherit name; }) (import ./formats.nix)
+  );
 }
