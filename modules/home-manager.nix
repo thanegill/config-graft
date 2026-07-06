@@ -70,7 +70,12 @@ let
   # All activation is handled here (unlike the system modules, which hand a text
   # blob to their platform's activation phase).
   mkScript =
-    format: snapshotRel: entry: desired:
+    {
+      format,
+      snapshotRel,
+      entry,
+      desired,
+    }:
     let
       target = "${config.home.homeDirectory}/${entry.target}";
     in
@@ -83,7 +88,15 @@ let
         verboseEcho "Pruning against previous snapshot $_prev"
       fi
     ''
-    + configGraftLib.mkReconcileScript lib format entry desired target;
+    + configGraftLib.mkReconcileScript {
+      inherit
+        lib
+        format
+        entry
+        desired
+        target
+        ;
+    };
 
   managedConfig =
     format:
@@ -96,11 +109,26 @@ let
         name: entry:
         let
           snapshotRel = ".local/state/home-manager/managed-${format.format}/${name}.${format.fileExtension}";
-          desired = configGraftLib.mkDesired lib pkgs format name entry;
+          desired = configGraftLib.mkDesired {
+            inherit
+              lib
+              pkgs
+              format
+              name
+              entry
+              ;
+          };
         in
         {
           inherit snapshotRel desired;
-          script = mkScript format snapshotRel entry desired;
+          script = mkScript {
+            inherit
+              format
+              snapshotRel
+              entry
+              desired
+              ;
+          };
         }
       ) active;
     in

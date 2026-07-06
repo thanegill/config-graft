@@ -4,25 +4,19 @@
 # reconcile script, and the build-time assertions.
 let
   inherit (import ./formats.nix) isFreeform;
-
-  # macOS preference-domain option (plist only). Reconciling through `cfprefsd`
-  # (`defaults`/`plutil`) is macOS-only; each platform supplies its own
-  # `description`, and `mkAssertions` guards a Darwin host when it's set.
-  cfprefsdDomainOption =
-    lib: description:
-    lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "com.example.app";
-      inherit description;
-    };
 in
 {
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
   # generated from `settings` (a `pkgs.formats` generator for freeform formats,
   # `lib.generators.toPlist` for plist).
   mkDesired =
-    lib: pkgs: format: name: entry:
+    {
+      lib,
+      pkgs,
+      format,
+      name,
+      entry,
+    }:
     if entry.source != null then
       entry.source
     else if isFreeform format then
@@ -97,7 +91,14 @@ in
             };
           }
           // lib.optionalAttrs (format.kind == "plist") {
-            cfprefsdDomain = cfprefsdDomainOption lib cfprefsdDescription;
+            # `defaults`/`plutil`/`cfprefsd` are macOS-only; `mkAssertions` guards a
+            # Darwin host when this is set.
+            cfprefsdDomain = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "com.example.app";
+              description = cfprefsdDescription;
+            };
           };
 
           config.target = lib.mkDefault name;
@@ -110,7 +111,13 @@ in
   # context, and the system module defines pass-through shims. The caller sets
   # `_prev` (the BASE snapshot path) beforehand and passes the resolved `target`.
   mkReconcileScript =
-    lib: format: entry: desired: target:
+    {
+      lib,
+      format,
+      entry,
+      desired,
+      target,
+    }:
     if format.kind == "plist" && entry.cfprefsdDomain != null then
       ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}

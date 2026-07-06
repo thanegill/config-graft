@@ -15,6 +15,6 @@ import ./lib/system.nix {
   inherit config lib pkgs;
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   activationWiring = script: {
-    system.activationScripts.postActivation.text = lib.mkAfter "${script}";
+    postActivation.text = lib.mkAfter "${script}";
   };
 }

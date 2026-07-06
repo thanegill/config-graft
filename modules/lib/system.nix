@@ -69,7 +69,7 @@ let
     };
 
   # The active entries of every format, flattened, each carrying its snapshot path
-  # and DESIRED. Values only -- never used to build config *keys*.
+  # and DESIRED. Values only; never used to build config *keys*.
   activeByFormat = map (format: {
     inherit format;
     active = lib.filterAttrs (
@@ -82,7 +82,15 @@ let
     lib.mapAttrsToList (name: entry: {
       inherit format entry;
       snapshotRel = "config-graft/managed-${format.format}/${name}.${format.fileExtension}";
-      desired = configGraftLib.mkDesired lib pkgs format name entry;
+      desired = configGraftLib.mkDesired {
+        inherit
+          lib
+          pkgs
+          format
+          name
+          entry
+          ;
+      };
     }) active
   ) activeByFormat;
 
@@ -93,6 +101,9 @@ let
   # activation's final symlink swap; empty on the first switch -> no pruning.
   activationScript = pkgs.writeShellScript "config-graft-activation" (
     ''
+      # The reconcile body (shared with home-manager) calls `run` and `_i`.
+      # home-manager defines them in its activation context; here there are none, so
+      # shim them: `run` executes its arguments, `_i` prints an info line.
       run() { "$@"; }
       _i() {
         _fmt="$1"
@@ -106,7 +117,11 @@ let
         _prev="/run/current-system/${e.snapshotRel}"
         [[ -e "$_prev" ]] || _prev=""
       ''
-      + configGraftLib.mkReconcileScript lib e.format e.entry e.desired e.entry.target
+      + configGraftLib.mkReconcileScript {
+        inherit lib;
+        inherit (e) format entry desired;
+        target = e.entry.target;
+      }
     ) entries
   );
 in
@@ -118,30 +133,27 @@ in
     }) formats
   );
 
-  config = lib.mkIf (entries != [ ]) (
-    lib.mkMerge [
-      # Embed each DESIRED into the toplevel closure at its snapshot path.
-      {
-        system.systemBuilderCommands = lib.concatMapStrings (e: ''
-          mkdir -p "$(dirname "$out/${e.snapshotRel}")"
-          ln -s ${e.desired} $out/${e.snapshotRel}
-        '') entries;
+  config = lib.mkIf (entries != [ ]) {
+    # Embed each DESIRED into the toplevel closure at its snapshot path.
+    system.systemBuilderCommands = lib.concatMapStrings (e: ''
+      mkdir -p "$(dirname "$out/${e.snapshotRel}")"
+      ln -s ${e.desired} $out/${e.snapshotRel}
+    '') entries;
+
+    # Each wrapper places the activation script its own way (see `activationWiring`).
+    system.activationScripts = activationWiring activationScript;
+
+    assertions = lib.concatMap (
+      { format, active }:
+      configGraftLib.mkAssertions {
+        inherit
+          lib
+          pkgs
+          format
+          active
+          ;
+        parent = "environment";
       }
-      (activationWiring activationScript)
-      {
-        assertions = lib.concatMap (
-          { format, active }:
-          configGraftLib.mkAssertions {
-            inherit
-              lib
-              pkgs
-              format
-              active
-              ;
-            parent = "environment";
-          }
-        ) activeByFormat;
-      }
-    ]
-  );
+    ) activeByFormat;
+  };
 }
