@@ -88,7 +88,7 @@ let
         verboseEcho "Pruning against previous snapshot $_prev"
       fi
     ''
-    + configGraftLib.mkReconcileScript {
+    + configGraftLib.mkConfigGraftActivationScript {
       inherit
         lib
         format

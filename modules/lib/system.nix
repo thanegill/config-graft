@@ -117,7 +117,7 @@ let
         _prev="/run/current-system/${e.snapshotRel}"
         [[ -e "$_prev" ]] || _prev=""
       ''
-      + configGraftLib.mkReconcileScript {
+      + configGraftLib.mkConfigGraftActivationScript {
         inherit lib;
         inherit (e) format entry desired;
         target = e.entry.target;

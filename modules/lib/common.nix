@@ -115,7 +115,7 @@ in
   # activation shell, shared with every other module's activation code, so bare
   # names like `prev`/`target`/`domain` could clobber or be clobbered by another
   # module's variables. (The system side runs its own script, where it's harmless.)
-  mkReconcileScript =
+  mkConfigGraftActivationScript =
     {
       lib,
       format,
