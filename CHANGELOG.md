@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contradictory reorder *inside* a matched record (one of its nested arrays) is
   surfaced too, its warning locating it with a `[field=value]` element selector on
   the array key — `servers[name="web"].tags` (`servers[name="web"]:tags` for plist).
+- **Nix flake modules** for declarative config management on NixOS, nix-darwin,
+  and home-manager: `homeManagerModules.default` (`home.managed*`),
+  `nixosModules.default` / `darwinModules.default` (`environment.managed*`), and an
+  optional `overlays.default`. Each entry reconciles `settings` (or a pre-built
+  `source` file) into the live file on activation, pruning keys dropped from Nix
+  against the previous generation. Freeform entries take a `format` override; plist
+  entries take `cfprefsdDomain` (macOS). Runs config-graft by store path; see
+  `examples/` for a full flake per platform.
 
 ### Changed
 

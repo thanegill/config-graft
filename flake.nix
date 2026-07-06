@@ -25,6 +25,34 @@
         };
       });
 
+      # Optional: adds `config-graft` to a consumer's package set, e.g. to get the
+      # CLI interactively. The modules do NOT need it -- they run this flake's own
+      # build directly (see below).
+      overlays.default = final: _prev: {
+        config-graft = self.packages.${final.stdenv.hostPlatform.system}.default;
+      };
+
+      # Declarative wrappers exposing `managed{Json,Plist,Yaml,Toml}` -- one per
+      # format config-graft reconciles. `home.*` for home-manager,
+      # `environment.*` for NixOS / nix-darwin. The three modules share one
+      # assembly (modules/lib). Each is applied with `self` so entries
+      # default to this flake's build (the activation script calls it by store
+      # path) -- no overlay or `PATH` entry needed; override per entry via
+      # `package`. Each is exposed under both `default` and the named
+      # `config-graft` attribute.
+      homeManagerModules = {
+        config-graft = import ./modules/home-manager.nix { inherit self; };
+        default = import ./modules/home-manager.nix { inherit self; };
+      };
+      nixosModules = {
+        config-graft = import ./modules/nixos.nix { inherit self; };
+        default = import ./modules/nixos.nix { inherit self; };
+      };
+      darwinModules = {
+        config-graft = import ./modules/darwin.nix { inherit self; };
+        default = import ./modules/darwin.nix { inherit self; };
+      };
+
       # All the tools needed to build, test, lint, and format the crate.
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {

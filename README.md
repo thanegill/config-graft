@@ -122,6 +122,90 @@ TOML notes:
 - TOML date-times round-trip losslessly as atomic leaves; TOML has no `null`.
 - `--indent` is JSON-only; passing it with TOML is an error.
 
+## Nix modules
+
+The Nix flake ships declarative wrappers for managing config files on NixOS,
+nix-darwin, and home-manager. Each **format** gets a `managed<Format>` option
+whose entries reconcile their `settings` into a live file on every activation,
+keeping the app's own keys and pruning keys you drop, with the previous
+generation as the BASE snapshot.
+
+**Start with [`examples/`](examples)**, which has a complete, self-contained
+`flake.nix` for each platform (home-manager, NixOS, nix-darwin).
+
+The flake exposes:
+
+- `homeManagerModules.default`: `home.managed{Json,Plist,Yaml,Toml}`, targets
+  relative to `$HOME`.
+- `nixosModules.default` / `darwinModules.default`: `environment.managed*`,
+  absolute targets, reconciled during system activation.
+- `overlays.default`: optional. It adds the `config-graft` CLI to `pkgs`; the
+  modules don't need it, since they run the flake's own build by store path.
+
+Each entry takes `settings` (freeform data) or a pre-built `source` file (any
+generator, template, or derivation); an entry with neither is inert. Freeform
+formats accept a `format` override, any `pkgs.formats`-style generator, for a
+validating or specially configured type. `package` overrides the config-graft
+build for one entry. Plist entries accept `cfprefsdDomain` to reconcile through
+`cfprefsd` (`defaults`/`plutil`) instead of editing the file; that path is macOS
+only (asserted at build time), per-user under home-manager and system/global
+under nix-darwin.
+
+A home-manager `flake.nix` sketch:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    config-graft = {
+      url = "github:thanegill/config-graft";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs =
+    {
+      nixpkgs,
+      home-manager,
+      config-graft,
+      ...
+    }:
+    {
+      homeConfigurations."me" = home-manager.lib.homeManagerConfiguration {
+        pkgs = import nixpkgs { system = "x86_64-linux"; };
+        modules = [
+          config-graft.homeManagerModules.default
+
+          # your home identity
+          {
+            home.username = "me";
+            home.homeDirectory = "/home/me";
+            home.stateVersion = "24.05";
+          }
+
+          # Graft a few keys into a JSON file the app rewrites; the attribute name
+          # is the target path, relative to $HOME.
+          {
+            home.managedJson.".config/app/config.json".settings = {
+              theme = "dark";
+              editor.fontSize = 14;
+            };
+          }
+
+          # comments in the live file are preserved
+          {
+            home.managedYaml.".config/tool/config.yaml".settings.plugins = [ "git" ];
+          }
+        ];
+      };
+    };
+}
+```
+
 ## Develop
 
 All tooling comes from the flake:

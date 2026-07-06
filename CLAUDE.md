@@ -33,6 +33,43 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   (saphyr `MarkedYaml`); TOML mutates `toml_edit`'s format-preserving `DocumentMut`.
 - `src/error.rs` — typed `Error` (format-specific) + `Outcome`; `main` maps to
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
+- `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
+  `nixos`/`darwinModules` + `overlays.default`). **Three separate module files**,
+  one per platform: `home-manager.nix` (`home.managed*`), `nixos.nix` and
+  `darwin.nix` (`environment.managed*`). There is **no generic engine and no
+  per-platform dispatch record**: each module writes its own `options`/`config`
+  linearly (loop the `formats`, declare the `attrsOf` submodule, `mkIf (active !=
+  {})` the snapshot + activation + assertions) and pulls the format-agnostic pieces
+  from `modules/lib/`. `home-manager.nix` is fully linear (its activation script
+  inline). `nixos.nix`/`darwin.nix` are thin wrappers over `lib/system.nix` (the
+  shared linear system module), passing only their `activationWiring` (NixOS: a
+  named `system.activationScripts.<name>`; darwin: appended to `postActivation`).
+  `lib/` holds `formats.nix` (the static per-format descriptors), `common.nix`
+  (`entryType` for the entry submodule, `mkDesired` for the DESIRED store path,
+  `mkAssertions`; re-exported as `./lib` via `default.nix`), `system.nix`, and
+  `cfprefsd.nix` (the `cfprefsdDomain` option, used by `common.nix`). Each entry's
+  DESIRED comes from `settings` (a `pkgs.formats` generator, overridable per entry
+  via `format`), or a pre-built `source` file; the two are mutually exclusive
+  (asserted); `target` defaults to the attribute name (entries keyed by path);
+  `package` defaults to the flake's own build (threaded in via `self`), so no
+  overlay is needed. `cfprefsdDomain` (plist only) is offered on both home and
+  system, guarded by a build-time assertion (`mkAssertions`) that it's only set on a
+  Darwin host. Each module also asserts a managed target isn't also declared in
+  `home.file` / `environment.etc` (those create an immutable store symlink;
+  config-graft edits a mutable file in place, so a path can't be both). The
+  recursion trap the module system punishes via
+  `_module.freeformType` is avoided by construction: (1) the module is chosen by the
+  *file*, never `pkgs.stdenv`, so config *keys* never depend on `pkgs`; (2) every
+  config fragment uses a **static top-level key** whose value aggregates over
+  `active` (e.g. `home.file = mapAttrs' … entries`), so the `mkIf` body shape is
+  fixed and `active` (hence `config`) isn't forced while keys are determined — never
+  `mkMerge (mapAttrsToList … active)` at the top. Pruning uses the previous
+  generation as BASE: HM via `$oldGenPath/home-files/<snap>`, system via
+  `/run/current-system/<snap>` embedded with `system.systemBuilderCommands`.
+  `examples/{home-manager,nixos,nix-darwin}/` are self-contained consumer flakes
+  (input `github:thanegill/config-graft`; override with `--override-input
+  config-graft path:.` to test a local checkout) that each evaluate to a full
+  `toplevel`.
 
 ## Gotchas
 
