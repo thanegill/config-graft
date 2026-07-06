@@ -2,14 +2,14 @@
 
 Each subdirectory is a self-contained flake wiring config-graft into one platform:
 
-- [`home-manager/`](home-manager) — standalone home-manager
+- [`home-manager/flake.nix`](home-manager/flake.nix): standalone home-manager
   (`home.managed{Json,Yaml,...}`, targets relative to `$HOME`); one entry uses
   `source` (a checked-in file) instead of inline `settings`.
-- [`nixos/`](nixos) — a NixOS host (`environment.managed*`, absolute targets,
-  reconciled during system activation); one entry overrides `format` with a
-  validating `pkgs.formats` generator.
-- [`nix-darwin/`](nix-darwin) — a nix-darwin host (same `environment.managed*`,
-  applied in the `postActivation` phase).
+- [`nixos/flake.nix`](nixos/flake.nix): a NixOS host (`environment.managed*`,
+  absolute targets, reconciled during system activation); one entry overrides
+  `format` with a validating `pkgs.formats` generator.
+- [`nix-darwin/flake.nix`](nix-darwin/flake.nix): a nix-darwin host (same
+  `environment.managed*`, applied in the `postActivation` phase).
 
 Each example just pulls in the wrapper for its platform. The modules run
 config-graft from this flake's own build (by store path), so there's no overlay
