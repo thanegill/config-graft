@@ -159,5 +159,32 @@ in
     }) configGraftLib.formats
   );
 
-  config = lib.mkMerge (map managedConfig configGraftLib.formats);
+  config = lib.mkMerge (
+    (map managedConfig configGraftLib.formats)
+    ++ [
+      {
+        # config-graft reconciles a mutable file in place; `home.file` symlinks an
+        # immutable store path. The same path can't be both, so reject the overlap.
+        assertions =
+          let
+            managedTargets = lib.concatMap (
+              format:
+              lib.mapAttrsToList (_: entry: entry.target) (
+                lib.filterAttrs (
+                  _: entry: entry.settings != { } || entry.source != null
+                ) config.home.${format.optionName}
+              )
+            ) configGraftLib.formats;
+          in
+          map (path: {
+            assertion = !(config.home.file ? ${path});
+            message = ''
+              `home.file."${path}"` and a config-graft `managed<Format>` entry both
+              manage `${path}`. `home.file` creates an immutable store symlink, while
+              config-graft reconciles a mutable file in place; declare it in one.
+            '';
+          }) managedTargets;
+      }
+    ]
+  );
 }

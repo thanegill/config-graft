@@ -143,17 +143,33 @@ in
     # Each wrapper places the activation script its own way (see `activationWiring`).
     system.activationScripts = activationWiring activationScript;
 
-    assertions = lib.concatMap (
-      { format, active }:
-      configGraftLib.mkAssertions {
-        inherit
-          lib
-          pkgs
-          format
-          active
-          ;
-        parent = "environment";
-      }
-    ) activeByFormat;
+    assertions =
+      lib.concatMap (
+        { format, active }:
+        configGraftLib.mkAssertions {
+          inherit
+            lib
+            pkgs
+            format
+            active
+            ;
+          parent = "environment";
+        }
+      ) activeByFormat
+      ++ (
+        # config-graft reconciles a mutable file in place; `environment.etc` symlinks
+        # an immutable store path into /etc. Reject a target that is also an etc file.
+        let
+          etcTargets = map (e: "/etc/${e.target}") (lib.attrValues config.environment.etc);
+        in
+        map (e: {
+          assertion = !(lib.elem e.entry.target etcTargets);
+          message = ''
+            `environment.etc` and a config-graft `managed<Format>` entry both manage
+            `${e.entry.target}`. `environment.etc` creates an immutable store symlink,
+            while config-graft reconciles a mutable file in place; declare it in one.
+          '';
+        }) entries
+      );
   };
 }

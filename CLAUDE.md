@@ -54,7 +54,10 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   `package` defaults to the flake's own build (threaded in via `self`), so no
   overlay is needed. `cfprefsdDomain` (plist only) is offered on both home and
   system, guarded by a build-time assertion (`mkAssertions`) that it's only set on a
-  Darwin host. The recursion trap the module system punishes via
+  Darwin host. Each module also asserts a managed target isn't also declared in
+  `home.file` / `environment.etc` (those create an immutable store symlink;
+  config-graft edits a mutable file in place, so a path can't be both). The
+  recursion trap the module system punishes via
   `_module.freeformType` is avoided by construction: (1) the module is chosen by the
   *file*, never `pkgs.stdenv`, so config *keys* never depend on `pkgs`; (2) every
   config fragment uses a **static top-level key** whose value aggregates over
