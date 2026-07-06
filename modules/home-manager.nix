@@ -21,6 +21,9 @@
 let
   configGraftLib = import ./lib;
 
+  # `configGraftLib.formats` is keyed by name; add the key back as `name`.
+  formats = lib.mapAttrsToList (name: spec: spec // { inherit name; }) configGraftLib.formats;
+
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
   homeTargetExample = {
@@ -35,7 +38,7 @@ let
     lib.mkOption {
       default = { };
       description = ''
-        ${format.format} configuration files that an application owns and writes to, but
+        ${format.name} configuration files that an application owns and writes to, but
         which home-manager should partially manage. Each entry deep-merges its
         {option}`settings` into {option}`target` during activation (via
         {command}`config-graft`), keeping keys the app wrote that aren't managed here
@@ -50,8 +53,8 @@ let
           ;
         targetOption = lib.mkOption {
           type = lib.types.str;
-          example = homeTargetExample.${format.format};
-          description = "Path of the managed ${format.format} file, relative to the home directory.";
+          example = homeTargetExample.${format.name};
+          description = "Path of the managed ${format.name} file, relative to the home directory.";
         };
         cfprefsdDescription = ''
           macOS preference domain backing this plist (e.g. `com.example.app` for
@@ -108,7 +111,7 @@ let
       entries = lib.mapAttrs (
         name: entry:
         let
-          snapshotRel = ".local/state/home-manager/managed-${format.format}/${name}.${format.fileExtension}";
+          snapshotRel = ".local/state/home-manager/managed-${format.name}/${name}.${format.fileExtension}";
           desired = configGraftLib.mkDesired {
             inherit
               lib
@@ -156,11 +159,11 @@ in
     map (format: {
       name = format.optionName;
       value = managedOption format;
-    }) configGraftLib.formats
+    }) formats
   );
 
   config = lib.mkMerge (
-    (map managedConfig configGraftLib.formats)
+    (map managedConfig formats)
     ++ [
       {
         # config-graft reconciles a mutable file in place; `home.file` symlinks an
@@ -174,7 +177,7 @@ in
                   _: entry: entry.settings != { } || entry.source != null
                 ) config.home.${format.optionName}
               )
-            ) configGraftLib.formats;
+            ) formats;
           in
           map (path: {
             assertion = !(config.home.file ? ${path});

@@ -14,7 +14,11 @@
 # a build-time assertion requires a Darwin host.
 let
   configGraftLib = import ./.;
-  inherit (configGraftLib) formats;
+
+  # `configGraftLib.formats` is keyed by name; add the key back as `name`.
+  formats = builtins.attrValues (
+    builtins.mapAttrs (name: spec: spec // { inherit name; }) configGraftLib.formats
+  );
 
   systemTargetExample = {
     json = "/etc/app/config.json";
@@ -36,7 +40,7 @@ let
     lib.mkOption {
       default = { };
       description = ''
-        System-level ${format.format} configuration files that an application owns and
+        System-level ${format.name} configuration files that an application owns and
         writes to, but which should be partially managed declaratively. Each entry
         deep-merges its {option}`settings` into the absolute {option}`target` during
         system activation (via {command}`config-graft`), keeping keys the app wrote
@@ -51,8 +55,8 @@ let
           ;
         targetOption = lib.mkOption {
           type = lib.types.str;
-          example = systemTargetExample.${format.format};
-          description = "Absolute path of the managed ${format.format} file. Defaults to the attribute name.";
+          example = systemTargetExample.${format.name};
+          description = "Absolute path of the managed ${format.name} file. Defaults to the attribute name.";
         };
         cfprefsdDescription = ''
           macOS preference domain backing this system plist (e.g. `com.example.app`
@@ -81,7 +85,7 @@ let
     { format, active }:
     lib.mapAttrsToList (name: entry: {
       inherit format entry;
-      snapshotRel = "config-graft/managed-${format.format}/${name}.${format.fileExtension}";
+      snapshotRel = "config-graft/managed-${format.name}/${name}.${format.fileExtension}";
       desired = configGraftLib.mkDesired {
         inherit
           lib

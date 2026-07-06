@@ -2,7 +2,7 @@
 # generic engine and no per-platform dispatch record: each module writes its own
 # `options`/`config` linearly and pulls the format-agnostic pieces from here.
 #
-# - `formats.nix`   per-format descriptors (JSON / YAML / TOML / plist)
+# - `formats.nix`   per-format descriptors, keyed by name (JSON / YAML / TOML / plist)
 # - `common.nix`    the entry submodule type, DESIRED store path, reconcile script,
 #                   and assertions (re-exported here; the modules import `./lib`)
 # - `system.nix`    the linear system module (imports `./lib`; nixos.nix /
@@ -16,5 +16,5 @@
 # not forced while keys are determined.
 (import ./common.nix)
 // {
-  inherit (import ./formats.nix) formats;
+  formats = import ./formats.nix;
 }

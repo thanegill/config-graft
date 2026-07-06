@@ -1,14 +1,12 @@
-# Format-agnostic pieces shared by the three managed-file modules. Plain helpers
-# with no per-platform dispatch: each module writes its own `options`/`config`
-# linearly and calls these for the entry submodule, the DESIRED store path, the
-# reconcile script, and the build-time assertions.
-let
-  inherit (import ./formats.nix) isFreeform;
-in
+# Format-agnostic pieces shared by the three managed-file modules. These are plain
+# functions with no per-platform dispatch: each module writes its own
+# `options`/`config` linearly and calls these for the entry submodule, the DESIRED
+# store path, the reconcile script, and the build-time assertions. Every format is
+# uniform, serialized by its `pkgs.formats.<name>` generator (`format.name` is the
+# format name, e.g. "json"; the entry's `format` option is that generator).
 {
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
-  # generated from `settings` (a `pkgs.formats` generator for freeform formats,
-  # `lib.generators.toPlist` for plist).
+  # generated from `settings` by the entry's `pkgs.formats` generator.
   mkDesired =
     {
       lib,
@@ -19,12 +17,8 @@ in
     }:
     if entry.source != null then
       entry.source
-    else if isFreeform format then
-      entry.format.generate "managed-${format.format}-${name}.${format.fileExtension}" entry.settings
     else
-      pkgs.writeText "managed-plist-${name}.plist" (
-        lib.generators.toPlist { escape = true; } entry.settings
-      );
+      entry.format.generate "managed-${format.name}-${name}.${format.fileExtension}" entry.settings;
 
   # The `attrsOf submodule` type for one format's entries. Every option is the same
   # on every platform except `target` (relative vs absolute) and the `cfprefsdDomain`
@@ -60,10 +54,10 @@ in
             };
 
             settings = mkOption {
-              type = if isFreeform format then config.format.type else (pkgs.formats.json { }).type;
+              type = config.format.type;
               default = { };
               example = format.settingsExample;
-              description = "Freeform ${format.format} data reconciled into {option}`target`. Empty disables the entry.";
+              description = "Freeform ${format.name} data reconciled into {option}`target`. Empty disables the entry.";
             };
 
             source = mkOption {
@@ -71,26 +65,25 @@ in
               default = null;
               example = literalExpression "./managed.${format.fileExtension}";
               description = ''
-                A pre-built ${format.format} file to reconcile into {option}`target`,
+                A pre-built ${format.name} file to reconcile into {option}`target`,
                 as an alternative to {option}`settings`, for a DESIRED built some
                 other way (another generator, a rendered template, a checked-in file,
                 a derivation). Mutually exclusive with {option}`settings`; setting
                 either one makes the entry active.
               '';
             };
-          }
-          // lib.optionalAttrs (isFreeform format) {
+
             format = mkOption {
               type = types.raw;
-              default = pkgs.formats.${format.format} { };
-              defaultText = literalExpression "pkgs.formats.${format.format} { }";
+              default = pkgs.formats.${format.name} { };
+              defaultText = literalExpression "pkgs.formats.${format.name} { }";
               description = ''
                 A `pkgs.formats`-style generator (providing `type` and `generate`)
                 used to build {option}`settings`. Override to use a validating format.
               '';
             };
           }
-          // lib.optionalAttrs (format.kind == "plist") {
+          // lib.optionalAttrs (format.name == "plist") {
             # `defaults`/`plutil`/`cfprefsd` are macOS-only; `mkAssertions` guards a
             # Darwin host when this is set.
             cfprefsdDomain = mkOption {
@@ -123,7 +116,7 @@ in
       desired,
       target,
     }:
-    if format.kind == "plist" && entry.cfprefsdDomain != null then
+    if format.name == "plist" && entry.cfprefsdDomain != null then
       ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
         _i "Reconciling managed plist domain %s" "$_domain"
@@ -144,8 +137,8 @@ in
     else
       ''
         _target=${lib.escapeShellArg target}
-        _i "Reconciling managed ${format.format} file %s" "$_target"
-        run ${lib.getExe entry.package} --format ${format.format} "$_target" ${desired} "$_prev"
+        _i "Reconciling managed ${format.name} file %s" "$_target"
+        run ${lib.getExe entry.package} --format ${format.name} "$_target" ${desired} "$_prev"
       '';
 
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
@@ -158,7 +151,7 @@ in
       format,
       active,
     }:
-    lib.optionals (format.kind == "plist") (
+    lib.optionals (format.name == "plist") (
       lib.mapAttrsToList (name: entry: {
         assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
         message = ''

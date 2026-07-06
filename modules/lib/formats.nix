@@ -1,52 +1,41 @@
-# Static, pkgs-free per-format descriptors. `kind` picks freeform (a
-# `pkgs.formats` generator) vs. plist (`lib.generators.toPlist`); `isFreeform` is
-# the predicate `build` and the platforms branch on.
+# Per-format descriptors, keyed by the format name. The key is also the
+# `pkgs.formats.<name>` generator and the `--format` value config-graft takes, so
+# every format is uniform: `settings` is serialized by a `pkgs.formats` generator
+# (plist included, via `pkgs.formats.plist`). Consumers add the key back as `name`.
 {
-  formats = [
-    {
-      format = "json";
-      fileExtension = "json";
-      optionName = "managedJson";
-      kind = "freeform";
-      settingsExample = {
-        theme = "dark";
-        editor.fontSize = 14;
-      };
-    }
-    {
-      format = "yaml";
-      fileExtension = "yaml";
-      optionName = "managedYaml";
-      kind = "freeform";
-      settingsExample = {
-        theme = "dark";
-        plugins = [ "git" ];
-      };
-    }
-    {
-      format = "toml";
-      fileExtension = "toml";
-      optionName = "managedToml";
-      kind = "freeform";
-      settingsExample = {
-        theme = "dark";
-        editor.font_size = 14;
-      };
-    }
-    {
-      format = "plist";
-      fileExtension = "plist";
-      optionName = "managedPlist";
-      kind = "plist";
-      settingsExample = {
-        NSGlobalDomain.AppleShowAllExtensions = true;
-        recentItems = [
-          "a"
-          "b"
-        ];
-      };
-    }
-  ];
-
-  isFreeform = spec: spec.kind == "freeform";
+  json = {
+    fileExtension = "json";
+    optionName = "managedJson";
+    settingsExample = {
+      theme = "dark";
+      editor.fontSize = 14;
+    };
+  };
+  yaml = {
+    fileExtension = "yaml";
+    optionName = "managedYaml";
+    settingsExample = {
+      theme = "dark";
+      plugins = [ "git" ];
+    };
+  };
+  toml = {
+    fileExtension = "toml";
+    optionName = "managedToml";
+    settingsExample = {
+      theme = "dark";
+      editor.font_size = 14;
+    };
+  };
+  plist = {
+    fileExtension = "plist";
+    optionName = "managedPlist";
+    settingsExample = {
+      NSGlobalDomain.AppleShowAllExtensions = true;
+      recentItems = [
+        "a"
+        "b"
+      ];
+    };
+  };
 }
