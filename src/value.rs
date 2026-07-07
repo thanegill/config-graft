@@ -111,12 +111,6 @@ impl<L: Leaf> Node<L> {
         matches!(self, Node::Map(..))
     }
 
-    /// Whether this node is a directory's own-attributes leaf (the reserved
-    /// empty-string key slot in a directory tree), rather than a real entry.
-    pub fn is_dir_attrs(&self) -> bool {
-        matches!(self, Node::Leaf(l) if l.is_dir_attrs())
-    }
-
     /// The underlying map, if this node is one.
     pub fn as_map(&self) -> Option<&IndexMap<String, Node<L>>> {
         match self {

@@ -226,7 +226,7 @@ impl<L: Leaf> Node<L> {
     ///
     /// An empty final path component is disambiguated by the *node* living there,
     /// not by which backend is running. A leaf under the reserved empty-string key
-    /// that is a directory's own attributes (`Node::is_dir_attrs`, see
+    /// that is a directory's own attributes (`Leaf::is_dir_attrs`, see
     /// `format::directory`) renders as a trailing `/` (or a bare `/` for the root),
     /// which reads naturally as "this directory". Any other empty key is a
     /// legitimate, distinct key (`{"": 1}` is valid JSON/YAML/TOML/plist), so its
@@ -242,21 +242,27 @@ impl<L: Leaf> Node<L> {
 
         let old_leaves: HashSet<KeyPath> = self.leaf_paths().into_iter().collect();
         let new_leaves: HashSet<KeyPath> = new.leaf_paths().into_iter().collect();
-        for p in old_leaves.union(&new_leaves) {
+        for path in old_leaves.union(&new_leaves) {
             // Decide the label from the actual node at this path, not the backend:
             // only a directory's own-attributes leaf collapses an empty component to
-            // a bare separator; any other empty key is quoted.
+            // a bare separator; any other empty key is quoted. `diff` is generic over
+            // `L: Leaf` and can't name `FsLeaf`, so the concrete type answers through
+            // the `Leaf::is_dir_attrs` trait method.
             let is_dir_attrs = self
-                .get_path(p)
-                .or_else(|| new.get_path(p))
-                .is_some_and(Node::is_dir_attrs);
-            let disp = Self::diff_label(p, sep, is_dir_attrs);
-            match (self.get_path(p), new.get_path(p)) {
-                (None, Some(n)) => lines.push((p.clone(), format!("+ {disp} = {}", n.compact()))),
-                (Some(o), None) => lines.push((p.clone(), format!("- {disp} = {}", o.compact()))),
-                (Some(o), Some(n)) if o != n => lines.push((
-                    p.clone(),
-                    format!("~ {disp}: {} => {}", o.compact(), n.compact()),
+                .get_path(path)
+                .or_else(|| new.get_path(path))
+                .is_some_and(|node| matches!(node, Node::Leaf(leaf) if leaf.is_dir_attrs()));
+            let disp = Self::diff_label(path, sep, is_dir_attrs);
+            match (self.get_path(path), new.get_path(path)) {
+                (None, Some(new_node)) => {
+                    lines.push((path.clone(), format!("+ {disp} = {}", new_node.compact())))
+                }
+                (Some(old_node), None) => {
+                    lines.push((path.clone(), format!("- {disp} = {}", old_node.compact())))
+                }
+                (Some(old_node), Some(new_node)) if old_node != new_node => lines.push((
+                    path.clone(),
+                    format!("~ {disp}: {} => {}", old_node.compact(), new_node.compact()),
                 )),
                 _ => {}
             }
@@ -271,18 +277,18 @@ impl<L: Leaf> Node<L> {
         }
     }
 
-    /// The `--diff` label for a leaf path. When the leaf at `p` is a directory's
+    /// The `--diff` label for a leaf path. When the leaf at `path` is a directory's
     /// own attributes (`is_dir_attrs`), the empty-string component renders as `sep`,
     /// giving the bare-`/` root line or a trailing-`/` subdirectory line. Any other
     /// empty component is quoted (`""`) so an empty-named key is unambiguous rather
     /// than reading as a directory line.
-    fn diff_label(p: &KeyPath, sep: &str, is_dir_attrs: bool) -> String {
+    fn diff_label(path: &KeyPath, sep: &str, is_dir_attrs: bool) -> String {
         if is_dir_attrs {
             // Keep the byte-identical tree behavior: a directory's own-attributes
             // leaf's empty final segment gives a trailing `sep` (a subdirectory
             // line); the root's own-attributes path is a lone empty segment, whose
             // rendering is empty, so show a bare `sep` instead of a blank line.
-            let rendered = p.render(sep);
+            let rendered = path.render(sep);
             return if rendered.is_empty() {
                 sep.to_string()
             } else {
@@ -292,7 +298,7 @@ impl<L: Leaf> Node<L> {
         // Any other empty key: diff paths are pure key segments (no `[field=value]`
         // selectors), so joining with `sep` matches `KeyPath::render`, except that
         // an empty segment is quoted so `{"": 1}` shows as `""`, not a bare `sep`.
-        p.iter()
+        path.iter()
             .map(|seg| {
                 if seg.is_empty() {
                     quote(seg)
