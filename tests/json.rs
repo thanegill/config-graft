@@ -528,6 +528,29 @@ fn diff_reports_added_removed_changed() {
 }
 
 #[test]
+fn diff_labels_empty_string_key_unambiguously() {
+    // `{"": 1}` is a legitimate JSON object with an empty-named key. Its diff label
+    // must be a quoted empty string (`""`), never a bare separator (`.`), which would
+    // be indistinguishable from a directory tree's own-attributes line.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, "{}").unwrap();
+    fs::write(&desired, r#"{"":1}"#).unwrap();
+
+    let out = run(&[
+        "--diff",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    let diff = String::from_utf8(out.stdout).unwrap();
+    assert!(diff.contains(r#"+ "" = 1"#), "{diff}");
+    // Never a bare-separator label that reads as a directory line.
+    assert!(!diff.contains("+ . = 1"), "{diff}");
+}
+
+#[test]
 fn diff_orders_by_path_components_not_rendered_string() {
     // A top-level key that contains the separator (`a.b`) and a nested path
     // (`a` -> `z`) both render as the dotted string `a.?`; diff ordering must be by
