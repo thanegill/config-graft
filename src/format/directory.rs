@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::os::unix::fs::{chown, symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -38,7 +39,7 @@ type Digest = [u8; 32];
 /// newtype (rather than a bare `BTreeMap` alias) so it can carry attribute logic
 /// like [`FsAttrs::render_summary`]; it `Deref`s to the map for the usual
 /// `insert`/`get`/`iter`.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) struct FsAttrs(BTreeMap<String, Vec<u8>>);
 
 impl std::ops::Deref for FsAttrs {
@@ -221,6 +222,29 @@ impl PartialEq for FsLeaf {
             (FsLeaf::Symlink { target: t1 }, FsLeaf::Symlink { target: t2 }) => t1 == t2,
             (FsLeaf::DirectoryAttributes(a1), FsLeaf::DirectoryAttributes(a2)) => a1 == a2,
             _ => false,
+        }
+    }
+}
+
+impl Eq for FsLeaf {}
+
+// `Hash` mirrors the hand-written `PartialEq` above: a `File`'s identity is
+// `(len, digest, attrs)` and deliberately excludes `source` (path-independence
+// is what keeps re-apply a no-op), so the hash must skip `source` too or equal
+// files could hash differently and break `HashSet` dedup.
+impl Hash for FsLeaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            FsLeaf::File {
+                len, digest, attrs, ..
+            } => {
+                len.hash(state);
+                digest.hash(state);
+                attrs.hash(state);
+            }
+            FsLeaf::Symlink { target } => target.hash(state),
+            FsLeaf::DirectoryAttributes(attrs) => attrs.hash(state),
         }
     }
 }

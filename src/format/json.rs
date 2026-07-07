@@ -3,15 +3,17 @@
 use indexmap::IndexMap;
 use serde::Serialize;
 
+use std::hash::{Hash, Hasher};
+
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{Leaf, Node};
+use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// JSON codec.
 pub struct Json;
 
 /// A JSON leaf value.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub enum JsonLeaf {
     Null,
     Bool(bool),
@@ -19,6 +21,42 @@ pub enum JsonLeaf {
     Uint(u64),
     Float(f64),
     String(String),
+}
+
+// `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
+// `Hash`. `Float` compares and hashes via `canonical_float_bits`; every other
+// variant matches the old derived behavior byte-for-byte. Net change from the
+// derive: two `NaN` floats now compare equal (see `canonical_float_bits`).
+impl PartialEq for JsonLeaf {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (JsonLeaf::Null, JsonLeaf::Null) => true,
+            (JsonLeaf::Bool(a), JsonLeaf::Bool(b)) => a == b,
+            (JsonLeaf::Int(a), JsonLeaf::Int(b)) => a == b,
+            (JsonLeaf::Uint(a), JsonLeaf::Uint(b)) => a == b,
+            (JsonLeaf::Float(a), JsonLeaf::Float(b)) => {
+                canonical_float_bits(*a) == canonical_float_bits(*b)
+            }
+            (JsonLeaf::String(a), JsonLeaf::String(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for JsonLeaf {}
+
+impl Hash for JsonLeaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            JsonLeaf::Null => {}
+            JsonLeaf::Bool(b) => b.hash(state),
+            JsonLeaf::Int(i) => i.hash(state),
+            JsonLeaf::Uint(u) => u.hash(state),
+            JsonLeaf::Float(f) => canonical_float_bits(*f).hash(state),
+            JsonLeaf::String(s) => s.hash(state),
+        }
+    }
 }
 
 impl Leaf for JsonLeaf {
