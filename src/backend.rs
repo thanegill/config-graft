@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, WriteOpts};
-use crate::reconcile::{reconcile, sort_keys, MergeKeys, Options};
+use crate::reconcile::{reconcile, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::Cli;
 
@@ -120,7 +120,7 @@ pub(crate) trait Backend {
         // code is unaffected. Byte formats only: a tree has no arrays, so
         // `conflicts` is empty.
         for c in &conflicts {
-            let elements: Vec<String> = c.elements.iter().map(crate::compact).collect();
+            let elements: Vec<String> = c.elements.iter().map(Node::compact).collect();
             eprintln!(
                 "config-graft: warning: array `{}` had a contradictory reorder of [{}] \
                  between TARGET and DESIRED; resolved deterministically (TARGET order preferred)",
@@ -129,16 +129,13 @@ pub(crate) trait Backend {
             );
         }
         if cli.sort_keys {
-            result = sort_keys(&result);
+            result = result.sort_keys();
         }
 
         let Prepared { output, changed } = Self::prepare(cli, &target, &result)?;
 
         if cli.diff {
-            print!(
-                "{}",
-                crate::diff_text_sep(&target, &result, Self::COMPONENT_SEPARATOR)
-            );
+            print!("{}", target.diff(&result, Self::COMPONENT_SEPARATOR));
         }
 
         if cli.check {
@@ -299,7 +296,7 @@ impl Backend for Directory {
     }
 
     fn read(cli: &Cli, path: &Path) -> Result<Option<Node<FsLeaf>>, Error> {
-        directory::read_tree(path, cli.manage_root, dir_policy(cli))
+        directory::read_tree(path, cli.manage_root, cli.dir_policy())
     }
 
     fn prepare(
@@ -321,15 +318,17 @@ impl Backend for Directory {
         base: Option<&Node<FsLeaf>>,
         _output: Option<&[u8]>,
     ) -> Result<(), Error> {
-        directory::apply_tree(&cli.target, Some(target), result, base, dir_policy(cli)).map(|_| ())
+        directory::apply_tree(&cli.target, Some(target), result, base, cli.dir_policy()).map(|_| ())
     }
 }
 
-/// The metadata policy for a directory run: manage everything by default, with
-/// `--no-owner` and `--xattrs` as opt-outs.
-fn dir_policy(cli: &Cli) -> AttrPolicy {
-    AttrPolicy {
-        owner: !cli.no_owner,
-        xattrs: cli.xattrs.unwrap_or_default(),
+impl Cli {
+    /// The metadata policy for a directory run: manage everything by default, with
+    /// `--no-owner` and `--xattrs` as opt-outs.
+    fn dir_policy(&self) -> AttrPolicy {
+        AttrPolicy {
+            owner: !self.no_owner,
+            xattrs: self.xattrs.unwrap_or_default(),
+        }
     }
 }

@@ -254,20 +254,6 @@ impl Leaf for FsLeaf {
     }
 }
 
-fn read_err(path: &Path, source: io::Error) -> Error {
-    Error::Read {
-        path: path.to_path_buf(),
-        source,
-    }
-}
-
-fn write_err(path: &Path, source: io::Error) -> Error {
-    Error::Write {
-        path: path.to_path_buf(),
-        source,
-    }
-}
-
 /// Recursively read the directory at `path` into a `Node<FsLeaf>`.
 ///
 /// - Missing `path` (or a dangling symlink at the root) ⇒ `Ok(None)`.
@@ -299,7 +285,7 @@ pub fn read_tree(
         }
         Ok(_) => Err(Error::NotDirectory(path.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(read_err(path, e)),
+        Err(e) => Err(Error::read(path, e)),
     }
 }
 
@@ -327,8 +313,8 @@ fn read_dir(
         return Err(Error::TreeTooDeep(dir.to_path_buf()));
     }
     let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-        .map_err(|e| read_err(dir, e))?
-        .map(|e| e.map(|e| e.path()).map_err(|e| read_err(dir, e)))
+        .map_err(|e| Error::read(dir, e))?
+        .map(|e| e.map(|e| e.path()).map_err(|e| Error::read(dir, e)))
         .collect::<Result<_, _>>()?;
     paths.sort();
 
@@ -370,10 +356,10 @@ fn read_dir(
 
 /// Classify one tree entry (not following symlinks).
 fn read_node(path: &Path, policy: AttrPolicy, depth: usize) -> Result<Node<FsLeaf>, Error> {
-    let meta = fs::symlink_metadata(path).map_err(|e| read_err(path, e))?;
+    let meta = fs::symlink_metadata(path).map_err(|e| Error::read(path, e))?;
     let ft = meta.file_type();
     if ft.is_symlink() {
-        let target = fs::read_link(path).map_err(|e| read_err(path, e))?;
+        let target = fs::read_link(path).map_err(|e| Error::read(path, e))?;
         Ok(Node::Leaf(FsLeaf::Symlink { target }))
     } else if ft.is_dir() {
         // A nested directory carries its own attributes (unlike the root).
@@ -530,11 +516,10 @@ pub fn apply_tree(
 /// deleting an app-populated directory on a directory → file type change. A
 /// directory's own attributes count as a leaf path too (`DIR_ATTRS_KEY`), so an
 /// app-created *empty* subdirectory also counts as unmanaged content — mirroring
-/// the reserved-key leaf that `reconcile::leaf_paths` would have seen.
+/// the reserved-key leaf that `Node::leaf_paths` would have seen.
 fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<FsLeaf>>) -> bool {
     fn unmanaged_at(path: &[String], base: Option<&Node<FsLeaf>>) -> bool {
-        base.and_then(|b| crate::reconcile::get_path(b, path))
-            .is_none()
+        base.and_then(|b| b.get_path(path)).is_none()
     }
     fn walk(node: &FsTree, path: &mut Vec<String>, base: Option<&Node<FsLeaf>>) -> bool {
         match node {
@@ -674,13 +659,13 @@ fn apply_node(
             Some(cur @ FsTree::Dir { .. }) => {
                 clear_dir_for_leaf(path, cur, base)?;
                 path.atomic_symlink(target)
-                    .map_err(|e| write_err(path, e))?;
+                    .map_err(|e| Error::write(path, e))?;
                 Ok(true)
             }
             _ => path
                 .atomic_symlink(target)
                 .map(|()| true)
-                .map_err(|e| write_err(path, e)),
+                .map_err(|e| Error::write(path, e)),
         },
     }
 }
@@ -705,14 +690,16 @@ fn write_file(
     policy: AttrPolicy,
 ) -> Result<(), Error> {
     let dir = crate::dest_dir(dest);
-    fs::create_dir_all(&dir).map_err(|e| write_err(&dir, e))?;
-    let mut src = fs::File::open(source).map_err(|e| read_err(source, e))?;
+    fs::create_dir_all(&dir).map_err(|e| Error::write(&dir, e))?;
+    let mut src = fs::File::open(source).map_err(|e| Error::read(source, e))?;
     let mut tmp = tempfile::Builder::new()
         .prefix(TEMP_PREFIX)
         .tempfile_in(&dir)
-        .map_err(|e| write_err(dest, e))?;
-    io::copy(&mut src, tmp.as_file_mut()).map_err(|e| write_err(dest, e))?;
-    tmp.as_file().sync_all().map_err(|e| write_err(dest, e))?;
+        .map_err(|e| Error::write(dest, e))?;
+    io::copy(&mut src, tmp.as_file_mut()).map_err(|e| Error::write(dest, e))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| Error::write(dest, e))?;
     // Attributes go on the temp file, before the rename, so a failure to set any
     // of them leaves nothing on disk.
     attrs.apply(tmp.path(), policy)?;
@@ -726,13 +713,13 @@ fn write_file(
             if let Some(n) = name.to_str() {
                 if !policy.xattrs.in_scope(n) {
                     if let Ok(Some(value)) = xattr::get(dest, n) {
-                        xattr::set(tmp.path(), n, &value).map_err(|e| write_err(dest, e))?;
+                        xattr::set(tmp.path(), n, &value).map_err(|e| Error::write(dest, e))?;
                     }
                 }
             }
         }
     }
-    tmp.persist(dest).map_err(|e| write_err(dest, e.error))?;
+    tmp.persist(dest).map_err(|e| Error::write(dest, e.error))?;
     Ok(())
 }
 
@@ -755,7 +742,7 @@ impl FsAttrs {
                 for name in names {
                     if let Some(name) = name.to_str() {
                         if policy.xattrs.in_scope(name) && !desired.contains(name) {
-                            xattr::remove(path, name).map_err(|e| write_err(path, e))?;
+                            xattr::remove(path, name).map_err(|e| Error::write(path, e))?;
                         }
                     }
                 }
@@ -763,7 +750,7 @@ impl FsAttrs {
             for (key, value) in self.iter() {
                 if let Some(name) = key.strip_prefix("xattr:") {
                     if policy.xattrs.in_scope(name) {
-                        xattr::set(path, name, value).map_err(|e| write_err(path, e))?;
+                        xattr::set(path, name, value).map_err(|e| Error::write(path, e))?;
                     }
                 }
             }
@@ -782,13 +769,13 @@ impl FsAttrs {
             let want_uid = uid.filter(|&u| Some(u) != cur_uid);
             let want_gid = gid.filter(|&g| Some(g) != cur_gid);
             if want_uid.is_some() || want_gid.is_some() {
-                chown(path, want_uid, want_gid).map_err(|e| write_err(path, e))?;
+                chown(path, want_uid, want_gid).map_err(|e| Error::write(path, e))?;
             }
         }
 
         if let Some(mode) = self.num(path, "mode", 8)? {
             fs::set_permissions(path, fs::Permissions::from_mode(mode))
-                .map_err(|e| write_err(path, e))?;
+                .map_err(|e| Error::write(path, e))?;
         }
         Ok(())
     }
@@ -836,9 +823,9 @@ trait PathExt {
 
 impl PathExt for Path {
     fn hash_file(&self) -> Result<Digest, Error> {
-        let mut file = fs::File::open(self).map_err(|e| read_err(self, e))?;
+        let mut file = fs::File::open(self).map_err(|e| Error::read(self, e))?;
         let mut hasher = Sha256::new();
-        io::copy(&mut file, &mut hasher).map_err(|e| read_err(self, e))?;
+        io::copy(&mut file, &mut hasher).map_err(|e| Error::read(self, e))?;
         let out = hasher.finalize();
         let mut digest = [0u8; 32];
         digest.copy_from_slice(&out);
@@ -850,9 +837,9 @@ impl PathExt for Path {
             Ok(m) if m.is_dir() => Ok(()),
             Ok(_) => Err(Error::NotDirectory(self.to_path_buf())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(self).map_err(|e| write_err(self, e))
+                fs::create_dir_all(self).map_err(|e| Error::write(self, e))
             }
-            Err(e) => Err(write_err(self, e)),
+            Err(e) => Err(Error::write(self, e)),
         }
     }
 
@@ -860,16 +847,16 @@ impl PathExt for Path {
         match fs::create_dir(self) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-            Err(e) => Err(write_err(self, e)),
+            Err(e) => Err(Error::write(self, e)),
         }
     }
 
     fn remove_leaf(&self) -> Result<(), Error> {
-        fs::remove_file(self).map_err(|e| write_err(self, e))
+        fs::remove_file(self).map_err(|e| Error::write(self, e))
     }
 
     fn remove_tree(&self) -> Result<(), Error> {
-        fs::remove_dir_all(self).map_err(|e| write_err(self, e))
+        fs::remove_dir_all(self).map_err(|e| Error::write(self, e))
     }
 
     fn atomic_symlink(&self, target: &Path) -> io::Result<()> {
@@ -925,7 +912,7 @@ fn remove_node(path: &Path, node: &FsTree) -> Result<bool, Error> {
                     }
                 }
             }
-            fs::remove_dir(path).map_err(|e| write_err(path, e))?;
+            fs::remove_dir(path).map_err(|e| Error::write(path, e))?;
         }
         FsTree::File { .. } | FsTree::Symlink { .. } => path.remove_leaf()?,
     }

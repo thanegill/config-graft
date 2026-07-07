@@ -14,7 +14,7 @@ mod value;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{FormatKind, Indent, Json, Plist, Toml, Yaml};
-use reconcile::{get_path, leaf_paths, ArrayStrategy, KeyPath, MergeKeys};
+use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
 use value::{Leaf, Node};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files:
@@ -218,70 +218,73 @@ pub fn dest_dir(path: &Path) -> PathBuf {
     }
 }
 
-/// A compact, leaf-level diff (`+` added, `-` removed, `~` changed) with path
-/// components joined by `sep` (`.` for byte formats, `/` for a directory tree).
-/// Arrays and scalars are atomic leaves, matching the reconcile semantics.
-///
-/// A directory's own attributes are an ordinary leaf under an empty-string key
-/// (see `format::directory`), so they diff here like any other leaf — the empty
-/// final path component renders as a trailing `/` (or a bare `/` for the root),
-/// which reads naturally as "this directory".
-pub(crate) fn diff_text_sep<L: Leaf>(old: &Node<L>, new: &Node<L>, sep: &str) -> String {
-    use std::collections::HashSet;
-    // Each entry is (key path, formatted line). Ordering is by the path's *segments*
-    // (not the rendered string), so a key that itself contains the format separator
-    // can't reorder against a nested path that renders identically; it also keeps a
-    // directory's own line (its final segment empty) just before its children.
-    let mut lines: Vec<(KeyPath, String)> = Vec::new();
+impl<L: Leaf> Node<L> {
+    /// A compact, leaf-level diff of `self` (old) against `new` (`+` added, `-`
+    /// removed, `~` changed), with path components joined by `sep` (`.` for byte
+    /// formats, `/` for a directory tree). Arrays and scalars are atomic leaves,
+    /// matching the reconcile semantics.
+    ///
+    /// A directory's own attributes are an ordinary leaf under an empty-string key
+    /// (see `format::directory`), so they diff here like any other leaf — the empty
+    /// final path component renders as a trailing `/` (or a bare `/` for the root),
+    /// which reads naturally as "this directory".
+    pub(crate) fn diff(&self, new: &Node<L>, sep: &str) -> String {
+        use std::collections::HashSet;
+        // Each entry is (key path, formatted line). Ordering is by the path's *segments*
+        // (not the rendered string), so a key that itself contains the format separator
+        // can't reorder against a nested path that renders identically; it also keeps a
+        // directory's own line (its final segment empty) just before its children.
+        let mut lines: Vec<(KeyPath, String)> = Vec::new();
 
-    let old_leaves: HashSet<KeyPath> = leaf_paths(old).into_iter().collect();
-    let new_leaves: HashSet<KeyPath> = leaf_paths(new).into_iter().collect();
-    for p in old_leaves.union(&new_leaves) {
-        let rendered = p.render(sep);
-        // An empty rendered path is a directory's own-attributes leaf at the root;
-        // show the separator so it isn't a blank label.
-        let disp = if rendered.is_empty() {
-            sep.to_string()
+        let old_leaves: HashSet<KeyPath> = self.leaf_paths().into_iter().collect();
+        let new_leaves: HashSet<KeyPath> = new.leaf_paths().into_iter().collect();
+        for p in old_leaves.union(&new_leaves) {
+            let rendered = p.render(sep);
+            // An empty rendered path is a directory's own-attributes leaf at the root;
+            // show the separator so it isn't a blank label.
+            let disp = if rendered.is_empty() {
+                sep.to_string()
+            } else {
+                rendered
+            };
+            match (self.get_path(p), new.get_path(p)) {
+                (None, Some(n)) => lines.push((p.clone(), format!("+ {disp} = {}", n.compact()))),
+                (Some(o), None) => lines.push((p.clone(), format!("- {disp} = {}", o.compact()))),
+                (Some(o), Some(n)) if o != n => lines.push((
+                    p.clone(),
+                    format!("~ {disp}: {} => {}", o.compact(), n.compact()),
+                )),
+                _ => {}
+            }
+        }
+
+        lines.sort_by(|a, b| a.0.cmp(&b.0));
+        if lines.is_empty() {
+            String::new()
         } else {
-            rendered
-        };
-        match (get_path(old, p), get_path(new, p)) {
-            (None, Some(n)) => lines.push((p.clone(), format!("+ {disp} = {}", compact(n)))),
-            (Some(o), None) => lines.push((p.clone(), format!("- {disp} = {}", compact(o)))),
-            (Some(o), Some(n)) if o != n => lines.push((
-                p.clone(),
-                format!("~ {disp}: {} => {}", compact(o), compact(n)),
-            )),
-            _ => {}
+            let body: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+            format!("{}\n", body.join("\n"))
         }
     }
 
-    lines.sort_by(|a, b| a.0.cmp(&b.0));
-    if lines.is_empty() {
-        String::new()
-    } else {
-        let body: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
-        format!("{}\n", body.join("\n"))
-    }
-}
-
-/// Render a node as a compact, single-line token for `--diff`. JSON-representable
-/// values match `serde_json`'s compact form; plist-only leaves get a readable
-/// `<date …>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
-pub(crate) fn compact<L: Leaf>(v: &Node<L>) -> String {
-    match v {
-        Node::Map(m) => {
-            let inner: Vec<String> = m
-                .iter()
-                .map(|(k, val)| format!("{}:{}", quote(k), compact(val)))
-                .collect();
-            format!("{{{}}}", inner.join(","))
+    /// Render as a compact, single-line token for `--diff`. JSON-representable
+    /// values match `serde_json`'s compact form; plist-only leaves get a readable
+    /// `<date …>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
+    pub(crate) fn compact(&self) -> String {
+        match self {
+            Node::Map(m) => {
+                let inner: Vec<String> = m
+                    .iter()
+                    .map(|(k, val)| format!("{}:{}", quote(k), val.compact()))
+                    .collect();
+                format!("{{{}}}", inner.join(","))
+            }
+            Node::Array(a) => {
+                let inner: Vec<String> = a.iter().map(|v| v.compact()).collect();
+                format!("[{}]", inner.join(","))
+            }
+            Node::Leaf(l) => l.render(),
         }
-        Node::Array(a) => {
-            let inner: Vec<String> = a.iter().map(|v| compact(v)).collect();
-            format!("[{}]", inner.join(","))
-        }
-        Node::Leaf(l) => l.render(),
     }
 }
 

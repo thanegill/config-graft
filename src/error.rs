@@ -2,7 +2,7 @@
 //! magic exit codes.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A reconcile run that failed (always maps to exit code 1).
 ///
@@ -82,6 +82,24 @@ pub enum Error {
     /// A `--format directory` tree is nested deeper than the supported limit
     /// (refused rather than risk a stack overflow).
     TreeTooDeep(PathBuf),
+}
+
+impl Error {
+    /// A read failure at `path` ([`Error::Read`]).
+    pub fn read(path: &Path, source: std::io::Error) -> Error {
+        Error::Read {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
+    /// A write failure at `path` ([`Error::Write`]).
+    pub fn write(path: &Path, source: std::io::Error) -> Error {
+        Error::Write {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
