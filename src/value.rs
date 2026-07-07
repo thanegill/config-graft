@@ -21,8 +21,13 @@ pub trait Leaf: Clone + PartialEq + std::fmt::Debug {
 /// map, an array, or an atomic leaf. Maps use `IndexMap` for insertion-order
 /// preservation and order-stable removal (`shift_remove`), which
 /// prune/collapse/diff/output all rely on.
+///
+/// A map carries no side payload: a format that needs per-map metadata (directory
+/// mode's own mode/owner/xattrs) stores it as an ordinary leaf under a reserved
+/// key, so it reconciles through the same machinery as any other entry (see
+/// `format::directory`).
 #[derive(Clone, PartialEq, Debug)]
-pub enum Node<L> {
+pub enum Node<L: Leaf> {
     Map(IndexMap<String, Node<L>>),
     Array(Vec<Node<L>>),
     Leaf(L),
@@ -36,7 +41,7 @@ impl<L: Leaf> Node<L> {
 
     /// Whether this node is a map.
     pub fn is_map(&self) -> bool {
-        matches!(self, Node::Map(_))
+        matches!(self, Node::Map(..))
     }
 
     /// The underlying map, if this node is one.

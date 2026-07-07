@@ -33,7 +33,8 @@
       };
 
       # Declarative wrappers exposing `managed{Json,Plist,Yaml,Toml}` -- one per
-      # format config-graft reconciles. `home.*` for home-manager,
+      # byte format config-graft reconciles -- plus `managedDirectory` for
+      # `--format directory` (reconcile a whole source tree). `home.*` for home-manager,
       # `environment.*` for NixOS / nix-darwin. The three modules share one
       # assembly (modules/lib). Each is applied with `self` so entries
       # default to this flake's build (the activation script calls it by store

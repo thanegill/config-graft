@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory mode** (`--format directory`): reconcile a whole directory *tree*
+  instead of a single file — TARGET, DESIRED, and BASE are directories. A
+  directory is a map and a file/symlink is an atomic leaf, so the same three-way
+  merge preserves app-created files and prunes files you stop declaring (keeping
+  user edits). Writes are **minimal and in place** — unchanged files keep their
+  inode and mtime, each file write is atomic, and file contents stream
+  source→destination (never buffered in memory) with a SHA-256 content digest for
+  identity. A file's — and a directory's — **mode, owner (uid/gid), and extended
+  attributes** are tracked and reconciled; an attribute that can't be applied
+  (e.g. no privilege to `chown`) refuses the run rather than leaving a
+  half-applied entry. Symlinks are managed by target and never followed;
+  FIFOs/sockets/devices and non-UTF-8 filenames are refused. The root directory's
+  own attributes are left untouched unless `--manage-root` is given. Opt-in:
+  `directory` is never inferred from a path. Metadata drift (mode/owner/xattr, on
+  files and directories) shows up in `--diff`, not just content changes. Replacing
+  an app-populated directory with a file is refused rather than deleting content
+  never under management; sibling names that collide when case-folded, and trees
+  nested past an internal depth limit, are refused; leftover `.config-graft-tmp.` entries
+  from an interrupted apply are ignored on read. Each directory is fsync'd once
+  after its entry changes settle, so the renames are crash-durable.
+- `--manage-root` (directory mode) to also reconcile the TARGET directory's own
+  mode/owner/xattrs, not just its contents.
+- `--no-owner` and `--xattrs <all|safe|none>` (directory mode) to narrow the
+  metadata reconcile scope. The default manages everything (owner + all xattrs);
+  `--no-owner` leaves uid/gid alone, `--xattrs safe` skips privileged/system
+  namespaces, `--xattrs none` ignores extended attributes. In-scope xattrs on the
+  target but absent from DESIRED are removed (they converge); a `chown` to the
+  caller's own uid/gid is skipped so the common case needs no privilege.
 - **TOML** support alongside JSON, plist, and YAML. The format is inferred from
   TARGET's extension (`.toml`) or forced with `--format toml`. Like YAML, an
   existing TOML target is edited in place (via `toml_edit`) so **comments, blank
@@ -50,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries take `cfprefsdDomain` (macOS). Runs config-graft by store path, defaulting
   to this flake's own build; override it per entry or module-wide via
   `managed.package`. See `examples/` for a full flake per platform.
+- `managedDirectory` (all three platforms) for `--format directory`: reconcile a
+  whole `source` *tree* into a target directory — files the app adds are kept,
+  files dropped from `source` are pruned, and per-file mode/owner/xattrs are
+  reconciled. Directory-specific options `manageRoot`, `noOwner` (set it on a
+  non-root home-manager activation, since a store-built source is root-owned), and
+  `xattrs` (`all`/`safe`/`none`) map to the CLI flags.
 
 ### Changed
 

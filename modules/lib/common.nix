@@ -151,6 +151,107 @@ in
         run ${lib.getExe entry.package} --format ${format.name} "$_target" ${desired} "$_prev"
       '';
 
+  # Directory-format entry type. Unlike the byte formats there is no `settings`
+  # (freeform data through a `pkgs.formats` generator): the DESIRED is a prebuilt
+  # directory tree given as `source`, so `--format directory` gets its own entry
+  # type with the directory-specific reconcile flags. Every declared entry is
+  # active (`source` is required), so there is no `settings != {}` liveness test.
+  directoryEntryType =
+    {
+      lib,
+      pkgs,
+      defaultPackage,
+      targetOption,
+      sourceDescription,
+    }:
+    let
+      inherit (lib) mkOption types literalExpression;
+    in
+    types.attrsOf (
+      types.submodule (
+        { name, ... }:
+        {
+          options = {
+            target = targetOption;
+
+            package = mkOption {
+              type = types.package;
+              default = defaultPackage;
+              defaultText = literalExpression "config-graft.packages.\${system}.default";
+              description = ''
+                The config-graft package used to reconcile this entry. Defaults to the
+                module-level `managed.package` (this flake's own build), called by store
+                path, so no overlay or `PATH` entry is needed.
+              '';
+            };
+
+            source = mkOption {
+              type = types.path;
+              example = literalExpression "./dotfiles";
+              description = sourceDescription;
+            };
+
+            manageRoot = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                Also reconcile {option}`target`'s own directory attributes
+                (mode/owner/xattrs), not just its contents (`--manage-root`).
+              '';
+            };
+
+            noOwner = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                Don't reconcile file/directory ownership, uid/gid (`--no-owner`). A
+                store-built {option}`source` is owned by the build user (root), which a
+                non-root (home-manager) activation can't chown to, so set this there.
+              '';
+            };
+
+            xattrs = mkOption {
+              type = types.enum [
+                "all"
+                "safe"
+                "none"
+              ];
+              default = "all";
+              description = ''
+                Which extended attributes to reconcile (`--xattrs`): `all`, `safe`
+                (skip privileged/system namespaces), or `none`.
+              '';
+            };
+          };
+
+          config.target = lib.mkDefault name;
+        }
+      )
+    );
+
+  # The per-entry directory reconcile script, shared by every platform (the sibling
+  # of `mkEntryReconcileScript` for `--format directory`). The caller sets `_prev`
+  # (the BASE snapshot directory) beforehand and passes the resolved `target`; the
+  # DESIRED is the entry's `source` tree.
+  mkDirectoryReconcileScript =
+    {
+      lib,
+      entry,
+      target,
+    }:
+    let
+      flags = lib.concatStringsSep " " (
+        lib.optional entry.manageRoot "--manage-root"
+        ++ lib.optional entry.noOwner "--no-owner"
+        ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}"
+      );
+    in
+    ''
+      _target=${lib.escapeShellArg target}
+      _i "Reconciling managed directory tree %s" "$_target"
+      run ${lib.getExe entry.package} --format directory ${flags} "$_target" ${entry.source} "$_prev"
+    '';
+
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
   # macOS-only tooling, and `settings`/`source` are mutually exclusive.
   mkAssertions =

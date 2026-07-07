@@ -1,0 +1,5 @@
+# Sample file in a config-graft `managedDirectory` source tree. On activation the
+# whole tree is reconciled into ~/.config/app/plugins: files here are kept in sync,
+# files the app adds under it are preserved, and files removed here are pruned.
+name = "example"
+enabled = true
