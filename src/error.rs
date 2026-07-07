@@ -26,7 +26,7 @@ pub enum Error {
     /// DESIRED parsed but its root is not a YAML mapping.
     NotYamlMapping(PathBuf),
     /// DESIRED parsed but its root is not a TOML table. (Structurally
-    /// unreachable — a parsed TOML document always has a table root — but kept so
+    /// unreachable -- a parsed TOML document always has a table root -- but kept so
     /// every format answers the same questions.)
     NotTomlTable(PathBuf),
     /// Writing the target failed.
@@ -68,7 +68,7 @@ pub enum Error {
     /// be parsed back to a number.
     InvalidAttribute { path: PathBuf, key: String },
     /// DESIRED declares a path as a file/symlink, but the target directory there
-    /// holds entries never under management — replacing it would delete them, so
+    /// holds entries never under management -- replacing it would delete them, so
     /// the run is refused.
     AppDirWouldBeDeleted(PathBuf),
     /// A `--format directory` DESIRED path does not exist.
@@ -77,7 +77,7 @@ pub enum Error {
     /// node, or a non-map root). Kept as a typed error rather than a panic.
     DirectoryTreeInvariant,
     /// Two sibling names collide when case-folded, so they would map to one file on
-    /// a case-insensitive filesystem — refused rather than silently landing one.
+    /// a case-insensitive filesystem -- refused rather than silently landing one.
     NameCollision { dir: PathBuf, a: String, b: String },
     /// A `--format directory` tree is nested deeper than the supported limit
     /// (refused rather than risk a stack overflow).

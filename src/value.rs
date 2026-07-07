@@ -1,16 +1,16 @@
 //! Internal value model the reconcile engine runs on, decoupled from any
 //! serialization format.
 //!
-//! The engine never inspects a leaf's type — for anything that isn't a map it
-//! only clones it, compares it for equality, or treats it as an atomic path — so
+//! The engine never inspects a leaf's type -- for anything that isn't a map it
+//! only clones it, compares it for equality, or treats it as an atomic path -- so
 //! each format supplies **its own** leaf type (`L: Leaf`) rather than sharing one
 //! enum that mixes every format's value space. `Node` is generic over that leaf
 //! type; the per-format leaf enums and codecs live in `format`.
 
 use indexmap::IndexMap;
 
-/// A format's atomic leaf value. The engine treats leaves opaquely — it only
-/// needs `Clone` + `PartialEq` (and `Debug` for diagnostics/tests) — plus a
+/// A format's atomic leaf value. The engine treats leaves opaquely -- it only
+/// needs `Clone` + `PartialEq` (and `Debug` for diagnostics/tests) -- plus a
 /// compact rendering for `--diff`.
 pub trait Leaf: Clone + PartialEq + std::fmt::Debug {
     /// Compact single-line rendering for `--diff`.

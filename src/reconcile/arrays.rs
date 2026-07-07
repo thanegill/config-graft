@@ -1,10 +1,10 @@
 //! Array-combining strategies for the reconcile engine.
 //!
 //! `deep_merge` delegates every array-vs-array case here; the strategy decides
-//! whether DESIRED's list replaces, appends to, or unions with TARGET's — or, for
+//! whether DESIRED's list replaces, appends to, or unions with TARGET's -- or, for
 //! `Merge`, reconciles element membership three-way against BASE. `Merge` matches
-//! elements by whole value by default, or — when a key field is configured and
-//! every element of both sides is an object carrying it — by that key, deep-merging
+//! elements by whole value by default, or -- when a key field is configured and
+//! every element of both sides is an object carrying it -- by that key, deep-merging
 //! the matched records.
 
 use super::{reconcile, ArrayStrategy, Conflict, KeyPath, NodeList, Options};
@@ -13,11 +13,11 @@ use std::collections::HashSet;
 
 /// Combine a TARGET array with a DESIRED array per `opts.arrays`, returning the
 /// new element list and any `merge` [`Conflict`]s (each with a path *relative to*
-/// this array — empty for a cross-over reorder of the array itself, a
+/// this array -- empty for a cross-over reorder of the array itself, a
 /// `[field=value]` element selector for a conflict nested inside a keyed record).
 /// `base` is the merge ancestor at this path (used only by `Merge`); only `Merge`
 /// can conflict. `path` is this array's full object-key path from the reconcile
-/// root — used to resolve per-path merge keys.
+/// root -- used to resolve per-path merge keys.
 pub(super) fn combine<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
@@ -45,7 +45,7 @@ pub(super) fn combine<L: Leaf>(
             }
             (out, Vec::new())
         }
-        // Three-way, move-aware merge against BASE — the only strategy that can
+        // Three-way, move-aware merge against BASE -- the only strategy that can
         // conflict. BASE elements only matter when BASE is itself an array here;
         // anything else (absent / type change) leaves membership a plain two-way
         // union, matching `Set`.
@@ -66,7 +66,7 @@ pub(super) fn combine<L: Leaf>(
 }
 
 /// Move-aware three-way merge of two arrays via a generalized topological sort
-/// (GTS). Elements are matched by **identity** — the whole value by default, or,
+/// (GTS). Elements are matched by **identity** -- the whole value by default, or,
 /// when `keys` names candidate fields and every element of both sides is an object
 /// carrying one, by that key field (a keyed record). Matched keyed records are
 /// three-way *merged* (fields reconciled); value-matched elements are taken as-is.
@@ -189,7 +189,7 @@ fn render_value<L: Leaf>(v: &Node<L>) -> String {
 /// Shared GTS assembly: given the survivor count `n`, a map from an input element
 /// to its survivor index (`id_of`), and the output value per survivor (`merged`),
 /// order the survivors move-aware and report any cross-over cycle as a single
-/// [`Conflict`] at this array (empty path — callers prepend the array's own key).
+/// [`Conflict`] at this array (empty path -- callers prepend the array's own key).
 fn assemble<L: Leaf>(
     n: usize,
     id_of: impl Fn(&Node<L>) -> Option<usize>,
@@ -230,7 +230,7 @@ fn assemble<L: Leaf>(
 
 /// The index-only generalized topological sort over `n` vertices, given the three
 /// inputs as vertex-index sequences (`target_seq`, `desired_seq`, `base_seq`).
-/// Fixed tie-break: earliest in TARGET, then DESIRED, then index — deterministic
+/// Fixed tie-break: earliest in TARGET, then DESIRED, then index -- deterministic
 /// and idempotent.
 ///
 /// Returns `(order, conflict_ids)`:
@@ -469,7 +469,7 @@ fn membership_merge<L: Leaf>(
             out.push(e.clone());
         }
     }
-    // Then DESIRED-only insertions, in DESIRED order — but a BASE element the user
+    // Then DESIRED-only insertions, in DESIRED order -- but a BASE element the user
     // already removed from TARGET stays removed (don't resurrect it).
     for e in desired {
         let removed_from_target = in_base(e) && !in_target(e);
@@ -481,9 +481,9 @@ fn membership_merge<L: Leaf>(
 }
 
 /// Serialize the vertices of one strongly connected component. A trivial (size-1)
-/// component is the vertex itself; a cycle is emitted by a marking rule — start
+/// component is the vertex itself; a cycle is emitted by a marking rule -- start
 /// from the vertices first in TARGET or DESIRED, follow successor edges, and mark
-/// each emitted vertex's successors as eligible — so the intra-cycle order follows
+/// each emitted vertex's successors as eligible -- so the intra-cycle order follows
 /// an actual input rather than inventing one. Ties break by `key(v)` (earliest in
 /// TARGET, then DESIRED, then index).
 fn order_scc(

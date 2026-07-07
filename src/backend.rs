@@ -4,7 +4,7 @@
 //! ends: read TARGET/DESIRED/BASE into `Node`s, reconcile, then
 //! diff/check/stdout/apply. The [`Backend`] trait captures those ends so a single
 //! [`run`] drives every format. Byte formats plug in via [`ByteBackend<F>`] over
-//! any [`Format`]; [`Directory`] is the tree backend — which deliberately does
+//! any [`Format`]; [`Directory`] is the tree backend -- which deliberately does
 //! *not* implement the byte-oriented `Format` trait (a tree has no single byte
 //! stream), so it lives here beside the formats rather than among them.
 
@@ -57,7 +57,7 @@ pub(crate) trait Backend {
     fn read(cli: &Cli, path: &Path) -> Result<Option<Node<Self::Leaf>>, Error>;
 
     /// Prepare the reconciled `result` for the output phase: its serialized bytes
-    /// (byte formats only — `None` for a tree, which has no single byte stream) and
+    /// (byte formats only -- `None` for a tree, which has no single byte stream) and
     /// whether applying it would change on-disk state. Combined into one call so a
     /// byte backend reads the current target **once**: the comment-preserving
     /// serialize and the change check share that single snapshot, as the pre-`Backend`
@@ -80,7 +80,7 @@ pub(crate) trait Backend {
     ) -> Result<(), Error>;
 
     /// The reconcile-run driver: read the three inputs, reconcile, then `--diff` /
-    /// `--check` / `--stdout` / apply. Provided — backends supply only the I/O ends
+    /// `--check` / `--stdout` / apply. Provided -- backends supply only the I/O ends
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
     /// `ByteBackend::<Json>::run(cli)` / `Directory::run(cli)`.
     fn run(cli: &Cli) -> Result<Outcome, Error> {
@@ -116,7 +116,7 @@ pub(crate) trait Backend {
         let (mut result, conflicts) = reconcile(&target, &desired, base.as_ref(), &opts);
         // A `merge` array where TARGET and DESIRED reorder the same elements
         // contradictorily is resolved deterministically (TARGET order preferred);
-        // warn so the reorder isn't applied silently. Diagnostics only — the exit
+        // warn so the reorder isn't applied silently. Diagnostics only -- the exit
         // code is unaffected. Byte formats only: a tree has no arrays, so
         // `conflicts` is empty.
         for c in &conflicts {
