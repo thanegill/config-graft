@@ -19,6 +19,12 @@ use indexmap::IndexMap;
 pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug {
     /// Compact single-line rendering for `--diff`.
     fn render(&self) -> String;
+
+    /// True for a directory's own-attributes leaf, whose empty-string key is the
+    /// reserved directory-attrs slot, not a real entry.
+    fn is_dir_attrs(&self) -> bool {
+        false
+    }
 }
 
 /// Canonical `f64` bit pattern for the float-carrying leaf types' `Eq`/`Hash`.

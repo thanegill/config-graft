@@ -276,6 +276,13 @@ impl Leaf for FsLeaf {
             FsLeaf::DirectoryAttributes(attrs) => format!("dir({})", attrs.render_summary()),
         }
     }
+
+    /// A [`FsLeaf::DirectoryAttributes`] leaf occupies the reserved empty-string
+    /// key of its directory's map -- it is that directory's own attributes, not a
+    /// real entry.
+    fn is_dir_attrs(&self) -> bool {
+        matches!(self, FsLeaf::DirectoryAttributes(_))
+    }
 }
 
 /// Recursively read the directory at `path` into a `Node<FsLeaf>`.
