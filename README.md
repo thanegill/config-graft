@@ -14,23 +14,27 @@ writes to (TARGET), while:
 ## Usage
 
 ```sh
-config-graft <TARGET> <DESIRED> [BASE]
+config-graft <FORMAT> <TARGET> <DESIRED> [BASE]   # FORMAT: json | yaml | toml | plist | directory
 
-config-graft config.json desired.json .state/last-applied.json
-config-graft --check config.json desired.json base.json    # exit 3 if it would change
-config-graft --stdout --diff config.json desired.json       # preview without writing
-config-graft --array-strategy replace config.json desired.json  # own the list wholesale
-config-graft --merge-key name config.json desired.json          # match list-of-objects by `name`
+config-graft json config.json desired.json .state/last-applied.json
+config-graft json --check config.json desired.json base.json    # exit 3 if it would change
+config-graft json --stdout --diff config.json desired.json       # preview without writing
+config-graft json --array-strategy replace config.json desired.json  # own the list wholesale
+config-graft json --merge-key name config.json desired.json          # match list-of-objects by `name`
 
-config-graft app.plist desired.plist base.plist             # same merge, plist files
-config-graft --format plist config desired                  # force plist on any name
-config-graft --plist-binary app.plist desired.plist         # write a binary plist
+config-graft plist app.plist desired.plist base.plist        # same merge, plist files
+config-graft plist config desired                            # plist on any name (the subcommand names the format)
+config-graft plist --plist-binary app.plist desired.plist    # write a binary plist
 
-config-graft config.yaml desired.yaml                       # YAML, keeping comments
-config-graft config.toml desired.toml                       # TOML, keeping comments
+config-graft yaml config.yaml desired.yaml                  # YAML, keeping comments
+config-graft toml config.toml desired.toml                  # TOML, keeping comments
 
-config-graft --format directory dest/ desired/              # reconcile a directory tree
+config-graft directory dest/ desired/                       # reconcile a directory tree
 ```
+
+The format is a required **subcommand** (`json`, `yaml`, `toml`, `plist`, or
+`directory`); each subcommand exposes only the flags that apply to it, so an
+unsupported flag/format pairing is a usage error rather than a runtime one.
 
 By default (`--array-strategy merge`) two arrays are reconciled three-way against
 BASE, move-aware: keep what either side has, prune a BASE element DESIRED dropped,
@@ -90,18 +94,17 @@ carrying it; otherwise `merge` falls back to whole-value matching.
 ## Formats
 
 The merge engine is format-agnostic; **JSON**, Apple **plist**, **YAML**, and
-**TOML** are supported (plus a **directory** mode, below). The format is inferred
-from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → YAML, `.toml` → TOML,
-else JSON) and governs every file in the run (TARGET, DESIRED, BASE, and output)
-— there is no cross-format conversion. Override detection with
-`--format json|plist|yaml|toml`; `directory` must be requested explicitly.
+**TOML** are supported (plus a **directory** mode, below). The format is chosen by
+the subcommand (`config-graft json|plist|yaml|toml|directory ...`) and governs
+every file in the run (TARGET, DESIRED, BASE, and output) — there is no
+cross-format conversion.
 
 Plist notes:
 
 - Reads accept **both** XML and binary plist. Output is normalized **XML by
   default**; pass `--plist-binary` to write a binary plist instead.
 - plist's `Date`/`Data`/`Uid` scalars are atomic leaves and round-trip losslessly.
-- plist has no `null`. `--indent` is JSON-only; passing it with plist is an error.
+- plist has no `null`. `--indent` is exposed only by the `json` subcommand.
 
 YAML notes:
 
@@ -155,7 +158,7 @@ reconcile through `cfprefsd` (`defaults`/`plutil`) instead of editing the file;
 that path is macOS only (asserted at build time), per-user under home-manager and
 system/global under nix-darwin.
 
-`managedDirectory` is the `--format directory` wrapper: each entry reconciles a
+`managedDirectory` is the `directory` subcommand wrapper: each entry reconciles a
 `source` directory *tree* into `target`, keeping app-created files and pruning
 files dropped from `source`. It takes `manageRoot`, `noOwner` (set it on a
 non-root home-manager activation — a store-built source is root-owned), and
@@ -218,12 +221,12 @@ A home-manager `flake.nix` sketch:
 
 ## Directory mode
 
-`--format directory` reconciles a whole **directory tree** instead of a single
-file — TARGET, DESIRED, and BASE are directories. A directory is a map and a file
-or symlink is an atomic leaf, so the same three-way merge manages *which files
-exist and what they contain* one filesystem level up: app-created files are
+The `directory` subcommand reconciles a whole **directory tree** instead of a
+single file — TARGET, DESIRED, and BASE are directories. A directory is a map and
+a file or symlink is an atomic leaf, so the same three-way merge manages *which
+files exist and what they contain* one filesystem level up: app-created files are
 preserved, and files you stop declaring are pruned (BASE-driven, keeping user
-edits). It is opt-in — `directory` is never inferred from a path.
+edits). It is opt-in — you request it with the `directory` subcommand.
 
 - **Minimal, in-place writes.** Only changed files are created/updated/deleted,
   so app-owned files keep their inode and mtime. Each file is written atomically,
@@ -243,14 +246,16 @@ edits). It is opt-in — `directory` is never inferred from a path.
   file is refused rather than deleting content it never managed.
 - The **root** directory (the one you point at) is left untouched by default;
   `--manage-root` reconciles its own attributes too.
-- `--stdout` is unsupported (a tree has no single byte stream); `--indent` /
-  `--plist-binary` error; `--array-strategy` / `--sort-keys` are inert.
+- The `directory` subcommand exposes only `--manage-root` / `--no-owner` /
+  `--xattrs` (plus the shared `--diff` / `--check`); the byte-format flags
+  (`--stdout`, `--indent`, `--plist-binary`, `--array-strategy`, `--sort-keys`,
+  `--merge-key`) don't exist on it, so passing one is a usage error.
 
 ```sh
-config-graft --format directory dest/ desired/                  # reconcile a tree
-config-graft --format directory --diff --check dest/ desired/   # preview drift
-config-graft --manage-root --format directory dest/ desired/    # also the root's own attrs
-config-graft --format directory --no-owner --xattrs safe dest/ desired/  # narrow metadata scope
+config-graft directory dest/ desired/                  # reconcile a tree
+config-graft directory --diff --check dest/ desired/   # preview drift
+config-graft directory --manage-root dest/ desired/    # also the root's own attrs
+config-graft directory --no-owner --xattrs safe dest/ desired/  # narrow metadata scope
 ```
 
 The multi-file apply is best-effort, not one transaction: a crash mid-apply

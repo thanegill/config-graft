@@ -13,7 +13,7 @@ fn creates_missing_target_with_parents() {
     let desired = dir.path().join("desired.json");
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
 
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
@@ -31,6 +31,7 @@ fn reconciles_in_place_three_way() {
     fs::write(&base, r#"{"a":1,"b":2}"#).unwrap();
 
     let out = run(&[
+        "json",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
         base.to_str().unwrap(),
@@ -51,6 +52,7 @@ fn check_reports_pending_change_and_writes_nothing() {
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--check",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -67,10 +69,13 @@ fn apply_is_idempotent() {
     fs::write(&target, "{}").unwrap();
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     let out = run(&[
+        "json",
         "--check",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -87,6 +92,7 @@ fn stdout_does_not_modify_target() {
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--stdout",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -114,6 +120,7 @@ fn stdout_write_failure_is_reported() {
     // file) -- the regression Fix A guards against.
     let mut child = Command::new(BIN)
         .args([
+            "json",
             "--stdout",
             target.to_str().unwrap(),
             desired.to_str().unwrap(),
@@ -138,7 +145,7 @@ fn invalid_desired_exits_one() {
     let desired = dir.path().join("desired.json");
     fs::write(&desired, "not json {").unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));
 }
 
@@ -149,13 +156,13 @@ fn non_object_desired_exits_one() {
     let desired = dir.path().join("desired.json");
     fs::write(&desired, "[1,2,3]").unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]
 fn missing_args_is_usage_error() {
-    let out = run(&[]);
+    let out = run(&["json"]);
     assert_eq!(out.status.code(), Some(2));
 }
 
@@ -168,6 +175,7 @@ fn array_strategy_set_merges_ignoring_order() {
     fs::write(&desired, r#"{"tags":["b","c"]}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--array-strategy",
         "set",
         target.to_str().unwrap(),
@@ -192,6 +200,7 @@ fn array_strategy_merge_is_three_way_against_base() {
     fs::write(&base, r#"{"tags":["a","b"]}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--array-strategy",
         "merge",
         target.to_str().unwrap(),
@@ -213,7 +222,7 @@ fn merge_conflict_warns_on_stderr_without_failing() {
     fs::write(&target, r#"{"l":["x","y"]}"#).unwrap();
     fs::write(&desired, r#"{"l":["y","x"]}"#).unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success()); // conflicts warn but don't change the exit code
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("contradictory reorder"), "stderr was: {err}");
@@ -233,7 +242,7 @@ fn clean_merge_does_not_warn() {
     fs::write(&target, r#"{"l":["a","b"]}"#).unwrap();
     fs::write(&desired, r#"{"l":["a","b","c"]}"#).unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     assert!(out.stderr.is_empty(), "unexpected stderr");
 }
@@ -264,6 +273,7 @@ fn merge_key_matches_objects_by_field() {
     .unwrap();
 
     let out = run(&[
+        "json",
         "--merge-key",
         "name",
         target.to_str().unwrap(),
@@ -293,6 +303,7 @@ fn merge_key_nested_conflict_warns_with_element_selector() {
     fs::write(&desired, r#"{"servers":[{"name":"web","tags":["y","x"]}]}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--merge-key",
         "name",
         target.to_str().unwrap(),
@@ -319,6 +330,7 @@ fn merge_key_scoped_to_object_key() {
     fs::write(&base, r#"{"servers":[{"name":"web"}]}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--merge-key",
         "servers=name",
         target.to_str().unwrap(),
@@ -353,6 +365,7 @@ fn merge_key_scoped_to_a_dotted_path() {
     .unwrap();
 
     let out = run(&[
+        "json",
         "--merge-key",
         "a.items=id",
         target.to_str().unwrap(),
@@ -378,6 +391,7 @@ fn array_strategy_concat_appends() {
     fs::write(&desired, r#"{"a":[2,3]}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--array-strategy",
         "concat",
         target.to_str().unwrap(),
@@ -398,7 +412,7 @@ fn array_strategy_default_is_merge() {
 
     // No --array-strategy: the default is `merge`. With no BASE it reconciles as a
     // union (keeping TARGET's elements, appending DESIRED's) rather than replacing.
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
     assert_eq!(v, serde_json::json!({"a":[1, 2, 3, 9]}));
@@ -412,6 +426,7 @@ fn invalid_array_strategy_is_usage_error() {
     fs::write(&desired, "{}").unwrap();
 
     let out = run(&[
+        "json",
         "--array-strategy",
         "bogus",
         target.to_str().unwrap(),
@@ -431,6 +446,7 @@ fn no_prune_keeps_dropped_keys() {
     fs::write(&base, r#"{"a":1,"b":2}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--no-prune",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -452,6 +468,7 @@ fn base_flag_form_enables_pruning() {
     fs::write(&base, r#"{"a":1,"b":2}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--base",
         base.to_str().unwrap(),
         target.to_str().unwrap(),
@@ -472,7 +489,12 @@ fn empty_base_positional_is_treated_as_no_base() {
     fs::write(&target, r#"{"a":1,"b":2}"#).unwrap();
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap(), ""]);
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        "",
+    ]);
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
     assert_eq!(v, serde_json::json!({"a":1,"b":2}));
@@ -487,6 +509,7 @@ fn empty_base_flag_is_treated_as_no_base() {
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--base",
         "",
         target.to_str().unwrap(),
@@ -506,6 +529,7 @@ fn sort_keys_orders_output() {
     fs::write(&desired, r#"{"a":2}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--sort-keys",
         "--stdout",
         target.to_str().unwrap(),
@@ -527,6 +551,7 @@ fn indent_tab_is_honored() {
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--indent",
         "tab",
         "--stdout",
@@ -548,6 +573,7 @@ fn diff_reports_added_removed_changed() {
     fs::write(&base, r#"{"a":1}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--diff",
         "--check",
         target.to_str().unwrap(),
@@ -572,6 +598,7 @@ fn diff_labels_empty_string_key_unambiguously() {
     fs::write(&desired, r#"{"":1}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--diff",
         "--check",
         target.to_str().unwrap(),
@@ -597,6 +624,7 @@ fn diff_orders_by_path_components_not_rendered_string() {
     fs::write(&desired, r#"{"a":{"z":1},"a.b":2}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--diff",
         "--check",
         target.to_str().unwrap(),
@@ -618,9 +646,11 @@ fn preserves_existing_file_mode() {
     fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
     fs::write(&desired, r#"{"b":2}"#).unwrap();
 
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
@@ -634,7 +664,7 @@ fn writes_to_bare_filename_in_cwd() {
 
     let out = Command::new(BIN)
         .current_dir(dir.path())
-        .args(["config.json", desired.to_str().unwrap()])
+        .args(["json", "config.json", desired.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -654,6 +684,7 @@ fn diff_is_empty_when_nothing_changes() {
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--diff",
         "--check",
         target.to_str().unwrap(),
@@ -672,6 +703,7 @@ fn diff_omits_unchanged_keys() {
     fs::write(&desired, r#"{"a":2}"#).unwrap();
 
     let out = run(&[
+        "json",
         "--diff",
         "--check",
         target.to_str().unwrap(),
@@ -690,6 +722,7 @@ fn invalid_indent_is_usage_error() {
     fs::write(&desired, "{}").unwrap();
 
     let out = run(&[
+        "json",
         "--indent",
         "wat",
         target.to_str().unwrap(),
@@ -709,7 +742,7 @@ fn errors_when_target_directory_is_unwritable() {
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap(); // no write
 
     let target = ro.join("config.json");
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
 
     // Restore perms so the tempdir can be cleaned up.
     fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
@@ -722,7 +755,7 @@ fn not_a_mapping_error_names_json() {
     let target = dir.path().join("c.json");
     let desired = dir.path().join("d.json");
     fs::write(&desired, "[1,2,3]").unwrap();
-    let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("must be a JSON object"), "got: {err}");
 }
 
@@ -732,27 +765,24 @@ fn parse_failure_error_names_json() {
     let target = dir.path().join("c.json");
     let desired = dir.path().join("d.json");
     fs::write(&desired, "not json {").unwrap();
-    let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("not valid JSON"), "got: {err}");
 }
 
 #[test]
-fn plist_binary_flag_is_rejected_for_json() {
+fn plist_binary_flag_is_a_usage_error_for_json() {
+    // A plist-only flag isn't defined on the `json` subcommand, so clap rejects it
+    // structurally at parse time (exit 2), rather than a runtime error message.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
-    fs::write(&target, r#"{"a":1}"#).unwrap();
-    fs::write(&desired, r#"{"b":2}"#).unwrap();
+    fs::write(&desired, "{}").unwrap();
 
-    // A plist-only flag with a JSON target is an error, not a silent no-op.
-    let err = stderr_of(&[
-        "--plist-binary",
+    let out = run(&[
+        "json",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
+        "--plist-binary",
     ]);
-    assert!(
-        err.contains("--plist-binary applies to plist output only"),
-        "got: {err}"
-    );
-    assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#); // untouched
+    assert_eq!(out.status.code(), Some(2));
 }

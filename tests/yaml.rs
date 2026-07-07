@@ -26,6 +26,7 @@ fn reconciles_in_place_three_way_yaml() {
     fs::write(&base, "a: 1\nb: 2\n").unwrap();
 
     let out = run(&[
+        "yaml",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
         base.to_str().unwrap(),
@@ -47,6 +48,7 @@ fn array_strategy_set_yaml() {
     fs::write(&desired, "tags:\n  - b\n  - c\n").unwrap();
 
     let out = run(&[
+        "yaml",
         "--array-strategy",
         "set",
         target.to_str().unwrap(),
@@ -70,6 +72,7 @@ fn no_prune_keeps_dropped_keys_yaml() {
     fs::write(&base, "a: 1\nb: 2\n").unwrap();
 
     let out = run(&[
+        "yaml",
         "--no-prune",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -87,41 +90,9 @@ fn yaml_null_is_a_value_not_a_delete() {
     fs::write(&target, "a: 1\n").unwrap();
     fs::write(&desired, "a: null\n").unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: null\n");
-}
-
-#[test]
-fn yml_extension_is_detected_as_yaml() {
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("config.yml");
-    let desired = dir.path().join("desired.yml");
-    fs::write(&target, "a: 1\n").unwrap();
-    fs::write(&desired, "b: 2\n").unwrap();
-
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(out.status.success());
-    assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: 1\nb: 2\n");
-}
-
-#[test]
-fn format_flag_overrides_extension_yaml() {
-    let dir = tempfile::tempdir().unwrap();
-    // No YAML extension, so detection would pick JSON; --format forces YAML.
-    let target = dir.path().join("config");
-    let desired = dir.path().join("desired");
-    fs::write(&target, "a: 1\n").unwrap();
-    fs::write(&desired, "b: 2\n").unwrap();
-
-    let out = run(&[
-        "--format",
-        "yaml",
-        target.to_str().unwrap(),
-        desired.to_str().unwrap(),
-    ]);
-    assert!(out.status.success());
-    assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: 1\nb: 2\n");
 }
 
 #[test]
@@ -131,7 +102,7 @@ fn creates_missing_yaml_target_canonically() {
     let desired = dir.path().join("desired.yaml");
     fs::write(&desired, "a: 1\nb:\n  c: 2\n").unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     assert_yaml_eq(&fs::read_to_string(&target).unwrap(), "a: 1\nb:\n  c: 2\n");
 }
@@ -144,10 +115,13 @@ fn yaml_check_is_idempotent() {
     fs::write(&target, "a: 1\n").unwrap();
     fs::write(&desired, "a: 2\n").unwrap();
 
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     let out = run(&[
+        "yaml",
         "--check",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -166,6 +140,7 @@ fn yaml_golden(target_text: &str, desired_text: &str, base_text: Option<&str>, e
     fs::write(&target, target_text).unwrap();
     fs::write(&desired, desired_text).unwrap();
     let mut args = vec![
+        "yaml".to_string(),
         target.to_str().unwrap().to_string(),
         desired.to_str().unwrap().to_string(),
     ];
@@ -265,6 +240,7 @@ fn stdout_does_not_modify_yaml_target() {
     fs::write(&desired, "a: 2\n").unwrap();
 
     let out = run(&[
+        "yaml",
         "--stdout",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -283,6 +259,7 @@ fn check_reports_pending_yaml_change_and_writes_nothing() {
     fs::write(&desired, "a: 2\n").unwrap();
 
     let out = run(&[
+        "yaml",
         "--check",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -300,7 +277,7 @@ fn yaml_refuses(target_text: &str, desired_text: &str) {
     let desired = dir.path().join("desired.yaml");
     fs::write(&target, target_text).unwrap();
     fs::write(&desired, desired_text).unwrap();
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1), "expected refusal (exit 1)");
     assert_eq!(
         fs::read_to_string(&target).unwrap(),
@@ -343,7 +320,7 @@ fn invalid_desired_yaml_exits_one() {
     let desired = dir.path().join("desired.yaml");
     fs::write(&target, "a: 1\n").unwrap();
     fs::write(&desired, "1: a\n").unwrap(); // non-string key
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read_to_string(&target).unwrap(), "a: 1\n");
 }
@@ -358,18 +335,22 @@ fn canonical_first_apply_then_preserves_user_comments() {
     fs::write(&desired, "a: 1\n").unwrap();
 
     // First apply: target absent → canonical output.
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     // User edits the file, adding a comment.
     let edited = format!("{}b: 2  # mine\n", fs::read_to_string(&target).unwrap());
     fs::write(&target, &edited).unwrap();
 
     // Re-apply with a changed value: the user's comment survives.
     fs::write(&desired, "a: 9\n").unwrap();
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     assert_eq!(fs::read_to_string(&target).unwrap(), "a: 9\nb: 2  # mine\n");
 }
 
@@ -383,9 +364,11 @@ fn preserves_existing_file_mode_yaml() {
     fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
     fs::write(&desired, "a: 2\n").unwrap();
 
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
@@ -396,7 +379,7 @@ fn not_a_mapping_error_names_yaml() {
     let target = dir.path().join("c.yaml");
     let desired = dir.path().join("d.yaml");
     fs::write(&desired, "- 1\n- 2\n").unwrap();
-    let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("must be a YAML mapping"), "got: {err}");
 }
 
@@ -406,6 +389,23 @@ fn parse_failure_error_names_yaml() {
     let target = dir.path().join("c.yaml");
     let desired = dir.path().join("d.yaml");
     fs::write(&desired, "1: a\n").unwrap();
-    let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("not valid YAML"), "got: {err}");
+}
+
+#[test]
+fn indent_flag_is_a_usage_error_for_yaml() {
+    // `--indent` is a JSON-only flag; clap structurally rejects it under `yaml`.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    fs::write(&desired, "a: 1\n").unwrap();
+    let out = run(&[
+        "yaml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        "--indent",
+        "2",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
 }

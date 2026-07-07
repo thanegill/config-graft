@@ -68,7 +68,7 @@ let
       };
     };
 
-  # The `--format directory` option: reconcile a whole `source` tree into an
+  # The `directory` subcommand option: reconcile a whole `source` tree into an
   # absolute target directory. Distinct from the byte formats (no `settings`).
   directoryOption = lib.mkOption {
     default = { };
@@ -76,7 +76,7 @@ let
       System-level directory *trees* an application owns and writes to, which should
       be partially managed declaratively. Each entry reconciles its {option}`source`
       tree into the absolute {option}`target` during system activation (via
-      {command}`config-graft --format directory`): files the app created are kept,
+      {command}`config-graft directory`): files the app created are kept,
       files dropped from {option}`source` are pruned, and per-file mode/owner/xattrs
       are reconciled.
     '';

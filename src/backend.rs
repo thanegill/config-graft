@@ -18,7 +18,7 @@ use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, WriteOpts};
 use crate::reconcile::{reconcile, MergeKeys, Options};
 use crate::value::{Leaf, Node};
-use crate::Cli;
+use crate::RunArgs;
 
 /// A reconciled result prepared for the output phase: its serialized bytes (byte
 /// formats only; `None` for a tree) and whether applying it would change on-disk
@@ -38,13 +38,10 @@ pub(crate) trait Backend {
     /// (`.` for JSON/YAML/TOML, `:` for plist), `/` for a directory tree.
     const COMPONENT_SEPARATOR: &'static str;
 
-    /// Reject CLI flags this backend doesn't support.
-    fn check_cli_args(cli: &Cli) -> Result<(), Error>;
-
     /// Parsed `--merge-key` specs for the array engine. Byte formats parse them
     /// against their own key-path separator; a tree has no arrays, so the default
     /// is empty.
-    fn merge_keys(_cli: &Cli) -> MergeKeys {
+    fn merge_keys(_args: &RunArgs) -> MergeKeys {
         MergeKeys::default()
     }
     /// Error for a DESIRED that is absent/unreadable.
@@ -54,7 +51,7 @@ pub(crate) trait Backend {
 
     /// Read a path into a `Node`. `Ok(None)` means absent/coercible-to-empty; an
     /// `Err` is a hard failure (e.g. a non-directory target for the tree backend).
-    fn read(cli: &Cli, path: &Path) -> Result<Option<Node<Self::Leaf>>, Error>;
+    fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<Self::Leaf>>, Error>;
 
     /// Prepare the reconciled `result` for the output phase: its serialized bytes
     /// (byte formats only -- `None` for a tree, which has no single byte stream) and
@@ -64,7 +61,7 @@ pub(crate) trait Backend {
     /// `run<F>` did (two separate reads could serialize from a stale template if the
     /// target were edited between them).
     fn prepare(
-        cli: &Cli,
+        args: &RunArgs,
         target: &Node<Self::Leaf>,
         result: &Node<Self::Leaf>,
     ) -> Result<Prepared, Error>;
@@ -72,7 +69,7 @@ pub(crate) trait Backend {
     /// Apply the reconciled `result` to the target. `base` is the reconcile
     /// ancestor (used by the tree backend to refuse deleting app content).
     fn apply(
-        cli: &Cli,
+        args: &RunArgs,
         target: &Node<Self::Leaf>,
         result: &Node<Self::Leaf>,
         base: Option<&Node<Self::Leaf>>,
@@ -82,36 +79,34 @@ pub(crate) trait Backend {
     /// The reconcile-run driver: read the three inputs, reconcile, then `--diff` /
     /// `--check` / `--stdout` / apply. Provided -- backends supply only the I/O ends
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
-    /// `ByteBackend::<Json>::run(cli)` / `Directory::run(cli)`.
-    fn run(cli: &Cli) -> Result<Outcome, Error> {
-        Self::check_cli_args(cli)?;
-
-        let desired = Self::read(cli, &cli.desired)?
-            .ok_or_else(|| Self::error_invalid_desired(cli.desired.clone()))?;
+    /// `ByteBackend::<Json>::run(args)` / `Directory::run(args)`.
+    fn run(args: &RunArgs) -> Result<Outcome, Error> {
+        let desired = Self::read(args, &args.desired)?
+            .ok_or_else(|| Self::error_invalid_desired(args.desired.clone()))?;
         if !desired.is_map() {
-            return Err(Self::error_desired_not_mapping(cli.desired.clone()));
+            return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
 
         // Missing/unparseable/non-map TARGET is treated as empty (a hard read error,
         // e.g. a non-directory tree target, still propagates).
-        let target = Self::read(cli, &cli.target)?
+        let target = Self::read(args, &args.target)?
             .filter(Node::is_map)
             .unwrap_or_else(Node::empty_map);
 
         // Empty/missing/unreadable BASE disables pruning (first run).
-        let base_path = cli
+        let base_path = args
             .base_flag
             .as_deref()
-            .or(cli.base.as_deref())
+            .or(args.base.as_deref())
             .filter(|p| !p.is_empty());
         let base = base_path
-            .and_then(|p| Self::read(cli, Path::new(p)).ok().flatten())
+            .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
             .filter(Node::is_map);
 
         let opts = Options {
-            prune: !cli.no_prune,
-            arrays: cli.array_strategy,
-            merge_keys: Self::merge_keys(cli),
+            prune: !args.no_prune,
+            arrays: args.array_strategy,
+            merge_keys: Self::merge_keys(args),
         };
         let (mut result, conflicts) = reconcile(&target, &desired, base.as_ref(), &opts);
         // A `merge` array where TARGET and DESIRED reorder the same elements
@@ -128,40 +123,39 @@ pub(crate) trait Backend {
                 elements.join(", ")
             );
         }
-        if cli.sort_keys {
+        if args.sort_keys {
             result = result.sort_keys();
         }
 
-        let Prepared { output, changed } = Self::prepare(cli, &target, &result)?;
+        let Prepared { output, changed } = Self::prepare(args, &target, &result)?;
 
-        if cli.diff {
+        if args.diff {
             print!("{}", target.diff(&result, Self::COMPONENT_SEPARATOR));
         }
 
-        if cli.check {
+        if args.check {
             return Ok(if changed {
                 Outcome::WouldChange
             } else {
                 Outcome::Applied
             });
         }
-        if cli.stdout {
-            match output {
-                Some(bytes) => {
-                    // Surface write failures (ENOSPC/EIO/BrokenPipe/...): a discarded
-                    // error means `config-graft --stdout > file` could truncate the
-                    // file yet still exit 0. Flush too, so a deferred buffer error
-                    // isn't lost. No error kind is special-cased.
-                    let mut out = std::io::stdout();
-                    out.write_all(&bytes).map_err(Error::StdoutWrite)?;
-                    out.flush().map_err(Error::StdoutWrite)?;
-                    return Ok(Outcome::Applied);
-                }
-                None => return Err(Error::StdoutUnsupportedForDirectory),
-            }
+        if args.stdout {
+            // Only the byte formats expose `--stdout`; the directory subcommand has
+            // no such flag, so `stdout` is always false for a tree and this branch
+            // is byte-only -- `output` is always `Some` here.
+            let bytes = output.expect("byte backend produces output when --stdout is set");
+            // Surface write failures (ENOSPC/EIO/BrokenPipe/...): a discarded error
+            // means `config-graft ... --stdout > file` could truncate the file yet
+            // still exit 0. Flush too, so a deferred buffer error isn't lost. No
+            // error kind is special-cased.
+            let mut out = std::io::stdout();
+            out.write_all(&bytes).map_err(Error::StdoutWrite)?;
+            out.flush().map_err(Error::StdoutWrite)?;
+            return Ok(Outcome::Applied);
         }
         if changed {
-            Self::apply(cli, &target, &result, base.as_ref(), output.as_deref())?;
+            Self::apply(args, &target, &result, base.as_ref(), output.as_deref())?;
         }
         Ok(Outcome::Applied)
     }
@@ -178,43 +172,8 @@ impl<F: Format> Backend for ByteBackend<F> {
     // separator (`.` for JSON/YAML/TOML, `:` for plist).
     const COMPONENT_SEPARATOR: &'static str = F::PATH_SEP;
 
-    fn merge_keys(cli: &Cli) -> MergeKeys {
-        crate::parse_merge_keys(&cli.merge_key, F::PATH_SEP)
-    }
-
-    fn check_cli_args(cli: &Cli) -> Result<(), Error> {
-        // Format-specific flags must match the resolved format.
-        if cli.indent.is_some() && F::KIND != FormatKind::Json {
-            return Err(Error::IncompatibleFlag {
-                flag: "--indent",
-                only: "JSON",
-            });
-        }
-        if cli.plist_binary && F::KIND != FormatKind::Plist {
-            return Err(Error::IncompatibleFlag {
-                flag: "--plist-binary",
-                only: "plist",
-            });
-        }
-        if cli.manage_root {
-            return Err(Error::IncompatibleFlag {
-                flag: "--manage-root",
-                only: "--format directory",
-            });
-        }
-        if cli.no_owner {
-            return Err(Error::IncompatibleFlag {
-                flag: "--no-owner",
-                only: "--format directory",
-            });
-        }
-        if cli.xattrs.is_some() {
-            return Err(Error::IncompatibleFlag {
-                flag: "--xattrs",
-                only: "--format directory",
-            });
-        }
-        Ok(())
+    fn merge_keys(args: &RunArgs) -> MergeKeys {
+        crate::parse_merge_keys(&args.merge_key, F::PATH_SEP)
     }
 
     fn error_invalid_desired(path: PathBuf) -> Error {
@@ -225,12 +184,12 @@ impl<F: Format> Backend for ByteBackend<F> {
         F::KIND.desired_not_mapping(path)
     }
 
-    fn read(_cli: &Cli, path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
+    fn read(_args: &RunArgs, path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
         Ok(read_file::<F>(path))
     }
 
     fn prepare(
-        cli: &Cli,
+        args: &RunArgs,
         _target: &Node<F::Leaf>,
         result: &Node<F::Leaf>,
     ) -> Result<Prepared, Error> {
@@ -238,10 +197,10 @@ impl<F: Format> Backend for ByteBackend<F> {
         // comment-preserving edits, and change detection compares against it (JSON/
         // plist ignore it when serializing). A single read keeps the serialized
         // output and the "changed?" verdict consistent against one snapshot.
-        let current = fs::read(&cli.target).unwrap_or_default();
+        let current = fs::read(&args.target).unwrap_or_default();
         let write_opts = WriteOpts {
-            indent: cli.indent.unwrap_or(Indent::Spaces(2)),
-            plist_binary: cli.plist_binary,
+            indent: args.indent.unwrap_or(Indent::Spaces(2)),
+            plist_binary: args.plist_binary,
         };
         let output = F::serialize(result, &current, write_opts)?;
         Ok(Prepared {
@@ -251,44 +210,26 @@ impl<F: Format> Backend for ByteBackend<F> {
     }
 
     fn apply(
-        cli: &Cli,
+        args: &RunArgs,
         _target: &Node<F::Leaf>,
         _result: &Node<F::Leaf>,
         _base: Option<&Node<F::Leaf>>,
         output: Option<&[u8]>,
     ) -> Result<(), Error> {
         let output = output.expect("byte backend always produces output");
-        crate::write_atomic(&cli.target, output).map_err(|e| Error::Write {
-            path: cli.target.clone(),
+        crate::write_atomic(&args.target, output).map_err(|e| Error::Write {
+            path: args.target.clone(),
             source: e,
         })
     }
 }
 
-/// The `--format directory` tree backend.
+/// The `directory` (tree) backend.
 pub(crate) struct Directory;
 
 impl Backend for Directory {
     type Leaf = FsLeaf;
     const COMPONENT_SEPARATOR: &'static str = "/";
-
-    fn check_cli_args(cli: &Cli) -> Result<(), Error> {
-        // Flags that only shape single-file byte output have no meaning for a tree
-        // (`--stdout` is rejected by the driver, since a tree has no byte form).
-        if cli.indent.is_some() {
-            return Err(Error::IncompatibleFlag {
-                flag: "--indent",
-                only: "JSON",
-            });
-        }
-        if cli.plist_binary {
-            return Err(Error::IncompatibleFlag {
-                flag: "--plist-binary",
-                only: "plist",
-            });
-        }
-        Ok(())
-    }
 
     fn error_invalid_desired(path: PathBuf) -> Error {
         // Only reached when the read returned `None` (absent); a DESIRED that
@@ -301,12 +242,12 @@ impl Backend for Directory {
         FormatKind::Directory.desired_not_mapping(path)
     }
 
-    fn read(cli: &Cli, path: &Path) -> Result<Option<Node<FsLeaf>>, Error> {
-        directory::read_tree(path, cli.manage_root, cli.dir_policy())
+    fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<FsLeaf>>, Error> {
+        directory::read_tree(path, args.manage_root, args.dir_policy())
     }
 
     fn prepare(
-        _cli: &Cli,
+        _args: &RunArgs,
         target: &Node<FsLeaf>,
         result: &Node<FsLeaf>,
     ) -> Result<Prepared, Error> {
@@ -318,17 +259,18 @@ impl Backend for Directory {
     }
 
     fn apply(
-        cli: &Cli,
+        args: &RunArgs,
         target: &Node<FsLeaf>,
         result: &Node<FsLeaf>,
         base: Option<&Node<FsLeaf>>,
         _output: Option<&[u8]>,
     ) -> Result<(), Error> {
-        directory::apply_tree(&cli.target, Some(target), result, base, cli.dir_policy()).map(|_| ())
+        directory::apply_tree(&args.target, Some(target), result, base, args.dir_policy())
+            .map(|_| ())
     }
 }
 
-impl Cli {
+impl RunArgs {
     /// The metadata policy for a directory run: manage everything by default, with
     /// `--no-owner` and `--xattrs` as opt-outs.
     fn dir_policy(&self) -> AttrPolicy {

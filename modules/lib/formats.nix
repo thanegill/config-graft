@@ -1,5 +1,5 @@
 # Per-format descriptors, keyed by the format name. The key is also the
-# `pkgs.formats.<name>` generator and the `--format` value config-graft takes, so
+# `pkgs.formats.<name>` generator and the config-graft subcommand name, so
 # every format is uniform: `settings` is serialized by a `pkgs.formats` generator
 # (plist included, via `pkgs.formats.plist`). Consumers add the key back as `name`.
 {

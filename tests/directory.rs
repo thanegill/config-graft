@@ -1,4 +1,4 @@
-//! `--format directory` CLI integration tests.
+//! `directory` subcommand CLI integration tests.
 
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
@@ -8,9 +8,9 @@ use std::process::Command;
 mod common;
 use common::run;
 
-/// Run config-graft in directory mode with the given trailing args.
+/// Run config-graft's `directory` subcommand with the given trailing args.
 fn graft(args: &[&str]) -> std::process::Output {
-    let mut v = vec!["--format", "directory"];
+    let mut v = vec!["directory"];
     v.extend_from_slice(args);
     run(&v)
 }
@@ -409,7 +409,9 @@ fn diff_reports_added_removed_changed_with_slash_paths() {
 }
 
 #[test]
-fn stdout_is_unsupported() {
+fn stdout_flag_is_a_usage_error_for_directory() {
+    // The directory subcommand no longer exposes `--stdout`, so clap rejects it
+    // structurally as a usage error (exit 2), not a runtime error.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");
     let desired = dir.path().join("desired");
@@ -420,9 +422,7 @@ fn stdout_is_unsupported() {
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
-    assert_eq!(out.status.code(), Some(1));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--stdout is not supported"), "got: {err}");
+    assert_eq!(out.status.code(), Some(2));
 }
 
 #[test]
@@ -534,23 +534,6 @@ fn apply_is_idempotent() {
 }
 
 #[test]
-fn manage_root_is_rejected_without_directory_format() {
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("c.json");
-    let desired = dir.path().join("d.json");
-    fs::write(&desired, "{}").unwrap();
-    // --manage-root only applies to --format directory.
-    let out = run(&[
-        "--manage-root",
-        target.to_str().unwrap(),
-        desired.to_str().unwrap(),
-    ]);
-    assert_eq!(out.status.code(), Some(1));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--manage-root"), "got: {err}");
-}
-
-#[test]
 fn manage_root_reconciles_the_target_root_mode() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");
@@ -629,22 +612,6 @@ fn diff_reports_root_mode_change_with_manage_root() {
         diff.contains("0755") && diff.contains("0700"),
         "diff was: {diff:?}"
     );
-}
-
-#[test]
-fn metadata_flags_are_rejected_for_non_directory_format() {
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("c.json");
-    let desired = dir.path().join("d.json");
-    fs::write(&desired, "{}").unwrap();
-    // Directory-only metadata flags with a byte format are an error.
-    for flag in [vec!["--no-owner"], vec!["--xattrs", "safe"]] {
-        let mut args = flag.clone();
-        args.push(target.to_str().unwrap());
-        args.push(desired.to_str().unwrap());
-        let out = run(&args); // default (JSON) format
-        assert_eq!(out.status.code(), Some(1), "flag {flag:?}");
-    }
 }
 
 #[test]

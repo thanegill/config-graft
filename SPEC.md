@@ -35,32 +35,38 @@ previous generation). The tool only reads it.
 ### Synopsis
 
 ```
-config-graft [OPTIONS] <TARGET> <DESIRED> [BASE]
-config-graft [OPTIONS] --base <BASE> <TARGET> <DESIRED>
+config-graft <FORMAT> [OPTIONS] <TARGET> <DESIRED> [BASE]
+config-graft <FORMAT> [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 ```
+
+`<FORMAT>` is a required subcommand: `json`, `yaml`, `toml`, `plist`, or
+`directory`. It selects the format for the whole run (§5a) and determines which
+options are available — each subcommand exposes only the options that apply to it
+(so an unsupported option/format pairing is a usage error, exit 2). The
+`directory` subcommand makes TARGET/DESIRED/BASE *directories* rather than files
+(§5b).
 
 ### Arguments
 
-- `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent. With `--format directory` it is a directory tree (§5b).
-- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping / TOML table (or, with `--format directory`, a directory).
+- `TARGET` — path to the file to reconcile, in place. Created (with parents) if absent. With the `directory` subcommand it is a directory tree (§5b).
+- `DESIRED` — path to the managed config. Must be a valid JSON object / plist dictionary / YAML mapping / TOML table (or, with the `directory` subcommand, a directory).
 - `BASE` — path to the previous snapshot. Optional; absent/empty/invalid ⇒ no pruning (first-run behavior).
 
 ### Options
 
 - `--base <PATH>` — alternative to the positional BASE.
 - `--no-prune` — deep-merge only; never delete keys (ignore BASE for removals).
-- `--stdout` — write the result to stdout; do not modify TARGET.
+- `--stdout` — write the result to stdout; do not modify TARGET. Byte-format subcommands only (a tree has no single byte stream, so the `directory` subcommand does not expose it).
 - `--diff` — print a human-readable, leaf-level diff of the changes. Key-paths use the format's separator: `.` for JSON/YAML/TOML, `:` for plist (PlistBuddy) — same as the `merge` conflict warning.
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
-- `--indent <N|tab>` — output indentation (default: 2 spaces). **JSON only** — passing it with another format is an error (exit 1).
-- `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys).
-- `--array-strategy <merge|replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `merge` (three-way, move-aware against BASE; **the default**), `replace` (atomic), `concat` (append, keeping order and duplicates), or `set` (two-way union, ignoring order and dropping duplicates).
-- `--merge-key <[PATH=]FIELD>` — for `merge`, identify object-array elements by a field so keyed records are merged in place instead of matched by whole value (see §5). `FIELD` / `f1,f2` (candidate fields, first present wins) applies to any object-array; `PATH=FIELD` scopes it to the array at `PATH` — its full path from the document root, segments joined by the format separator (`.`, or `:` for plist). Repeatable.
-- `--format <json|plist|yaml|toml|directory>` — input/output format. Default: inferred from TARGET's extension (`.plist` → plist, `.yaml`/`.yml` → yaml, `.toml` → toml, else json). Governs every file in the run (§5a). `directory` is never inferred — it must be passed explicitly, and makes TARGET/DESIRED/BASE *directories* rather than files (§5b).
-- `--plist-binary` — write plist output as binary instead of XML. **Plist only** — passing it with another format is an error (exit 1).
-- `--manage-root` — also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs), not just its contents. **`--format directory` only** — passing it with another format is an error (exit 1). Off by default (§5b).
-- `--no-owner` — don't reconcile file/directory ownership (uid/gid); leave it to the filesystem. **`--format directory` only** (error otherwise). Owner is managed by default (§5b).
-- `--xattrs <all|safe|none>` — which extended attributes to reconcile: `all` (default, today's behavior), `safe` (a conservative allowlist that skips privileged/system namespaces — Linux `security.*`/`system.*`/`trusted.*`, macOS `com.apple.*` system attrs), or `none`. **`--format directory` only** (error otherwise). Out-of-scope xattrs are neither captured nor removed — they're left as-is (§5b).
+- `--indent <N|tab>` — output indentation (default: 2 spaces). **`json` subcommand only** (it is the only subcommand that exposes this option).
+- `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys). Byte-format subcommands (`json`/`yaml`/`toml`/`plist`).
+- `--array-strategy <merge|replace|concat|set>` — how DESIRED arrays combine with TARGET arrays: `merge` (three-way, move-aware against BASE; **the default**), `replace` (atomic), `concat` (append, keeping order and duplicates), or `set` (two-way union, ignoring order and dropping duplicates). Byte-format subcommands.
+- `--merge-key <[PATH=]FIELD>` — for `merge`, identify object-array elements by a field so keyed records are merged in place instead of matched by whole value (see §5). `FIELD` / `f1,f2` (candidate fields, first present wins) applies to any object-array; `PATH=FIELD` scopes it to the array at `PATH` — its full path from the document root, segments joined by the format separator (`.`, or `:` for plist). Repeatable. Byte-format subcommands.
+- `--plist-binary` — write plist output as binary instead of XML. **`plist` subcommand only**.
+- `--manage-root` — also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs), not just its contents. **`directory` subcommand only**. Off by default (§5b).
+- `--no-owner` — don't reconcile file/directory ownership (uid/gid); leave it to the filesystem. **`directory` subcommand only**. Owner is managed by default (§5b).
+- `--xattrs <all|safe|none>` — which extended attributes to reconcile: `all` (default, today's behavior), `safe` (a conservative allowlist that skips privileged/system namespaces — Linux `security.*`/`system.*`/`trusted.*`, macOS `com.apple.*` system attrs), or `none`. **`directory` subcommand only**. Out-of-scope xattrs are neither captured nor removed — they're left as-is (§5b).
 
 ### Exit codes
 
@@ -103,9 +109,9 @@ Keys in `target` that were never in `base` or `desired` are always preserved.
 The engine runs on an internal value model; each format has a codec that maps
 its native value type ⇄ that model. Reconciliation is **homogeneous** — one
 format governs TARGET, DESIRED, BASE, and output — so a run is never a
-cross-format conversion. The format is inferred from TARGET's extension
-(`.plist` → plist, `.yaml`/`.yml` → YAML, `.toml` → TOML, else JSON) and can be
-forced with `--format`.
+cross-format conversion. The format is selected by the subcommand
+(`config-graft json|plist|yaml|toml|directory ...`); there is no extension
+inference.
 
 - **JSON** — objects, arrays, strings, numbers, booleans, `null`. Output is
   pretty-printed per `--indent`, key order preserved (§8).
@@ -138,12 +144,12 @@ forced with `--format`.
   can't make safely. A TOML document's root is always a table, so a desired TOML
   file that parses is always a valid mapping. `--indent` does not apply.
 
-## 5b. Directory mode (`--format directory`)
+## 5b. Directory mode (the `directory` subcommand)
 
 Instead of a single file, TARGET / DESIRED / BASE are **directory trees**, and
 config-graft reconciles *which files exist and their contents* — the same
-three-way merge, one filesystem level up. It is opt-in (`--format directory` is
-never inferred). The tree maps onto the same value model as every other format:
+three-way merge, one filesystem level up. It is opt-in (you request it with the
+`directory` subcommand). The tree maps onto the same value model as every other format:
 
 - a **directory** is the map/object shape (the container that merges); it also
   carries its **own metadata** (mode/owner/xattrs), reconciled the same way a
@@ -214,10 +220,12 @@ attributes + `rename`); each directory is then `fsync`ed once, after its entry
 changes settle, so those renames are crash-durable (best-effort — a filesystem
 that can't `fsync` a directory doesn't fail the apply); see §8 and §10 for the
 cross-file-atomicity trade-off.
-`--stdout` is unsupported (a tree has no single byte stream); `--indent` /
-`--plist-binary` error as with any non-matching format; `--array-strategy` /
-`--sort-keys` are inert (a tree has no arrays, and on-disk order isn't stored);
-`--manage-root` / `--no-owner` / `--xattrs` shape the metadata reconcile above.
+The `directory` subcommand accepts only `--manage-root` / `--no-owner` /
+`--xattrs` (which shape the metadata reconcile above) plus the common flags. The
+byte-format flags don't exist on it — passing `--stdout`, `--indent`,
+`--plist-binary`, `--array-strategy`, or `--sort-keys` is a clap usage error
+(exit 2), since a tree has no single byte stream, no arrays, and no stored on-disk
+order.
 
 ## 6. Pruning / user-edit preservation (the three-way bit)
 
@@ -334,7 +342,7 @@ Implemented in **Rust** (this repo):
   rather than on the map itself.
 - `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`,
   unit-tested against §12. Managed key paths are a `KeyPath` newtype.
-- `src/format/directory.rs` — the `--format directory` backend (§5b): an `FsLeaf` leaf
+- `src/format/directory.rs` — the `directory` subcommand backend (§5b): an `FsLeaf` leaf
   that stores each file as a **content handle** (length + SHA-256 digest + source
   path + a generic attribute map of mode/owner/xattrs) or a symlink; a recursive
   `read_tree` (streaming the digest, never buffering the bytes) and a minimal-diff
@@ -350,8 +358,8 @@ Implemented in **Rust** (this repo):
   `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind`
   selector, `Indent`, and `read_file`. The node type varies per format, so
   dispatch is **static** through the `Backend` trait's provided `run`: `main`
-  resolves the `FormatKind` and calls `ByteBackend::<F>::run` (or `Directory::run`
-  for a tree, §5b).
+  matches the clap subcommand, builds a `RunArgs` from its flags, and calls
+  `ByteBackend::<F>::run` (or `Directory::run` for a tree, §5b).
 - `src/format/yaml_edit.rs` — the comment-preserving YAML writer: a structural
   diff of the original vs reconciled `Node<YamlLeaf>` trees drives minimal
   byte-span edits against the original text (spans from `saphyr`'s `MarkedYaml`),
@@ -363,7 +371,7 @@ Implemented in **Rust** (this repo):
   wouldn't reproduce the reconciled result.
 - `src/error.rs` — a typed `Error` enum (format-specific DESIRED errors) and an
   `Outcome`; `src/main.rs` maps these to exit codes.
-- `src/main.rs` — CLI (clap), I/O, atomic write, `--check`/`--diff`/`--stdout`/`--format`.
+- `src/main.rs` — CLI (clap, per-format subcommands), I/O, atomic write, `--check`/`--diff`/`--stdout`.
 - `tests/{json,plist,yaml,toml}.rs` (+ `tests/common`) — per-format integration
   tests exercising exit codes and file behavior.
 - Map nodes use `indexmap` (and the JSON codec keeps `serde_json`'s

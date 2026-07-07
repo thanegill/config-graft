@@ -6,14 +6,12 @@
 //! the output -- so there is never a cross-format conversion. Each format lives in
 //! its own module ([`json`], [`plist`], [`yaml`]); this module holds the shared
 //! [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] selector. The
-//! [`directory`] module is the odd one out: `--format directory` reconciles a
+//! [`directory`] module is the odd one out: the `directory` subcommand reconciles a
 //! whole tree, which has no single byte stream, so it does **not** implement the
 //! byte-oriented [`Format`] trait -- it provides its own tree reader/writer and
 //! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
 use std::path::{Path, PathBuf};
-
-use clap::ValueEnum;
 
 use crate::error::Error;
 use crate::value::{Leaf, Node};
@@ -31,9 +29,10 @@ pub use plist::Plist;
 pub use toml::Toml;
 pub use yaml::Yaml;
 
-/// Which file format a run uses -- a selector parsed from `--format` or inferred
-/// from the extension. The behavior lives in the [`Format`] trait it hands back.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+/// Which file format a run uses. Selected by the subcommand `main` dispatches on;
+/// each [`Format`] reports its own `KIND` so it can hand back format-specific
+/// errors. The behavior lives in the [`Format`] trait.
+#[derive(Clone, Copy, Debug)]
 pub enum FormatKind {
     Json,
     Plist,
@@ -45,20 +44,6 @@ pub enum FormatKind {
 }
 
 impl FormatKind {
-    /// Infer the format from a path's extension: `.plist` → plist,
-    /// `.yaml`/`.yml` → yaml, `.toml` → toml, everything else → json (all
-    /// case-insensitive).
-    pub fn detect(path: &Path) -> FormatKind {
-        match path.extension().and_then(|e| e.to_str()) {
-            Some(ext) if ext.eq_ignore_ascii_case("plist") => FormatKind::Plist,
-            Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
-                FormatKind::Yaml
-            }
-            Some(ext) if ext.eq_ignore_ascii_case("toml") => FormatKind::Toml,
-            _ => FormatKind::Json,
-        }
-    }
-
     /// The format-specific error for DESIRED failing to parse.
     pub fn invalid_desired(self, path: PathBuf) -> Error {
         match self {

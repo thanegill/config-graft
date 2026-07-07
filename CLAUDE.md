@@ -1,7 +1,7 @@
 # config-graft
 
 Three-way reconcile (kubectl-apply-style) for app-owned **JSON / plist / YAML /
-TOML** config files, plus a **directory-tree** mode (`--format directory`).
+TOML** config files, plus a **directory-tree** mode (the `directory` subcommand).
 `SPEC.md` is the source of truth for merge semantics; this file is orientation for
 working on the code.
 
@@ -32,16 +32,22 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   special engine path (DESIRED wins on conflict, as for any leaf).
 - `src/format/{json,plist,yaml,toml}.rs` — per-format leaf enum + `ValueCodec`
   (native ⇄ `Node`) + `Format` (parse/serialize). `mod.rs` holds the traits,
-  `FormatKind`, `Indent`, `read_file`.
+  `FormatKind` (a per-format tag, no longer the dispatch selector), `Indent`,
+  `read_file`.
 - `src/backend.rs` — the `Backend` trait is the I/O boundary of a run (read the
   three inputs → reconcile → diff/check/stdout/apply); its provided `Backend::run`
   method owns that spine so **every format shares it**. Dispatch is **static**:
-  `main` matches the `FormatKind` and calls `ByteBackend::<F>::run(&cli)` for the
-  byte formats or `Directory::run(&cli)` for the tree. `ByteBackend<F>(PhantomData<F>)`
+  `main` matches the clap subcommand, builds a `RunArgs` (the internal options
+  struct the run reads) from that subcommand's flags, and calls
+  `ByteBackend::<F>::run(&args)` for the byte formats or `Directory::run(&args)`
+  for the tree. Because each subcommand exposes only its own flags, an unsupported
+  flag/format pairing is a clap usage error (exit 2), not a runtime check -- there
+  is no `check_cli_args`/`IncompatibleFlag`/`StdoutUnsupportedForDirectory`, and no
+  extension inference (no `FormatKind::detect`). `ByteBackend<F>(PhantomData<F>)`
   is a newtype over any `Format` (a blanket `impl<F: Format> Backend for F` would
-  collide with `Directory` under coherence). `dir_policy(cli)` builds the
+  collide with `Directory` under coherence). `RunArgs::dir_policy()` builds the
   `AttrPolicy` (`--no-owner`/`--xattrs`).
-- `src/format/directory.rs` — the `--format directory` tree backend, living beside
+- `src/format/directory.rs` — the `directory` subcommand tree backend, living beside
   the format codecs but **not a `Format`** (a tree has no byte stream); it plugs
   into the shared `run` via `impl Backend for Directory`. A `FsLeaf` file is a
   **content handle** (len + SHA-256 digest + source path + generic `attrs` map of
@@ -86,7 +92,7 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   via `format`), or a pre-built `source` file; the two are mutually exclusive
   (asserted); `target` defaults to the attribute name (entries keyed by path);
   `package` defaults to the flake's own build (threaded in via `self`), so no
-  overlay is needed. **`managedDirectory`** (`--format directory`) lives *beside*
+  overlay is needed. **`managedDirectory`** (the `directory` subcommand) lives *beside*
   the `formats` loop, not in it (a tree has no `settings`/generator): `common.nix`
   provides `directoryEntryType` (its `source` is a required directory, plus
   `manageRoot`/`noOwner`/`xattrs`) and `mkDirectoryReconcileScript`; each module
