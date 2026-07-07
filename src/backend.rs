@@ -148,7 +148,13 @@ pub(crate) trait Backend {
         if cli.stdout {
             match output {
                 Some(bytes) => {
-                    let _ = std::io::stdout().write_all(&bytes);
+                    // Surface write failures (ENOSPC/EIO/BrokenPipe/...): a discarded
+                    // error means `config-graft --stdout > file` could truncate the
+                    // file yet still exit 0. Flush too, so a deferred buffer error
+                    // isn't lost. No error kind is special-cased.
+                    let mut out = std::io::stdout();
+                    out.write_all(&bytes).map_err(Error::StdoutWrite)?;
+                    out.flush().map_err(Error::StdoutWrite)?;
                     return Ok(Outcome::Applied);
                 }
                 None => return Err(Error::StdoutUnsupportedForDirectory),
