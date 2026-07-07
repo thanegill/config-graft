@@ -68,7 +68,7 @@
             environment.managedToml."/etc/app/config.toml".settings.theme = "dark";
           }
 
-          # config-graft (3): `--format directory`: reconcile a whole tree into a
+          # config-graft (3): the `directory` subcommand: reconcile a whole tree into a
           # target directory. System activation runs as root, so a store-owned
           # source applies as-is (no `noOwner` needed).
           {

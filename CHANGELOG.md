@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Directory mode** (`--format directory`): reconcile a whole directory *tree*
+- **Directory mode** (the `directory` subcommand): reconcile a whole directory *tree*
   instead of a single file — TARGET, DESIRED, and BASE are directories. A
   directory is a map and a file/symlink is an atomic leaf, so the same three-way
   merge preserves app-created files and prunes files you stop declaring (keeping
@@ -37,8 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces, `--xattrs none` ignores extended attributes. In-scope xattrs on the
   target but absent from DESIRED are removed (they converge); a `chown` to the
   caller's own uid/gid is skipped so the common case needs no privilege.
-- **TOML** support alongside JSON, plist, and YAML. The format is inferred from
-  TARGET's extension (`.toml`) or forced with `--format toml`. Like YAML, an
+- **TOML** support alongside JSON, plist, and YAML. Selected with the `toml`
+  subcommand. Like YAML, an
   existing TOML target is edited in place (via `toml_edit`) so **comments, blank
   lines, and formatting are preserved** on the parts that don't change; only an
   empty/first-apply target is written canonically. Every write is verified to
@@ -78,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries take `cfprefsdDomain` (macOS). Runs config-graft by store path, defaulting
   to this flake's own build; override it per entry or module-wide via
   `managed.package`. See `examples/` for a full flake per platform.
-- `managedDirectory` (all three platforms) for `--format directory`: reconcile a
+- `managedDirectory` (all three platforms) for the `directory` subcommand: reconcile a
   whole `source` *tree* into a target directory — files the app adds are kept,
   files dropped from `source` are pruned, and per-file mode/owner/xattrs are
   reconciled. Directory-specific options `manageRoot`, `noOwner` (set it on a
@@ -87,6 +87,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: the format is now a required per-format subcommand**, replacing the
+  `--format` flag and extension inference. Invoke `config-graft
+  json|yaml|toml|plist|directory TARGET DESIRED [BASE] [flags]`; the format is no
+  longer guessed from TARGET's extension, and there is no `--format` flag. Each
+  subcommand exposes only the flags that apply to it (JSON `--indent`, plist
+  `--plist-binary`, the byte formats `--stdout`/`--sort-keys`/`--array-strategy`/`--merge-key`,
+  directory `--manage-root`/`--no-owner`/`--xattrs`), so an unsupported flag/format
+  pairing is now a CLI usage error (exit 2) enforced by the parser rather than a
+  runtime check.
 - **Default `--array-strategy` is now `merge`** (was `replace`): arrays are
   reconciled element-wise against BASE by default. Use `replace` to own a list
   wholesale, or for arrays of structurally anonymous objects that `merge` can't

@@ -5,7 +5,7 @@ Each subdirectory is a self-contained flake wiring config-graft into one platfor
 - [`home-manager/flake.nix`](home-manager/flake.nix): standalone home-manager
   (`home.managed{Json,Yaml,...}`, targets relative to `$HOME`); one entry uses
   `source` (a checked-in file) instead of inline `settings`, and one uses
-  `managedDirectory` (`--format directory`) to reconcile a whole source tree into
+  `managedDirectory` (the `directory` subcommand) to reconcile a whole source tree into
   a target directory. A second, aarch64-darwin, configuration (`alice-darwin`)
   demonstrates per-user `cfprefsdDomain` (reconciling a macOS preference domain
   through cfprefsd).
