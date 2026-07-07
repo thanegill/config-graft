@@ -740,15 +740,14 @@ fn write_file(
     // xattrs, not the link target's -- the `xattr` crate's `list`/`get` are the
     // no-follow variants (`llistxattr`/`lgetxattr`), matching that intent.
     if fs::symlink_metadata(dest).is_ok() {
-        if let Ok(names) = xattr::list(dest) {
-            for name in names {
-                if let Some(n) = name.to_str() {
-                    if !policy.xattrs.in_scope(n) {
-                        if let Ok(Some(value)) = xattr::get(dest, n) {
-                            xattr::set(tmp.path(), n, &value).map_err(|e| Error::write(dest, e))?;
-                        }
-                    }
-                }
+        let names = xattr::list(dest).unwrap_or_default();
+        for name in names {
+            let Some(name) = name.to_str() else { continue };
+            if policy.xattrs.in_scope(name) {
+                continue;
+            }
+            if let Ok(Some(value)) = xattr::get(dest, name) {
+                xattr::set(tmp.path(), name, &value).map_err(|e| Error::write(dest, e))?;
             }
         }
     }
