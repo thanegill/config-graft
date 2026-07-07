@@ -68,7 +68,7 @@ let
       };
     };
 
-  # The `--format directory` option: reconcile a whole `source` tree into a target
+  # The `directory` subcommand option: reconcile a whole `source` tree into a target
   # directory. Distinct from the byte formats (no `settings`), so it lives beside
   # the format loop rather than in it.
   directoryOption = lib.mkOption {
@@ -76,7 +76,7 @@ let
     description = ''
       Directory *trees* an application owns and writes to, which home-manager should
       partially manage. Each entry reconciles its {option}`source` tree into
-      {option}`target` during activation (via {command}`config-graft --format
+      {option}`target` during activation (via {command}`config-graft
       directory`): files the app created are kept, files dropped from {option}`source`
       are pruned, and per-file mode/xattrs (and, unless {option}`noOwner`, owner) are
       reconciled. All activation is handled by this module.

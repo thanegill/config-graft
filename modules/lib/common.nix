@@ -140,7 +140,7 @@ in
 
         # Graft our settings into the live state, then push it back through cfprefsd
         # so it adopts the merged result.
-        run ${lib.getExe entry.package} --format plist "$_live" ${desired} "$_prev"
+        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev"
         run /usr/bin/defaults import "$_domain" "$_live"
         rm -f "$_live"
       ''
@@ -148,12 +148,12 @@ in
       ''
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
-        run ${lib.getExe entry.package} --format ${format.name} "$_target" ${desired} "$_prev"
+        run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"
       '';
 
   # Directory-format entry type. Unlike the byte formats there is no `settings`
   # (freeform data through a `pkgs.formats` generator): the DESIRED is a prebuilt
-  # directory tree given as `source`, so `--format directory` gets its own entry
+  # directory tree given as `source`, so the `directory` subcommand gets its own entry
   # type with the directory-specific reconcile flags. Every declared entry is
   # active (`source` is required), so there is no `settings != {}` liveness test.
   directoryEntryType =
@@ -230,7 +230,7 @@ in
     );
 
   # The per-entry directory reconcile script, shared by every platform (the sibling
-  # of `mkEntryReconcileScript` for `--format directory`). The caller sets `_prev`
+  # of `mkEntryReconcileScript` for the `directory` subcommand). The caller sets `_prev`
   # (the BASE snapshot directory) beforehand and passes the resolved `target`; the
   # DESIRED is the entry's `source` tree.
   mkDirectoryReconcileScript =
@@ -249,7 +249,7 @@ in
     ''
       _target=${lib.escapeShellArg target}
       _i "Reconciling managed directory tree %s" "$_target"
-      run ${lib.getExe entry.package} --format directory ${flags} "$_target" ${entry.source} "$_prev"
+      run ${lib.getExe entry.package} directory ${flags} "$_target" ${entry.source} "$_prev"
     '';
 
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
