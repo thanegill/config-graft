@@ -732,14 +732,22 @@ fn write_file(
     // holds only in-scope xattrs and the fresh temp starts with none, so without
     // this a content rewrite under `--xattrs safe`/`none` would silently drop them.
     // Under the default `all` scope nothing is out of scope, so this is a no-op.
-    if let Ok(names) = xattr::list(dest) {
+    //
+    // Gate the whole block on `dest` already existing: a first write has nothing to
+    // preserve, so this avoids a wasted `xattr::list` ENOENT syscall per new file.
+    // Use `symlink_metadata` (never `metadata`, which follows symlinks) so that when
+    // `dest` is a symlink being replaced by this file we read the *link's* own
+    // xattrs, not the link target's -- the `xattr` crate's `list`/`get` are the
+    // no-follow variants (`llistxattr`/`lgetxattr`), matching that intent.
+    if fs::symlink_metadata(dest).is_ok() {
+        let names = xattr::list(dest).unwrap_or_default();
         for name in names {
-            if let Some(n) = name.to_str() {
-                if !policy.xattrs.in_scope(n) {
-                    if let Ok(Some(value)) = xattr::get(dest, n) {
-                        xattr::set(tmp.path(), n, &value).map_err(|e| Error::write(dest, e))?;
-                    }
-                }
+            let Some(name) = name.to_str() else { continue };
+            if policy.xattrs.in_scope(name) {
+                continue;
+            }
+            if let Ok(Some(value)) = xattr::get(dest, name) {
+                xattr::set(tmp.path(), name, &value).map_err(|e| Error::write(dest, e))?;
             }
         }
     }

@@ -777,3 +777,100 @@ fn eacces_mid_walk_refuses_whole_run() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(!target.join("a.txt").exists());
 }
+
+// --- xattr preservation is skipped when there is nothing (or nothing on-file) to
+// preserve: a first write of a brand-new target, and a symlink target replaced by a
+// regular file (whose link-target xattrs must not be grafted on). ---
+
+/// Best-effort xattr helper hung off `Path`, mirroring the private `PathExt`
+/// convention in `src/format/directory.rs`.
+trait PathXattrExt {
+    /// Best-effort xattr set; returns false if the filesystem doesn't support it
+    /// (e.g. tmpfs without user-xattr support), so the test can skip rather than
+    /// fail.
+    fn try_set_xattr(&self, name: &str, value: &[u8]) -> bool;
+}
+
+impl PathXattrExt for Path {
+    fn try_set_xattr(&self, name: &str, value: &[u8]) -> bool {
+        xattr::set(self, name, value).is_ok()
+    }
+}
+
+#[test]
+fn first_write_of_new_file_preserves_no_xattrs() {
+    // A first-time write has no existing `dest`, so the out-of-scope xattr
+    // preservation block is skipped entirely (no wasted ENOENT `xattr::list`). The
+    // observable effect: the freshly written file carries no grafted xattrs.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target"); // does not exist yet
+    let desired = dir.path().join("desired");
+    write(&desired.join("new.txt"), "fresh");
+
+    // `--xattrs none` puts every xattr out of scope, exercising the preservation
+    // path -- which must still be a no-op here because `dest` did not exist.
+    let out = graft(&[
+        "--xattrs",
+        "none",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let written = target.join("new.txt");
+    assert_eq!(read(&written), "fresh");
+    // Nothing was grafted (there was no source of xattrs to begin with).
+    let names: Vec<_> = xattr::list(&written)
+        .map(|n| n.filter_map(|x| x.to_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    assert!(names.is_empty(), "unexpected xattrs on new file: {names:?}");
+}
+
+#[test]
+fn replacing_symlink_does_not_graft_link_target_xattrs() {
+    // When a symlink target is replaced by a regular file under `--xattrs none`
+    // (every xattr out of scope, so preservation runs), we must read the *link's*
+    // own xattrs -- not the link target's. Reading through the symlink would copy an
+    // unrelated file's xattrs onto the new file.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+
+    // A real file the symlink points at, carrying an out-of-scope xattr.
+    let pointee = dir.path().join("pointee");
+    fs::write(&pointee, "pointee").unwrap();
+    if !pointee.try_set_xattr("user.graft_test", b"leak") {
+        eprintln!(
+            "skipping replacing_symlink_does_not_graft_link_target_xattrs: xattrs unsupported"
+        );
+        return;
+    }
+
+    // Target currently holds `link` as a symlink to `pointee`; desired wants a
+    // regular file there instead (a symlink -> file type change).
+    fs::create_dir_all(&target).unwrap();
+    symlink(&pointee, target.join("link")).unwrap();
+    write(&desired.join("link"), "replaced");
+
+    let out = graft(&[
+        "--xattrs",
+        "none",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+
+    let written = target.join("link");
+    // The symlink was replaced by the regular file...
+    assert!(!fs::symlink_metadata(&written)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(read(&written), "replaced");
+    // ...and the pointee's xattr was NOT grafted onto it.
+    assert_eq!(xattr::get(&written, "user.graft_test").unwrap(), None);
+    // The pointee keeps its own xattr (untouched).
+    assert_eq!(
+        xattr::get(&pointee, "user.graft_test").unwrap().as_deref(),
+        Some(b"leak".as_slice())
+    );
+}
