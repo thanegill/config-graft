@@ -166,15 +166,16 @@ pub fn reconcile<L: Leaf>(
     let mut removed: Vec<KeyPath> = Vec::new();
     if opts.prune {
         if let Some(base) = base {
-            let desired_leaves: HashSet<KeyPath> = leaf_paths(desired).into_iter().collect();
-            removed = leaf_paths(base)
+            let desired_leaves: HashSet<KeyPath> = desired.leaf_paths().into_iter().collect();
+            removed = base
+                .leaf_paths()
                 .into_iter()
                 .filter(|p| !desired_leaves.contains(p))
                 .collect();
             for p in &removed {
-                let live = get_path(&result, p);
-                if live.is_some() && live == get_path(base, p) {
-                    del_path(&mut result, p);
+                let live = result.get_path(p);
+                if live.is_some() && live == base.get_path(p) {
+                    result.del_path(p);
                 }
             }
         }
@@ -198,8 +199,8 @@ pub fn reconcile<L: Leaf>(
         ancestors.dedup();
         ancestors.sort_by_key(|p| std::cmp::Reverse(p.len()));
         for anc in &ancestors {
-            if matches!(get_path(&result, anc), Some(Node::Map(o)) if o.is_empty()) {
-                del_path(&mut result, anc);
+            if matches!(result.get_path(anc), Some(Node::Map(o)) if o.is_empty()) {
+                result.del_path(anc);
             }
         }
     }
@@ -207,15 +208,60 @@ pub fn reconcile<L: Leaf>(
     (result, conflicts)
 }
 
-/// Managed leaf paths: descend only through objects, so arrays and scalars are
-/// atomic leaves.
-pub fn leaf_paths<L: Leaf>(v: &Node<L>) -> Vec<KeyPath> {
-    let mut out = Vec::new();
-    let mut prefix = KeyPath::new();
-    collect(v, &mut prefix, &mut out);
-    out
+impl<L: Leaf> Node<L> {
+    /// Managed leaf paths: descend only through objects, so arrays and scalars are
+    /// atomic leaves.
+    pub(crate) fn leaf_paths(&self) -> Vec<KeyPath> {
+        let mut out = Vec::new();
+        let mut prefix = KeyPath::new();
+        collect(self, &mut prefix, &mut out);
+        out
+    }
+
+    /// Value at an object path, if present.
+    pub(crate) fn get_path(&self, path: &[String]) -> Option<&Node<L>> {
+        let mut cur = self;
+        for key in path {
+            cur = cur.as_map()?.get(key)?;
+        }
+        Some(cur)
+    }
+
+    /// Delete the value at an object path, preserving the order of the surviving
+    /// keys; a no-op if the path is empty or not present.
+    fn del_path(&mut self, path: &[String]) {
+        let Some((first, rest)) = path.split_first() else {
+            return;
+        };
+        let Some(obj) = self.as_map_mut() else {
+            return;
+        };
+        if rest.is_empty() {
+            obj.shift_remove(first); // preserve the order of the surviving keys
+        } else if let Some(child) = obj.get_mut(first) {
+            child.del_path(rest);
+        }
+    }
+
+    /// Recursively sort every object's keys (for `--sort-keys`).
+    pub(crate) fn sort_keys(&self) -> Node<L> {
+        match self {
+            Node::Map(map) => {
+                let mut entries: Vec<(&String, &Node<L>)> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                let mut sorted = IndexMap::with_capacity(entries.len());
+                for (k, val) in entries {
+                    sorted.insert(k.clone(), val.sort_keys());
+                }
+                Node::Map(sorted)
+            }
+            Node::Array(arr) => Node::Array(arr.iter().map(|v| v.sort_keys()).collect()),
+            other => other.clone(),
+        }
+    }
 }
 
+/// Recurse into `v`, pushing the path of every leaf (non-map node) into `out`.
 fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
     match v {
         Node::Map(map) => {
@@ -226,29 +272,6 @@ fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
             }
         }
         _ => out.push(prefix.clone()),
-    }
-}
-
-/// Value at an object path, if present.
-pub fn get_path<'a, L: Leaf>(v: &'a Node<L>, path: &[String]) -> Option<&'a Node<L>> {
-    let mut cur = v;
-    for key in path {
-        cur = cur.as_map()?.get(key)?;
-    }
-    Some(cur)
-}
-
-fn del_path<L: Leaf>(v: &mut Node<L>, path: &[String]) {
-    let Some((first, rest)) = path.split_first() else {
-        return;
-    };
-    let Some(obj) = v.as_map_mut() else {
-        return;
-    };
-    if rest.is_empty() {
-        obj.shift_remove(first); // preserve the order of the surviving keys
-    } else if let Some(child) = obj.get_mut(first) {
-        del_path(child, rest);
     }
 }
 
@@ -308,23 +331,6 @@ pub fn deep_merge<L: Leaf>(
     }
     *target = desired.clone();
     Vec::new()
-}
-
-/// Recursively sort every object's keys (for `--sort-keys`).
-pub fn sort_keys<L: Leaf>(v: &Node<L>) -> Node<L> {
-    match v {
-        Node::Map(map) => {
-            let mut entries: Vec<(&String, &Node<L>)> = map.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            let mut sorted = IndexMap::with_capacity(entries.len());
-            for (k, val) in entries {
-                sorted.insert(k.clone(), sort_keys(val));
-            }
-            Node::Map(sorted)
-        }
-        Node::Array(arr) => Node::Array(arr.iter().map(|v| sort_keys(v)).collect()),
-        other => other.clone(),
-    }
 }
 
 #[cfg(test)]
@@ -1280,7 +1286,7 @@ mod tests {
 
     #[test]
     fn leaf_paths_treats_arrays_as_atomic() {
-        let mut paths = leaf_paths(&n(json!({"a":1,"b":{"c":2},"d":[1,2]})));
+        let mut paths = n(json!({"a":1,"b":{"c":2},"d":[1,2]})).leaf_paths();
         paths.sort();
         assert_eq!(
             paths,
@@ -1295,14 +1301,14 @@ mod tests {
     #[test]
     fn get_path_reads_nested_and_misses() {
         let v = n(json!({"a":{"b":7}}));
-        assert_eq!(get_path(&v, &["a".into(), "b".into()]), Some(&n(json!(7))));
-        assert_eq!(get_path(&v, &["a".into(), "x".into()]), None);
-        assert_eq!(get_path(&v, &["nope".into()]), None);
+        assert_eq!(v.get_path(&["a".into(), "b".into()]), Some(&n(json!(7))));
+        assert_eq!(v.get_path(&["a".into(), "x".into()]), None);
+        assert_eq!(v.get_path(&["nope".into()]), None);
     }
 
     #[test]
     fn sort_keys_sorts_recursively() {
-        let sorted = sort_keys(&n(json!({"b":1,"a":{"d":1,"c":2}})));
+        let sorted = n(json!({"b":1,"a":{"d":1,"c":2}})).sort_keys();
         assert_eq!(
             serde_json::to_string(&j(&sorted)).unwrap(),
             r#"{"a":{"c":2,"d":1},"b":1}"#
@@ -1311,7 +1317,7 @@ mod tests {
 
     #[test]
     fn sort_keys_recurses_through_arrays() {
-        let sorted = sort_keys(&n(json!({"list":[{"b":1,"a":2}],"n":5})));
+        let sorted = n(json!({"list":[{"b":1,"a":2}],"n":5})).sort_keys();
         assert_eq!(
             serde_json::to_string(&j(&sorted)).unwrap(),
             r#"{"list":[{"a":2,"b":1}],"n":5}"#
@@ -1331,17 +1337,17 @@ mod tests {
     fn del_path_guards_empty_path_and_non_object() {
         // Empty path: no-op.
         let mut v = n(json!({"a":1}));
-        del_path(&mut v, &[]);
+        v.del_path(&[]);
         assert_eq!(v, n(json!({"a":1})));
 
         // Descending into a non-object value: no-op.
         let mut scalar = n(json!(5));
-        del_path(&mut scalar, &["a".to_string()]);
+        scalar.del_path(&["a".to_string()]);
         assert_eq!(scalar, n(json!(5)));
 
         // Happy path still deletes.
         let mut nested = n(json!({"a":{"b":1}}));
-        del_path(&mut nested, &["a".to_string(), "b".to_string()]);
+        nested.del_path(&["a".to_string(), "b".to_string()]);
         assert_eq!(nested, n(json!({"a":{}})));
     }
 }

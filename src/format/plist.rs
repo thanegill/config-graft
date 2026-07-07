@@ -154,7 +154,7 @@ fn leaf_to_plist(l: &PlistLeaf) -> plist::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reconcile::{reconcile, sort_keys, ArrayStrategy, MergeKeys, Options};
+    use crate::reconcile::{reconcile, ArrayStrategy, MergeKeys, Options};
     use std::time::{Duration, SystemTime};
 
     fn pint(i: i64) -> plist::Value {
@@ -251,7 +251,9 @@ mod tests {
         let mut d = plist::Dictionary::new();
         d.insert("b".to_string(), pint(1));
         d.insert("a".to_string(), pint(2));
-        let sorted = sort_keys(&Plist::decode(&plist::Value::Dictionary(d)).unwrap());
+        let sorted = Plist::decode(&plist::Value::Dictionary(d))
+            .unwrap()
+            .sort_keys();
         let keys: Vec<&str> = sorted
             .as_map()
             .unwrap()
