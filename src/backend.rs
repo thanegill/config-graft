@@ -37,11 +37,6 @@ pub(crate) trait Backend {
     /// `merge` conflict warnings): the format's own separator for byte formats
     /// (`.` for JSON/YAML/TOML, `:` for plist), `/` for a directory tree.
     const COMPONENT_SEPARATOR: &'static str;
-    /// Whether this backend is the directory tree. Governs the `--diff` label for an
-    /// empty final key-path component: a tree's empty-string key is a directory's own
-    /// attributes (rendered as the separator), whereas a byte format's empty key is a
-    /// real, distinct key (rendered as a quoted `""`). Byte formats keep the default.
-    const IS_TREE: bool = false;
 
     /// Reject CLI flags this backend doesn't support.
     fn check_cli_args(cli: &Cli) -> Result<(), Error>;
@@ -140,10 +135,7 @@ pub(crate) trait Backend {
         let Prepared { output, changed } = Self::prepare(cli, &target, &result)?;
 
         if cli.diff {
-            print!(
-                "{}",
-                target.diff(&result, Self::COMPONENT_SEPARATOR, Self::IS_TREE)
-            );
+            print!("{}", target.diff(&result, Self::COMPONENT_SEPARATOR));
         }
 
         if cli.check {
@@ -273,7 +265,6 @@ pub(crate) struct Directory;
 impl Backend for Directory {
     type Leaf = FsLeaf;
     const COMPONENT_SEPARATOR: &'static str = "/";
-    const IS_TREE: bool = true;
 
     fn check_cli_args(cli: &Cli) -> Result<(), Error> {
         // Flags that only shape single-file byte output have no meaning for a tree

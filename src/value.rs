@@ -19,6 +19,12 @@ use indexmap::IndexMap;
 pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug {
     /// Compact single-line rendering for `--diff`.
     fn render(&self) -> String;
+
+    /// True for a directory's own-attributes leaf, whose empty-string key is the
+    /// reserved directory-attrs slot, not a real entry.
+    fn is_dir_attrs(&self) -> bool {
+        false
+    }
 }
 
 /// Canonical `f64` bit pattern for the float-carrying leaf types' `Eq`/`Hash`.
@@ -103,6 +109,12 @@ impl<L: Leaf> Node<L> {
     /// Whether this node is a map.
     pub fn is_map(&self) -> bool {
         matches!(self, Node::Map(..))
+    }
+
+    /// Whether this node is a directory's own-attributes leaf (the reserved
+    /// empty-string key slot in a directory tree), rather than a real entry.
+    pub fn is_dir_attrs(&self) -> bool {
+        matches!(self, Node::Leaf(l) if l.is_dir_attrs())
     }
 
     /// The underlying map, if this node is one.

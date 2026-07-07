@@ -224,15 +224,15 @@ impl<L: Leaf> Node<L> {
     /// formats, `/` for a directory tree). Arrays and scalars are atomic leaves,
     /// matching the reconcile semantics.
     ///
-    /// `is_tree` distinguishes the two backends that share an empty final path
-    /// component. In a directory tree a leaf under the reserved empty-string key is a
-    /// directory's own attributes (see `format::directory`), so it renders as a
-    /// trailing `/` (or a bare `/` for the root), which reads naturally as "this
-    /// directory". In a byte format (`is_tree` false) an empty key is a legitimate,
-    /// distinct key (`{"": 1}` is valid JSON/YAML/TOML/plist), so an empty component
-    /// is rendered as a quoted empty string (`""`) -- never a bare separator, which
-    /// would be indistinguishable from a directory line.
-    pub(crate) fn diff(&self, new: &Node<L>, sep: &str, is_tree: bool) -> String {
+    /// An empty final path component is disambiguated by the *node* living there,
+    /// not by which backend is running. A leaf under the reserved empty-string key
+    /// that is a directory's own attributes (`Node::is_dir_attrs`, see
+    /// `format::directory`) renders as a trailing `/` (or a bare `/` for the root),
+    /// which reads naturally as "this directory". Any other empty key is a
+    /// legitimate, distinct key (`{"": 1}` is valid JSON/YAML/TOML/plist), so its
+    /// empty component is rendered as a quoted empty string (`""`) -- never a bare
+    /// separator, which would be indistinguishable from a directory line.
+    pub(crate) fn diff(&self, new: &Node<L>, sep: &str) -> String {
         use std::collections::HashSet;
         // Each entry is (key path, formatted line). Ordering is by the path's *segments*
         // (not the rendered string), so a key that itself contains the format separator
@@ -243,7 +243,14 @@ impl<L: Leaf> Node<L> {
         let old_leaves: HashSet<KeyPath> = self.leaf_paths().into_iter().collect();
         let new_leaves: HashSet<KeyPath> = new.leaf_paths().into_iter().collect();
         for p in old_leaves.union(&new_leaves) {
-            let disp = Self::diff_label(p, sep, is_tree);
+            // Decide the label from the actual node at this path, not the backend:
+            // only a directory's own-attributes leaf collapses an empty component to
+            // a bare separator; any other empty key is quoted.
+            let is_dir_attrs = self
+                .get_path(p)
+                .or_else(|| new.get_path(p))
+                .is_some_and(Node::is_dir_attrs);
+            let disp = Self::diff_label(p, sep, is_dir_attrs);
             match (self.get_path(p), new.get_path(p)) {
                 (None, Some(n)) => lines.push((p.clone(), format!("+ {disp} = {}", n.compact()))),
                 (Some(o), None) => lines.push((p.clone(), format!("- {disp} = {}", o.compact()))),
@@ -264,23 +271,25 @@ impl<L: Leaf> Node<L> {
         }
     }
 
-    /// The `--diff` label for a leaf path. For a directory tree the empty-string
-    /// component (a directory's own-attributes leaf) renders as `sep`, giving the
-    /// bare-`/` root line or a trailing-`/` subdirectory line. For a byte format an
+    /// The `--diff` label for a leaf path. When the leaf at `p` is a directory's
+    /// own attributes (`is_dir_attrs`), the empty-string component renders as `sep`,
+    /// giving the bare-`/` root line or a trailing-`/` subdirectory line. Any other
     /// empty component is quoted (`""`) so an empty-named key is unambiguous rather
     /// than reading as a directory line.
-    fn diff_label(p: &KeyPath, sep: &str, is_tree: bool) -> String {
-        let rendered = p.render(sep);
-        if is_tree {
-            // Keep the byte-identical tree behavior: an empty rendered path is the
-            // root's own-attributes leaf; show the separator so it isn't blank.
+    fn diff_label(p: &KeyPath, sep: &str, is_dir_attrs: bool) -> String {
+        if is_dir_attrs {
+            // Keep the byte-identical tree behavior: a directory's own-attributes
+            // leaf's empty final segment gives a trailing `sep` (a subdirectory
+            // line); the root's own-attributes path is a lone empty segment, whose
+            // rendering is empty, so show a bare `sep` instead of a blank line.
+            let rendered = p.render(sep);
             return if rendered.is_empty() {
                 sep.to_string()
             } else {
                 rendered
             };
         }
-        // Byte format: diff paths are pure key segments (no `[field=value]`
+        // Any other empty key: diff paths are pure key segments (no `[field=value]`
         // selectors), so joining with `sep` matches `KeyPath::render`, except that
         // an empty segment is quoted so `{"": 1}` shows as `""`, not a bare `sep`.
         p.iter()
