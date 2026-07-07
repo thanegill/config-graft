@@ -1,4 +1,4 @@
-//! Pure three-way reconcile algorithm — no I/O.
+//! Pure three-way reconcile algorithm -- no I/O.
 //!
 //! TARGET (the live file), DESIRED (the managed subset), BASE (the snapshot of
 //! what we applied last time). Arrays and scalars are atomic leaves, so a list
@@ -11,12 +11,12 @@ use std::collections::{HashMap, HashSet};
 
 mod arrays;
 
-/// A list of array elements — the payload of a `Node::Array`. It's what the
+/// A list of array elements -- the payload of a `Node::Array`. It's what the
 /// array-combining strategies produce, and (on a `merge` conflict) report.
 pub type NodeList<L> = Vec<Node<L>>;
 
 /// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
-/// leaves). Distinct from `std::path::Path` — this addresses keys, not files.
+/// leaves). Distinct from `std::path::Path` -- this addresses keys, not files.
 ///
 /// Pruning only ever builds key segments. A conflict path may additionally carry a
 /// `[field=value]` element-selector segment naming a keyed-array record it points
@@ -40,7 +40,7 @@ impl KeyPath {
         self.0.pop();
     }
 
-    /// Prepend a key segment — used as a conflict bubbles up out of a subtree,
+    /// Prepend a key segment -- used as a conflict bubbles up out of a subtree,
     /// gaining its parent key at each level.
     fn prepend(&mut self, seg: String) {
         self.0.insert(0, seg);
@@ -161,7 +161,7 @@ pub fn reconcile<L: Leaf>(
     };
 
     // 1-3: prune leaves we managed before (present in BASE) but no longer do
-    // (gone from DESIRED) — but only where TARGET still holds the BASE value, so
+    // (gone from DESIRED) -- but only where TARGET still holds the BASE value, so
     // a value the user/app changed by hand is left alone.
     let mut removed: Vec<KeyPath> = Vec::new();
     if opts.prune {
@@ -278,8 +278,8 @@ fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
 /// Deep-merge `desired` into `target`, with `base` as the merge ancestor at the
 /// same path (for the three-way `Merge` strategy; ignored by the others).
 /// Objects always merge recursively. Two arrays combine per `arrays` (replace /
-/// concat / set-union / three-way merge); every other case — scalars, type
-/// changes, array-vs-non-array — is replaced wholesale by `desired`.
+/// concat / set-union / three-way merge); every other case -- scalars, type
+/// changes, array-vs-non-array -- is replaced wholesale by `desired`.
 ///
 /// Returns any `merge` [`Conflict`]s found, each with a path *relative to*
 /// `target`. Callers prepend their own key as the conflicts bubble up, so a
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn non_merge_strategies_never_conflict() {
-        // The same contradictory input under `replace` is not a conflict — only
+        // The same contradictory input under `replace` is not a conflict -- only
         // `merge` reconciles element order, so only it can conflict.
         assert!(conflict_paths(
             json!({"l": ["x", "y"]}),

@@ -1,6 +1,6 @@
 //! Directory-tree backend for `--format directory`.
 //!
-//! A directory is not a byte-oriented [`Format`](crate::format::Format) — it has
+//! A directory is not a byte-oriented [`Format`](crate::format::Format) -- it has
 //! no single stream to parse or serialize. Instead it plugs into the same
 //! format-agnostic [`reconcile`](crate::reconcile) engine by modeling the tree as
 //! a [`Node`]: a **directory is a `Map`**, a **file or symlink is a `Leaf`**
@@ -10,7 +10,7 @@
 //!
 //! This module owns the I/O boundary: [`read_tree`] walks a directory into a
 //! `Node<FsLeaf>`, and [`apply_tree`] writes the reconciled tree back by
-//! applying the *minimal* set of filesystem operations — it never rewrites an
+//! applying the *minimal* set of filesystem operations -- it never rewrites an
 //! unchanged file, so app-owned files keep their inode and mtime. Each file write
 //! is individually atomic (temp-in-same-dir + fsync + rename); the whole
 //! multi-file apply is best-effort, not one transaction (a partial apply is
@@ -80,7 +80,7 @@ impl FsAttrs {
                 .unwrap_or_else(|| "?".into())
         };
         let mut out = format!("{mode}, {}:{}", num("uid"), num("gid"));
-        // Each extended attribute is shown as `name=<digest>` — a short hash of the
+        // Each extended attribute is shown as `name=<digest>` -- a short hash of the
         // value distinguishes a value or rename change in the diff without dumping
         // (possibly binary or large) bytes. The map is ordered (`BTreeMap`).
         let xattrs: Vec<String> = self
@@ -118,7 +118,7 @@ const TEMP_PREFIX: &str = ".config-graft-tmp.";
 
 /// Reserved map key under which a directory's own attributes ride, as an ordinary
 /// [`FsLeaf::DirectoryAttributes`] leaf. The empty string can never be a real directory
-/// entry (`readdir` never yields it), so it can't collide with a managed file —
+/// entry (`readdir` never yields it), so it can't collide with a managed file --
 /// which lets a directory's metadata reconcile through the same engine as its
 /// entries, with no per-map side payload on [`Node`](crate::value::Node).
 const DIR_ATTRS_KEY: &str = "";
@@ -159,11 +159,11 @@ impl XattrScope {
 }
 
 /// The directory format's leaf type: a regular file, a symlink, or a directory's
-/// *own* attributes (the reserved-key entry — see [`DIR_ATTRS_KEY`]). Directories
+/// *own* attributes (the reserved-key entry -- see [`DIR_ATTRS_KEY`]). Directories
 /// themselves are `Node::Map`, never a leaf.
 ///
 /// A file is stored as a **content handle**, not its bytes. The engine only needs
-/// a file's *identity* — to compare it for pruning and change detection — plus a
+/// a file's *identity* -- to compare it for pruning and change detection -- plus a
 /// summary for `--diff`; it never needs the bytes themselves, which are streamed
 /// straight from `source` to the destination when a file is actually written. So
 /// the whole tree costs O(number of files), not O(total bytes).
@@ -196,7 +196,7 @@ pub enum FsLeaf {
     },
     /// A directory's *own* attributes (mode/owner/xattrs), stored under the
     /// reserved [`DIR_ATTRS_KEY`] in the directory's map. Not a filesystem object
-    /// itself — the write path applies it to the containing directory rather than
+    /// itself -- the write path applies it to the containing directory rather than
     /// creating a file for it.
     DirectoryAttributes(FsAttrs),
 }
@@ -227,7 +227,7 @@ impl PartialEq for FsLeaf {
 
 impl Node<FsLeaf> {
     /// This node's directory-attributes map, if it is a [`FsLeaf::DirectoryAttributes`]
-    /// leaf — pulls a directory's own attributes out of its map's reserved entry.
+    /// leaf -- pulls a directory's own attributes out of its map's reserved entry.
     /// A directory-format inherent method on the shared `Node` (legal since `Node`
     /// and `FsLeaf` are crate-local); the generic core stays format-agnostic.
     fn dir_attrs(&self) -> Option<&FsAttrs> {
@@ -262,7 +262,7 @@ impl Leaf for FsLeaf {
 ///   non-UTF-8 filename ⇒ `Err(NonUtf8Name)`.
 ///
 /// The root follows a symlink (so a symlinked directory works as a target), but
-/// symlinks *inside* the tree are never followed — they become `Symlink` leaves.
+/// symlinks *inside* the tree are never followed -- they become `Symlink` leaves.
 /// Entries are read in sorted filename order so the tree, and thus `--diff`
 /// output, is deterministic.
 pub fn read_tree(
@@ -289,7 +289,7 @@ pub fn read_tree(
     }
 }
 
-/// Two sibling names that fold to the same key (case-insensitively), if any — such
+/// Two sibling names that fold to the same key (case-insensitively), if any -- such
 /// a pair would map to a single file on a case-insensitive filesystem.
 fn find_name_collision<'a>(names: impl Iterator<Item = &'a str>) -> Option<(String, String)> {
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -341,7 +341,7 @@ fn read_dir(
     let mut map = IndexMap::with_capacity(children.len() + 1);
     // The directory's own attributes ride first, as the reserved-key leaf, so its
     // `--diff` line sorts just before its entries. Empty `meta` (the root without
-    // `--manage-root`) means the directory's attributes are unmanaged — no entry.
+    // `--manage-root`) means the directory's attributes are unmanaged -- no entry.
     if !meta.is_empty() {
         map.insert(
             DIR_ATTRS_KEY.to_string(),
@@ -382,15 +382,15 @@ impl FsAttrs {
     /// the OS reports that is within `policy.xattrs`.
     ///
     /// This is an **allowlist**: only these attributes become part of a leaf's
-    /// identity. The *dynamic* stat fields — timestamps (`mtime`/`atime`/`ctime`),
-    /// size, inode, link count — are deliberately never captured, so they can't
+    /// identity. The *dynamic* stat fields -- timestamps (`mtime`/`atime`/`ctime`),
+    /// size, inode, link count -- are deliberately never captured, so they can't
     /// trigger a rewrite. That is exactly what keeps an unchanged file untouched
     /// (inode and mtime preserved); a file is identified by its contents (len +
     /// digest) plus these managed attributes, not by when it was last written.
     ///
     /// Reading extended attributes is best-effort and **filesystem-agnostic**: a
     /// filesystem that doesn't support them (so `listxattr` fails) simply contributes
-    /// no `xattr:*` entries. (Applying them, by contrast, is strict — see
+    /// no `xattr:*` entries. (Applying them, by contrast, is strict -- see
     /// [`FsAttrs::apply`].)
     fn read(path: &Path, meta: &fs::Metadata, policy: AttrPolicy) -> FsAttrs {
         let mut attrs = FsAttrs::new();
@@ -426,7 +426,7 @@ impl FsAttrs {
 /// This is the type guard that makes the reserved-key convention safe: a
 /// directory's own attributes and its entries are **distinct fields** here, not
 /// two kinds of map entry, so there is no way to express "attributes as a named
-/// entry" — and therefore no way for the apply/remove code below to build a
+/// entry" -- and therefore no way for the apply/remove code below to build a
 /// filesystem path from a directory's attributes. The reserved key is interpreted
 /// in exactly one place ([`parse`]); everything downstream is checked by the type
 /// system. Borrows from the `Node`, so it costs no clones.
@@ -504,7 +504,7 @@ pub fn apply_tree(
     root.ensure_root()?;
     // Parse the sentinel representation into the type-guarded `FsTree` once, here at
     // the boundary; the apply walk below can no longer confuse a directory's
-    // attributes with an entry. `base` stays a `Node` — it is only read (never used
+    // attributes with an entry. `base` stays a `Node` -- it is only read (never used
     // to build a write path), for the app-content refuse check.
     let want = parse(want)?;
     let cur = cur.map(parse).transpose()?;
@@ -512,10 +512,10 @@ pub fn apply_tree(
 }
 
 /// Whether `cur` (a directory subtree read from disk) holds any leaf that is not
-/// present in `base` — i.e. content that was never under management. Used to refuse
+/// present in `base` -- i.e. content that was never under management. Used to refuse
 /// deleting an app-populated directory on a directory → file type change. A
 /// directory's own attributes count as a leaf path too (`DIR_ATTRS_KEY`), so an
-/// app-created *empty* subdirectory also counts as unmanaged content — mirroring
+/// app-created *empty* subdirectory also counts as unmanaged content -- mirroring
 /// the reserved-key leaf that `Node::leaf_paths` would have seen.
 fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<FsLeaf>>) -> bool {
     fn unmanaged_at(path: &[String], base: Option<&Node<FsLeaf>>) -> bool {
@@ -548,7 +548,7 @@ fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<FsLeaf>>) -> bool {
 /// Reconcile the entries of one directory: apply its own attributes, create/update
 /// every `want` child, then remove every `cur` child that `want` dropped. `want`
 /// and `cur` are [`FsTree::Dir`]s, so their `entries` cannot contain a directory's
-/// attributes — the create/remove loops build paths only from real entry names.
+/// attributes -- the create/remove loops build paths only from real entry names.
 fn apply_dir(
     dir: &Path,
     cur: Option<&FsTree>,
@@ -724,7 +724,7 @@ fn write_file(
 }
 
 impl FsAttrs {
-    /// Apply these attributes (mode/owner/xattrs) to `path` — a file or a directory —
+    /// Apply these attributes (mode/owner/xattrs) to `path` -- a file or a directory --
     /// honoring `policy`. Extended attributes first (setting the in-scope desired ones
     /// and removing in-scope ones on disk that DESIRED omits, so they converge), then
     /// ownership, then mode last (chown(2) clears the setuid/setgid bits, so mode must
@@ -757,7 +757,7 @@ impl FsAttrs {
         }
 
         // Ownership only with `--owner`, and only for a uid/gid that actually differs
-        // from what `path` already has — a fresh temp file is owned by the caller, so
+        // from what `path` already has -- a fresh temp file is owned by the caller, so
         // a self-owned tree needs no chown (avoiding a gratuitous chown that can EPERM
         // on a non-member group).
         if policy.owner {
@@ -816,7 +816,7 @@ trait PathExt {
     fn remove_tree(&self) -> Result<(), Error>;
     /// Atomically create/replace a symlink: make it under a temp name in the same
     /// directory, then rename over `self` (rename atomically replaces a
-    /// file/symlink, but not a non-empty directory — callers handle that type
+    /// file/symlink, but not a non-empty directory -- callers handle that type
     /// change separately).
     fn atomic_symlink(&self, target: &Path) -> io::Result<()>;
 }
@@ -900,7 +900,7 @@ fn remove_node(path: &Path, node: &FsTree) -> Result<bool, Error> {
             // A leftover temp from a crashed write is skipped on read, so it isn't in
             // `entries`; unlink any of our own temps here so the now-managed-empty
             // directory can actually be removed (else `remove_dir` fails ENOTEMPTY).
-            // Best-effort — a real app file would (rightly) still block removal.
+            // Best-effort -- a real app file would (rightly) still block removal.
             if let Ok(rd) = fs::read_dir(path) {
                 for entry in rd.flatten() {
                     if entry
@@ -1032,7 +1032,7 @@ mod tests {
     fn malformed_node_is_rejected_not_panicked() {
         // A directory tree never contains an array, nor a DirectoryAttributes leaf outside
         // the reserved key. `parse` (the write-path boundary) must reject both as a
-        // typed error, not a panic — after which the `FsTree` type makes them
+        // typed error, not a panic -- after which the `FsTree` type makes them
         // unrepresentable downstream.
         assert!(matches!(
             parse(&Node::Array(vec![])),

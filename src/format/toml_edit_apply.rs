@@ -1,7 +1,7 @@
 //! Comment-preserving TOML writer.
 //!
 //! Instead of re-emitting the reconciled tree (which would drop comments), this
-//! mutates `toml_edit`'s `DocumentMut` — a format-preserving document model — in
+//! mutates `toml_edit`'s `DocumentMut` -- a format-preserving document model -- in
 //! place: only the keys that actually changed are touched, so every untouched
 //! line (whole-line and inline comments, blank lines, quoting, table headers) is
 //! left byte-for-byte intact. This is simpler than the YAML editor's byte-span
@@ -71,7 +71,7 @@ fn item_eq(item: &Item, node: &Node<TomlLeaf>) -> bool {
 
 /// Set `key` to `node`, preserving the existing value's decor (leading whitespace
 /// and any inline comment) when the slot already holds a scalar/array/inline
-/// value. New keys — and replacements of a `[section]` table — are inserted
+/// value. New keys -- and replacements of a `[section]` table -- are inserted
 /// canonically.
 fn set_or_insert(table: &mut Table, key: &str, node: &Node<TomlLeaf>) {
     if let Some(Item::Value(old)) = table.get_mut(key) {

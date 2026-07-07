@@ -30,7 +30,7 @@ impl Leaf for TomlLeaf {
             TomlLeaf::Int(i) => i.to_string(),
             TomlLeaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
             TomlLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
-            // No JSON spelling — a readable token, mirroring plist's `<date …>`.
+            // No JSON spelling -- a readable token, mirroring plist's `<date ...>`.
             TomlLeaf::Datetime(d) => format!("<datetime {d}>"),
         }
     }
@@ -155,7 +155,7 @@ fn encode_table(m: &IndexMap<String, Node<TomlLeaf>>) -> Table {
 }
 
 /// Build a TOML array from array elements. Map elements become inline tables, so
-/// an array never needs the `[[…]]` array-of-tables form on the canonical path.
+/// an array never needs the `[[...]]` array-of-tables form on the canonical path.
 fn encode_array(a: &[Node<TomlLeaf>]) -> Array {
     let mut arr = Array::new();
     for e in a {

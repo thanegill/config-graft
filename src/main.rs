@@ -56,7 +56,7 @@ pub(crate) struct Cli {
     pub(crate) check: bool,
 
     /// Output indentation: a number of spaces, or `tab` (default: 2 spaces). JSON
-    /// only — passing it with another format is an error.
+    /// only -- passing it with another format is an error.
     #[arg(long, value_name = "N|tab", value_parser = format::parse_indent)]
     pub(crate) indent: Option<Indent>,
 
@@ -66,7 +66,7 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "FORMAT")]
     pub(crate) format: Option<FormatKind>,
 
-    /// Write plist output as binary instead of XML. Plist only — passing it with
+    /// Write plist output as binary instead of XML. Plist only -- passing it with
     /// another format is an error.
     #[arg(long = "plist-binary")]
     pub(crate) plist_binary: bool,
@@ -88,26 +88,26 @@ pub(crate) struct Cli {
     /// Identify object-array elements by a field so `merge` matches keyed records
     /// (and merges their fields) instead of by whole value. `FIELD` (or
     /// `f1,f2`) applies to any object-array; `PATH=FIELD` scopes it to the array at
-    /// `PATH` — its full path from the document root, segments joined by the format
+    /// `PATH` -- its full path from the document root, segments joined by the format
     /// separator (`.`, or `:` for plist). Repeatable. Example: `--merge-key name
     /// --merge-key spec.containers=name`.
     #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
 
     /// Also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs),
-    /// not just its contents. `--format directory` only — passing it with another
+    /// not just its contents. `--format directory` only -- passing it with another
     /// format is an error.
     #[arg(long = "manage-root")]
     pub(crate) manage_root: bool,
 
     /// Don't reconcile file/directory ownership (uid/gid). `--format directory`
-    /// only — passing it with another format is an error.
+    /// only -- passing it with another format is an error.
     #[arg(long = "no-owner")]
     pub(crate) no_owner: bool,
 
     /// Which extended attributes to reconcile: `all` (default), `safe` (a
     /// conservative allowlist that skips privileged/system namespaces), or `none`.
-    /// `--format directory` only — passing it with another format is an error.
+    /// `--format directory` only -- passing it with another format is an error.
     #[arg(long = "xattrs", value_name = "SCOPE")]
     pub(crate) xattrs: Option<XattrScope>,
 }
@@ -150,7 +150,7 @@ pub(crate) fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
 
 fn main() {
     let cli = Cli::parse();
-    // One format governs every file. Resolve it, then dispatch statically — the
+    // One format governs every file. Resolve it, then dispatch statically -- the
     // node type carries the format's leaf type, so each format is its own
     // monomorphization of `run`.
     let kind = cli
@@ -203,7 +203,7 @@ fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<
 }
 
 /// fsync a directory so its recent entry changes (renames/creates/unlinks) are
-/// durable — a content fsync alone doesn't cover the directory entry.
+/// durable -- a content fsync alone doesn't cover the directory entry.
 pub(crate) fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
@@ -225,7 +225,7 @@ impl<L: Leaf> Node<L> {
     /// matching the reconcile semantics.
     ///
     /// A directory's own attributes are an ordinary leaf under an empty-string key
-    /// (see `format::directory`), so they diff here like any other leaf — the empty
+    /// (see `format::directory`), so they diff here like any other leaf -- the empty
     /// final path component renders as a trailing `/` (or a bare `/` for the root),
     /// which reads naturally as "this directory".
     pub(crate) fn diff(&self, new: &Node<L>, sep: &str) -> String {
@@ -269,7 +269,7 @@ impl<L: Leaf> Node<L> {
 
     /// Render as a compact, single-line token for `--diff`. JSON-representable
     /// values match `serde_json`'s compact form; plist-only leaves get a readable
-    /// `<date …>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
+    /// `<date ...>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
     pub(crate) fn compact(&self) -> String {
         match self {
             Node::Map(m) => {

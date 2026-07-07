@@ -2,8 +2,8 @@
 //!
 //! Instead of re-emitting the reconciled tree (which would drop comments), this
 //! applies the result onto the *original file text* as minimal byte-span edits,
-//! leaving every untouched region — comments, blank lines, quoting, indentation
-//! — byte-for-byte intact. saphyr's `MarkedYaml` gives the byte spans of each
+//! leaving every untouched region -- comments, blank lines, quoting, indentation
+//! -- byte-for-byte intact. saphyr's `MarkedYaml` gives the byte spans of each
 //! key and value; we splice only the changed ranges.
 //!
 //! Safety: a wrong edit would corrupt a user's config, so we **re-parse the

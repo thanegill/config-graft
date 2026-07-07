@@ -2,13 +2,13 @@
 //! representation into a [`Node`] and writes a [`Node`] back out; the reconcile
 //! engine in between is format-agnostic.
 //!
-//! Reconciliation is homogeneous — one format governs TARGET, DESIRED, BASE, and
-//! the output — so there is never a cross-format conversion. Each format lives in
+//! Reconciliation is homogeneous -- one format governs TARGET, DESIRED, BASE, and
+//! the output -- so there is never a cross-format conversion. Each format lives in
 //! its own module ([`json`], [`plist`], [`yaml`]); this module holds the shared
 //! [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] selector. The
 //! [`directory`] module is the odd one out: `--format directory` reconciles a
 //! whole tree, which has no single byte stream, so it does **not** implement the
-//! byte-oriented [`Format`] trait — it provides its own tree reader/writer and
+//! byte-oriented [`Format`] trait -- it provides its own tree reader/writer and
 //! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ pub use plist::Plist;
 pub use toml::Toml;
 pub use yaml::Yaml;
 
-/// Which file format a run uses — a selector parsed from `--format` or inferred
+/// Which file format a run uses -- a selector parsed from `--format` or inferred
 /// from the extension. The behavior lives in the [`Format`] trait it hands back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum FormatKind {
@@ -88,7 +88,7 @@ impl FormatKind {
 
 /// A format's I/O boundary: parse bytes into a `Node` of this format's leaf type
 /// and serialize one back to text. Not object-safe (the node type varies per
-/// format), so dispatch is static — `main` monomorphizes `run::<F>()` per format.
+/// format), so dispatch is static -- `main` monomorphizes `run::<F>()` per format.
 pub trait Format: ValueCodec {
     /// The `FormatKind` this format corresponds to (for format-specific errors).
     const KIND: FormatKind;
@@ -126,7 +126,7 @@ pub struct WriteOpts {
 pub trait ValueCodec {
     type Leaf: Leaf;
     type Value<'a>;
-    /// Native → `Node`. `None` means "refuse" — only YAML produces it (for
+    /// Native → `Node`. `None` means "refuse" -- only YAML produces it (for
     /// non-string keys, tags, etc.); JSON/plist are total.
     fn decode(value: &Self::Value<'_>) -> Option<Node<Self::Leaf>>;
     /// `Node` → native.
