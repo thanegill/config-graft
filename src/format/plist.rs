@@ -1,20 +1,21 @@
 //! Apple plist codec, leaf type, and I/O. Reads accept XML or binary; writes are
 //! normalized XML by default, or binary with `--plist-binary`.
 
+use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 
 use indexmap::IndexMap;
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{Leaf, Node};
+use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// Apple plist codec.
 pub struct Plist;
 
 /// A plist leaf value. Plist has no null, but carries the exotic `Date`/`Data`/
 /// `Uid` scalars that ride through the engine as opaque leaves.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub enum PlistLeaf {
     Bool(bool),
     Int(i64),
@@ -24,6 +25,47 @@ pub enum PlistLeaf {
     Date(plist::Date),
     Data(Vec<u8>),
     Uid(u64),
+}
+
+// `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
+// `Hash`. `Float` compares and hashes via `canonical_float_bits`; the other
+// variants (`plist::Date` is `Eq + Hash`, `Data` is a `Vec<u8>`, `Uid` a `u64`)
+// match the old derived behavior byte-for-byte. Net change from the old derive:
+// two `NaN` floats now compare equal (see `canonical_float_bits`).
+impl PartialEq for PlistLeaf {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PlistLeaf::Bool(a), PlistLeaf::Bool(b)) => a == b,
+            (PlistLeaf::Int(a), PlistLeaf::Int(b)) => a == b,
+            (PlistLeaf::Uint(a), PlistLeaf::Uint(b)) => a == b,
+            (PlistLeaf::Float(a), PlistLeaf::Float(b)) => {
+                canonical_float_bits(*a) == canonical_float_bits(*b)
+            }
+            (PlistLeaf::String(a), PlistLeaf::String(b)) => a == b,
+            (PlistLeaf::Date(a), PlistLeaf::Date(b)) => a == b,
+            (PlistLeaf::Data(a), PlistLeaf::Data(b)) => a == b,
+            (PlistLeaf::Uid(a), PlistLeaf::Uid(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PlistLeaf {}
+
+impl Hash for PlistLeaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            PlistLeaf::Bool(b) => b.hash(state),
+            PlistLeaf::Int(i) => i.hash(state),
+            PlistLeaf::Uint(u) => u.hash(state),
+            PlistLeaf::Float(f) => canonical_float_bits(*f).hash(state),
+            PlistLeaf::String(s) => s.hash(state),
+            PlistLeaf::Date(d) => d.hash(state),
+            PlistLeaf::Data(bytes) => bytes.hash(state),
+            PlistLeaf::Uid(u) => u.hash(state),
+        }
+    }
 }
 
 // `plist::Date` has no `Debug` impl, so `PlistLeaf` can't derive one.

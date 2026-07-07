@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::os::unix::fs::{chown, symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -38,7 +39,7 @@ type Digest = [u8; 32];
 /// newtype (rather than a bare `BTreeMap` alias) so it can carry attribute logic
 /// like [`FsAttrs::render_summary`]; it `Deref`s to the map for the usual
 /// `insert`/`get`/`iter`.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) struct FsAttrs(BTreeMap<String, Vec<u8>>);
 
 impl std::ops::Deref for FsAttrs {
@@ -225,6 +226,29 @@ impl PartialEq for FsLeaf {
     }
 }
 
+impl Eq for FsLeaf {}
+
+// `Hash` mirrors the hand-written `PartialEq` above: a `File`'s identity is
+// `(len, digest, attrs)` and deliberately excludes `source` (path-independence
+// is what keeps re-apply a no-op), so the hash must skip `source` too or equal
+// files could hash differently and break `HashSet` dedup.
+impl Hash for FsLeaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            FsLeaf::File {
+                len, digest, attrs, ..
+            } => {
+                len.hash(state);
+                digest.hash(state);
+                attrs.hash(state);
+            }
+            FsLeaf::Symlink { target } => target.hash(state),
+            FsLeaf::DirectoryAttributes(attrs) => attrs.hash(state),
+        }
+    }
+}
+
 impl Node<FsLeaf> {
     /// This node's directory-attributes map, if it is a [`FsLeaf::DirectoryAttributes`]
     /// leaf -- pulls a directory's own attributes out of its map's reserved entry.
@@ -251,6 +275,13 @@ impl Leaf for FsLeaf {
             FsLeaf::Symlink { target } => format!("-> {}", target.display()),
             FsLeaf::DirectoryAttributes(attrs) => format!("dir({})", attrs.render_summary()),
         }
+    }
+
+    /// A [`FsLeaf::DirectoryAttributes`] leaf occupies the reserved empty-string
+    /// key of its directory's map -- it is that directory's own attributes, not a
+    /// real entry.
+    fn is_dir_attrs(&self) -> bool {
+        matches!(self, FsLeaf::DirectoryAttributes(_))
     }
 }
 
@@ -708,14 +739,22 @@ fn write_file(
     // holds only in-scope xattrs and the fresh temp starts with none, so without
     // this a content rewrite under `--xattrs safe`/`none` would silently drop them.
     // Under the default `all` scope nothing is out of scope, so this is a no-op.
-    if let Ok(names) = xattr::list(dest) {
+    //
+    // Gate the whole block on `dest` already existing: a first write has nothing to
+    // preserve, so this avoids a wasted `xattr::list` ENOENT syscall per new file.
+    // Use `symlink_metadata` (never `metadata`, which follows symlinks) so that when
+    // `dest` is a symlink being replaced by this file we read the *link's* own
+    // xattrs, not the link target's -- the `xattr` crate's `list`/`get` are the
+    // no-follow variants (`llistxattr`/`lgetxattr`), matching that intent.
+    if fs::symlink_metadata(dest).is_ok() {
+        let names = xattr::list(dest).unwrap_or_default();
         for name in names {
-            if let Some(n) = name.to_str() {
-                if !policy.xattrs.in_scope(n) {
-                    if let Ok(Some(value)) = xattr::get(dest, n) {
-                        xattr::set(tmp.path(), n, &value).map_err(|e| Error::write(dest, e))?;
-                    }
-                }
+            let Some(name) = name.to_str() else { continue };
+            if policy.xattrs.in_scope(name) {
+                continue;
+            }
+            if let Ok(Some(value)) = xattr::get(dest, name) {
+                xattr::set(tmp.path(), name, &value).map_err(|e| Error::write(dest, e))?;
             }
         }
     }

@@ -2,25 +2,63 @@
 //! in place to preserve comments (see [`super::toml_edit_apply`]); empty/
 //! first-apply targets are emitted canonically here.
 
+use std::hash::{Hash, Hasher};
+
 use indexmap::IndexMap;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{Leaf, Node};
+use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// TOML codec.
 pub struct Toml;
 
 /// A TOML leaf value. TOML has no null; datetimes (offset/local date-time, date,
 /// and time) ride through the engine as an opaque leaf, like plist's `Date`.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub enum TomlLeaf {
     Bool(bool),
     Int(i64),
     Float(f64),
     String(String),
     Datetime(toml_edit::Datetime),
+}
+
+// `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
+// `Hash`. `Float` compares and hashes via `canonical_float_bits`. `Datetime` is
+// `Eq` but not `Hash`, so it hashes via its canonical `Display` form (equal
+// datetimes render identically, so this stays consistent with its `PartialEq`);
+// comparison delegates to its own `Eq`. Net change from the old derive: two
+// `NaN` floats now compare equal (see `canonical_float_bits`).
+impl PartialEq for TomlLeaf {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TomlLeaf::Bool(a), TomlLeaf::Bool(b)) => a == b,
+            (TomlLeaf::Int(a), TomlLeaf::Int(b)) => a == b,
+            (TomlLeaf::Float(a), TomlLeaf::Float(b)) => {
+                canonical_float_bits(*a) == canonical_float_bits(*b)
+            }
+            (TomlLeaf::String(a), TomlLeaf::String(b)) => a == b,
+            (TomlLeaf::Datetime(a), TomlLeaf::Datetime(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TomlLeaf {}
+
+impl Hash for TomlLeaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            TomlLeaf::Bool(b) => b.hash(state),
+            TomlLeaf::Int(i) => i.hash(state),
+            TomlLeaf::Float(f) => canonical_float_bits(*f).hash(state),
+            TomlLeaf::String(s) => s.hash(state),
+            TomlLeaf::Datetime(d) => d.to_string().hash(state),
+        }
+    }
 }
 
 impl Leaf for TomlLeaf {

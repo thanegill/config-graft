@@ -3,26 +3,61 @@
 //! first-apply targets are emitted canonically here.
 
 use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
 
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{Leaf, Node};
+use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// YAML codec.
 pub struct Yaml;
 
 /// A YAML leaf value. saphyr resolves integers to `i64`, so there is no unsigned
 /// variant, and YAML has none of plist's exotic scalars.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub enum YamlLeaf {
     Null,
     Bool(bool),
     Int(i64),
     Float(f64),
     String(String),
+}
+
+// `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
+// `Hash`. `Float` compares and hashes via `canonical_float_bits`; every other
+// variant matches the old derived behavior byte-for-byte. Net change from the
+// derive: two `NaN` floats now compare equal (see `canonical_float_bits`).
+impl PartialEq for YamlLeaf {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (YamlLeaf::Null, YamlLeaf::Null) => true,
+            (YamlLeaf::Bool(a), YamlLeaf::Bool(b)) => a == b,
+            (YamlLeaf::Int(a), YamlLeaf::Int(b)) => a == b,
+            (YamlLeaf::Float(a), YamlLeaf::Float(b)) => {
+                canonical_float_bits(*a) == canonical_float_bits(*b)
+            }
+            (YamlLeaf::String(a), YamlLeaf::String(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for YamlLeaf {}
+
+impl Hash for YamlLeaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            YamlLeaf::Null => {}
+            YamlLeaf::Bool(b) => b.hash(state),
+            YamlLeaf::Int(i) => i.hash(state),
+            YamlLeaf::Float(f) => canonical_float_bits(*f).hash(state),
+            YamlLeaf::String(s) => s.hash(state),
+        }
+    }
 }
 
 impl Leaf for YamlLeaf {

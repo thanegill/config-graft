@@ -37,9 +37,18 @@ pub(super) fn combine<L: Leaf>(
         // Union ignoring order: keep TARGET's elements, append any DESIRED
         // element not already present (dedup by value).
         ArrayStrategy::Set => {
+            // Membership set of what's already present, so each DESIRED element is
+            // an O(1) lookup instead of an O(N) `out.contains` scan. `seen`
+            // borrows the (immutable) input slices, so pushing clones into the
+            // separate `out` vec doesn't alias it. Seeding with TARGET then
+            // inserting each DESIRED element in order preserves the exact
+            // semantics: keep TARGET's elements, append DESIRED elements not
+            // already present, first occurrence wins (a repeated DESIRED value is
+            // inserted once, since its first occurrence is already in `seen`).
             let mut out = target.to_vec();
+            let mut seen: HashSet<&Node<L>> = target.iter().collect();
             for e in desired {
-                if !out.contains(e) {
+                if seen.insert(e) {
                     out.push(e.clone());
                 }
             }
@@ -264,13 +273,18 @@ fn gts_order(
     // branch is dropped iff BASE ordered that pair transitively but the *other*
     // branch transitively reversed/deleted it:
     //   Em = (E1 \ (Eb+ \ E2+)) ∪ (E2 \ (Eb+ \ E1+))
+    // `edge_set` makes the "already have this edge?" test O(1) instead of an
+    // O(E) `edges.contains` scan; `edges` keeps insertion order (immaterial
+    // downstream -- adjacency is re-sorted, reachability is a matrix -- but cheap
+    // to preserve).
     let mut edges: Vec<(usize, usize)> = Vec::new();
+    let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
     for w in target_seq.windows(2) {
         let (a, b) = (w[0], w[1]);
         if prec(&base_pos, a, b) && !prec(&desired_pos, a, b) {
             continue;
         }
-        if !edges.contains(&(a, b)) {
+        if edge_set.insert((a, b)) {
             edges.push((a, b));
         }
     }
@@ -279,7 +293,7 @@ fn gts_order(
         if prec(&base_pos, a, b) && !prec(&target_pos, a, b) {
             continue;
         }
-        if !edges.contains(&(a, b)) {
+        if edge_set.insert((a, b)) {
             edges.push((a, b));
         }
     }
@@ -288,10 +302,14 @@ fn gts_order(
     // dropped. For a vertex with no incoming edge, connect its closest common
     // predecessor (before it in *both* branches, nearest in TARGET); for no
     // outgoing edge, its closest common successor.
-    let incoming = |edges: &[(usize, usize)], v: usize| edges.iter().any(|&(_, b)| b == v);
-    let outgoing = |edges: &[(usize, usize)], v: usize| edges.iter().any(|&(a, _)| a == v);
+    // Precompute has-incoming in one O(E) pass instead of rescanning all edges
+    // per vertex. Sound to snapshot before the loop: every edge this loop adds is
+    // `(ccp, v)` -- target the vertex being processed -- so it can only give an
+    // already-visited vertex an incoming edge, never change a later vertex's
+    // status.
+    let has_incoming: HashSet<usize> = edges.iter().map(|&(_, b)| b).collect();
     for v in 0..n {
-        if incoming(&edges, v) {
+        if has_incoming.contains(&v) {
             continue;
         }
         let ccp = (0..n)
@@ -304,20 +322,25 @@ fn gts_order(
                 )
             });
         if let Some(u) = ccp {
-            if !edges.contains(&(u, v)) {
+            if edge_set.insert((u, v)) {
                 edges.push((u, v));
             }
         }
     }
+    // Recompute has-outgoing after the incoming pass (whose `(ccp, v)` edges have
+    // arbitrary sources, so they matter here) but before this pass, whose added
+    // edges are all `(v, ccs)` -- source the vertex being processed -- and so
+    // never change a later vertex's status.
+    let has_outgoing: HashSet<usize> = edges.iter().map(|&(a, _)| a).collect();
     for v in 0..n {
-        if outgoing(&edges, v) {
+        if has_outgoing.contains(&v) {
             continue;
         }
         let ccs = (0..n)
             .filter(|&u| u != v && prec(&target_pos, v, u) && prec(&desired_pos, v, u))
             .min_by_key(|&u| (target_pos[u].unwrap(), desired_pos[u].unwrap(), u));
         if let Some(u) = ccs {
-            if !edges.contains(&(v, u)) {
+            if edge_set.insert((v, u)) {
                 edges.push((v, u));
             }
         }

@@ -99,6 +99,39 @@ fn stdout_does_not_modify_target() {
 }
 
 #[test]
+fn stdout_write_failure_is_reported() {
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"keep":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    // Spawn with a piped stdout, then close the read end. With no reader on the
+    // pipe, the child's `--stdout` write fails with EPIPE/BrokenPipe. That failure
+    // must surface as exit 1 (not a silent success that could truncate a redirected
+    // file) -- the regression Fix A guards against.
+    let mut child = Command::new(BIN)
+        .args([
+            "--stdout",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn config-graft");
+    // Close the read end so the child's stdout write has no reader.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().expect("wait config-graft");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("writing to stdout"), "stderr: {stderr}");
+}
+
+#[test]
 fn invalid_desired_exits_one() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
@@ -525,6 +558,29 @@ fn diff_reports_added_removed_changed() {
     assert!(diff.contains("- a = 1"), "{diff}");
     assert!(diff.contains("~ b: 1 => 2"), "{diff}");
     assert!(diff.contains("+ c = 3"), "{diff}");
+}
+
+#[test]
+fn diff_labels_empty_string_key_unambiguously() {
+    // `{"": 1}` is a legitimate JSON object with an empty-named key. Its diff label
+    // must be a quoted empty string (`""`), never a bare separator (`.`), which would
+    // be indistinguishable from a directory tree's own-attributes line.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, "{}").unwrap();
+    fs::write(&desired, r#"{"":1}"#).unwrap();
+
+    let out = run(&[
+        "--diff",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    let diff = String::from_utf8(out.stdout).unwrap();
+    assert!(diff.contains(r#"+ "" = 1"#), "{diff}");
+    // Never a bare-separator label that reads as a directory line.
+    assert!(!diff.contains("+ . = 1"), "{diff}");
 }
 
 #[test]
