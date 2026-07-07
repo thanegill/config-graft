@@ -40,6 +40,8 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// Writing the reconciled output to stdout (`--stdout`) failed.
+    StdoutWrite(std::io::Error),
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
     /// The YAML target can't be edited while preserving comments without risking
@@ -129,6 +131,7 @@ impl fmt::Display for Error {
             }
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
+            Error::StdoutWrite(e) => write!(f, "writing to stdout: {e}"),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
             Error::TomlUnsafe => f.write_str(TOML_UNSAFE),
@@ -179,6 +182,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Write { source, .. } | Error::Read { source, .. } => Some(source),
+            Error::StdoutWrite(e) => Some(e),
             Error::PlistSerialize(e) => Some(e),
             _ => None,
         }
