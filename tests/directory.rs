@@ -782,10 +782,19 @@ fn eacces_mid_walk_refuses_whole_run() {
 // preserve: a first write of a brand-new target, and a symlink target replaced by a
 // regular file (whose link-target xattrs must not be grafted on). ---
 
-/// Best-effort xattr set; returns false if the filesystem doesn't support it (e.g.
-/// tmpfs without user-xattr support), so the test can skip rather than fail.
-fn try_set_xattr(path: &Path, name: &str, value: &[u8]) -> bool {
-    xattr::set(path, name, value).is_ok()
+/// Best-effort xattr helper hung off `Path`, mirroring the private `PathExt`
+/// convention in `src/format/directory.rs`.
+trait PathXattrExt {
+    /// Best-effort xattr set; returns false if the filesystem doesn't support it
+    /// (e.g. tmpfs without user-xattr support), so the test can skip rather than
+    /// fail.
+    fn try_set_xattr(&self, name: &str, value: &[u8]) -> bool;
+}
+
+impl PathXattrExt for Path {
+    fn try_set_xattr(&self, name: &str, value: &[u8]) -> bool {
+        xattr::set(self, name, value).is_ok()
+    }
 }
 
 #[test]
@@ -829,7 +838,7 @@ fn replacing_symlink_does_not_graft_link_target_xattrs() {
     // A real file the symlink points at, carrying an out-of-scope xattr.
     let pointee = dir.path().join("pointee");
     fs::write(&pointee, "pointee").unwrap();
-    if !try_set_xattr(&pointee, "user.graft_test", b"leak") {
+    if !pointee.try_set_xattr("user.graft_test", b"leak") {
         eprintln!(
             "skipping replacing_symlink_does_not_graft_link_target_xattrs: xattrs unsupported"
         );
