@@ -44,6 +44,7 @@ fn reconciles_in_place_three_way_plist() {
         .unwrap();
 
     let out = run(&[
+        "plist",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
         base.to_str().unwrap(),
@@ -68,11 +69,14 @@ fn apply_is_idempotent_on_plist() {
     pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
 
     // First apply changes the file.
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     // Second apply is a no-op: --check exits 0.
     let out = run(&[
+        "plist",
         "--check",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -93,7 +97,7 @@ fn binary_plist_target_is_rewritten_as_xml() {
         .unwrap();
     pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
 
     // The file is now XML text (not the `bplist00` binary magic) ...
@@ -103,28 +107,6 @@ fn binary_plist_target_is_rewritten_as_xml() {
     assert_eq!(
         read_plist(&target),
         pdict(vec![("a", pint(2)), ("keep", plist::Value::Boolean(true))])
-    );
-}
-
-#[test]
-fn format_flag_overrides_extension() {
-    let dir = tempfile::tempdir().unwrap();
-    // No `.plist` extension, so detection would pick JSON; --format forces plist.
-    let target = dir.path().join("config");
-    let desired = dir.path().join("desired");
-    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
-    pdict(vec![("b", pint(2))]).to_file_xml(&desired).unwrap();
-
-    let out = run(&[
-        "--format",
-        "plist",
-        target.to_str().unwrap(),
-        desired.to_str().unwrap(),
-    ]);
-    assert!(out.status.success());
-    assert_eq!(
-        read_plist(&target),
-        pdict(vec![("a", pint(1)), ("b", pint(2))])
     );
 }
 
@@ -139,6 +121,7 @@ fn diff_renders_plist_date_and_data_tokens() {
         .unwrap();
 
     let out = run(&[
+        "plist",
         "--stdout",
         "--diff",
         target.to_str().unwrap(),
@@ -172,7 +155,7 @@ fn merge_conflict_path_uses_colon_separator() {
         .to_file_xml(&desired)
         .unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("contradictory reorder"), "stderr was: {err}");
@@ -187,7 +170,7 @@ fn not_a_mapping_error_names_plist() {
     plist::Value::Array(vec![pint(1)])
         .to_file_xml(&desired)
         .unwrap();
-    let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("must be a plist dictionary"), "got: {err}");
 }
 
@@ -204,6 +187,7 @@ fn plist_binary_output_is_binary_and_round_trips() {
     pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
 
     let out = run(&[
+        "plist",
         "--plist-binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -233,6 +217,7 @@ fn plist_binary_is_idempotent() {
     // First binary apply changes the file; a second --check is a no-op (exit 0),
     // which only holds if the binary writer is deterministic.
     assert!(run(&[
+        "plist",
         "--plist-binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap()
@@ -240,6 +225,7 @@ fn plist_binary_is_idempotent() {
     .status
     .success());
     let out = run(&[
+        "plist",
         "--check",
         "--plist-binary",
         target.to_str().unwrap(),
@@ -257,6 +243,7 @@ fn stdout_plist_binary_writes_binary() {
     pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
 
     let out = run(&[
+        "plist",
         "--stdout",
         "--plist-binary",
         target.to_str().unwrap(),
@@ -272,24 +259,23 @@ fn stdout_plist_binary_writes_binary() {
 }
 
 #[test]
-fn indent_flag_is_rejected_for_plist() {
+fn indent_flag_is_a_usage_error_for_plist() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
     pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
     pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
 
-    // --indent is JSON-only; passing it with plist is an error.
-    let err = stderr_of(&[
-        "--indent",
-        "4",
+    // --indent is JSON-only, so clap structurally rejects it for the plist
+    // subcommand: a usage error (exit code 2).
+    let out = run(&[
+        "plist",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
+        "--indent",
+        "2",
     ]);
-    assert!(
-        err.contains("--indent applies to JSON output only"),
-        "got: {err}"
-    );
+    assert_eq!(out.status.code(), Some(2));
 }
 
 #[test]
@@ -310,6 +296,7 @@ fn merge_key_scoped_path_uses_the_plist_separator() {
     // plist path segments are joined by `:` (PlistBuddy-style), the same separator
     // the tool prints elsewhere.
     let out = run(&[
+        "plist",
         "--merge-key",
         "a:items=id",
         target.to_str().unwrap(),

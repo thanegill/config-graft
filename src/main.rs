@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 mod backend;
 mod error;
@@ -13,17 +13,43 @@ mod reconcile;
 mod value;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
-use format::{FormatKind, Indent, Json, Plist, Toml, Yaml};
+use format::{Indent, Json, Plist, Toml, Yaml};
 use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
 use value::{Leaf, Node};
 
-/// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files:
-/// deep-merge DESIRED into TARGET while preserving keys the app wrote and pruning
-/// keys dropped from DESIRED (using BASE, the previously-applied snapshot, as the
-/// merge ancestor).
+/// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
+/// directory tree): deep-merge DESIRED into TARGET while preserving keys the app
+/// wrote and pruning keys dropped from DESIRED (using BASE, the previously-applied
+/// snapshot, as the merge ancestor). The format is chosen by the subcommand; each
+/// subcommand exposes only the flags that apply to it.
 #[derive(Parser)]
 #[command(name = "config-graft", version, about)]
 pub(crate) struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+/// The reconcile format, selected as a subcommand. Each variant exposes only the
+/// flags relevant to its format, so an unsupported flag/format pairing is a clap
+/// usage error rather than a runtime check.
+#[derive(Subcommand)]
+enum Command {
+    /// Reconcile a JSON file.
+    Json(JsonArgs),
+    /// Reconcile a YAML file (comments preserved).
+    Yaml(ByteArgs),
+    /// Reconcile a TOML file (comments preserved).
+    Toml(ByteArgs),
+    /// Reconcile a plist file.
+    Plist(PlistArgs),
+    /// Reconcile a directory *tree* rather than a single file.
+    Directory(DirArgs),
+}
+
+/// Positionals and flags common to every format (byte formats and the directory
+/// tree alike).
+#[derive(Args)]
+pub(crate) struct CommonArgs {
     /// File to reconcile, in place (created with parents if missing).
     pub(crate) target: PathBuf,
 
@@ -43,10 +69,6 @@ pub(crate) struct Cli {
     #[arg(long = "no-prune")]
     pub(crate) no_prune: bool,
 
-    /// Write the result to stdout; do not modify TARGET.
-    #[arg(long)]
-    pub(crate) stdout: bool,
-
     /// Print a human-readable diff of the changes.
     #[arg(long)]
     pub(crate) diff: bool,
@@ -54,26 +76,22 @@ pub(crate) struct Cli {
     /// Exit 3 if applying would change TARGET; write nothing.
     #[arg(long)]
     pub(crate) check: bool,
+}
 
-    /// Output indentation: a number of spaces, or `tab` (default: 2 spaces). JSON
-    /// only -- passing it with another format is an error.
-    #[arg(long, value_name = "N|tab", value_parser = format::parse_indent)]
-    pub(crate) indent: Option<Indent>,
+/// Flags shared by the byte formats (JSON/YAML/TOML/plist): single-file output
+/// shaping that has no meaning for a directory tree.
+#[derive(Args)]
+pub(crate) struct ByteArgs {
+    #[command(flatten)]
+    common: CommonArgs,
 
-    /// Input/output format. Inferred from TARGET's extension when omitted
-    /// (.plist → plist, .yaml/.yml → yaml, .toml → toml, else json). One format
-    /// governs TARGET, DESIRED, and BASE.
-    #[arg(long, value_name = "FORMAT")]
-    pub(crate) format: Option<FormatKind>,
-
-    /// Write plist output as binary instead of XML. Plist only -- passing it with
-    /// another format is an error.
-    #[arg(long = "plist-binary")]
-    pub(crate) plist_binary: bool,
+    /// Write the result to stdout; do not modify TARGET.
+    #[arg(long)]
+    stdout: bool,
 
     /// Sort every object's keys in the output.
     #[arg(long = "sort-keys")]
-    pub(crate) sort_keys: bool,
+    sort_keys: bool,
 
     /// How DESIRED arrays combine with TARGET arrays: merge (three-way,
     /// move-aware against BASE; the default), replace (atomic), concat (append),
@@ -83,7 +101,7 @@ pub(crate) struct Cli {
         default_value = "merge",
         value_name = "STRATEGY"
     )]
-    pub(crate) array_strategy: ArrayStrategy,
+    array_strategy: ArrayStrategy,
 
     /// Identify object-array elements by a field so `merge` matches keyed records
     /// (and merges their fields) instead of by whole value. `FIELD` (or
@@ -93,22 +111,71 @@ pub(crate) struct Cli {
     /// --merge-key spec.containers=name`.
     #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
+}
+
+/// JSON: the byte flags plus JSON-only `--indent`.
+#[derive(Args)]
+pub(crate) struct JsonArgs {
+    #[command(flatten)]
+    byte: ByteArgs,
+
+    /// Output indentation: a number of spaces, or `tab` (default: 2 spaces).
+    #[arg(long, value_name = "N|tab", value_parser = format::parse_indent)]
+    indent: Option<Indent>,
+}
+
+/// plist: the byte flags plus plist-only `--plist-binary`.
+#[derive(Args)]
+pub(crate) struct PlistArgs {
+    #[command(flatten)]
+    byte: ByteArgs,
+
+    /// Write plist output as binary instead of XML.
+    #[arg(long = "plist-binary")]
+    plist_binary: bool,
+}
+
+/// directory: the common flags plus the tree-only attribute controls.
+#[derive(Args)]
+pub(crate) struct DirArgs {
+    #[command(flatten)]
+    common: CommonArgs,
 
     /// Also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs),
-    /// not just its contents. `--format directory` only -- passing it with another
-    /// format is an error.
+    /// not just its contents.
     #[arg(long = "manage-root")]
-    pub(crate) manage_root: bool,
+    manage_root: bool,
 
-    /// Don't reconcile file/directory ownership (uid/gid). `--format directory`
-    /// only -- passing it with another format is an error.
+    /// Don't reconcile file/directory ownership (uid/gid).
     #[arg(long = "no-owner")]
-    pub(crate) no_owner: bool,
+    no_owner: bool,
 
     /// Which extended attributes to reconcile: `all` (default), `safe` (a
     /// conservative allowlist that skips privileged/system namespaces), or `none`.
-    /// `--format directory` only -- passing it with another format is an error.
     #[arg(long = "xattrs", value_name = "SCOPE")]
+    xattrs: Option<XattrScope>,
+}
+
+/// The resolved options a [`Backend`] run reads, built from whichever subcommand
+/// clap parsed. Flags a given format doesn't expose are filled with today's
+/// defaults (directory: no stdout/sort/array/merge_key/indent/plist_binary; byte
+/// formats: no manage_root/no_owner/xattrs), so the backend logic is unchanged.
+pub(crate) struct RunArgs {
+    pub(crate) target: PathBuf,
+    pub(crate) desired: PathBuf,
+    pub(crate) base: Option<String>,
+    pub(crate) base_flag: Option<String>,
+    pub(crate) no_prune: bool,
+    pub(crate) stdout: bool,
+    pub(crate) diff: bool,
+    pub(crate) check: bool,
+    pub(crate) indent: Option<Indent>,
+    pub(crate) plist_binary: bool,
+    pub(crate) sort_keys: bool,
+    pub(crate) array_strategy: ArrayStrategy,
+    merge_key: Vec<String>,
+    pub(crate) manage_root: bool,
+    pub(crate) no_owner: bool,
     pub(crate) xattrs: Option<XattrScope>,
 }
 
@@ -148,20 +215,89 @@ pub(crate) fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
     mk
 }
 
+impl RunArgs {
+    /// A [`RunArgs`] from a byte-format subcommand's flags. `indent`/`plist_binary`
+    /// are format-specific, so the caller supplies them (JSON sets `indent`, plist
+    /// sets `plist_binary`, YAML/TOML use the defaults). The directory-only fields
+    /// take their inert defaults.
+    fn from_byte(byte: ByteArgs, indent: Option<Indent>, plist_binary: bool) -> RunArgs {
+        let CommonArgs {
+            target,
+            desired,
+            base,
+            base_flag,
+            no_prune,
+            diff,
+            check,
+        } = byte.common;
+        RunArgs {
+            target,
+            desired,
+            base,
+            base_flag,
+            no_prune,
+            stdout: byte.stdout,
+            diff,
+            check,
+            indent,
+            plist_binary,
+            sort_keys: byte.sort_keys,
+            array_strategy: byte.array_strategy,
+            merge_key: byte.merge_key,
+            manage_root: false,
+            no_owner: false,
+            xattrs: None,
+        }
+    }
+
+    /// A [`RunArgs`] from the `directory` subcommand's flags. The byte-only shaping
+    /// fields (stdout/sort_keys/array_strategy/merge_key/indent/plist_binary) take
+    /// their inert defaults -- a tree exposes none of them.
+    fn from_dir(args: DirArgs) -> RunArgs {
+        let CommonArgs {
+            target,
+            desired,
+            base,
+            base_flag,
+            no_prune,
+            diff,
+            check,
+        } = args.common;
+        RunArgs {
+            target,
+            desired,
+            base,
+            base_flag,
+            no_prune,
+            stdout: false,
+            diff,
+            check,
+            indent: None,
+            plist_binary: false,
+            sort_keys: false,
+            // Matches the byte formats' `--array-strategy` default (`merge`); a tree
+            // has no arrays, so the value is inert either way.
+            array_strategy: ArrayStrategy::Merge,
+            merge_key: Vec::new(),
+            manage_root: args.manage_root,
+            no_owner: args.no_owner,
+            xattrs: args.xattrs,
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
-    // One format governs every file. Resolve it, then dispatch statically -- the
-    // node type carries the format's leaf type, so each format is its own
-    // monomorphization of `run`.
-    let kind = cli
-        .format
-        .unwrap_or_else(|| FormatKind::detect(&cli.target));
-    let result = match kind {
-        FormatKind::Json => ByteBackend::<Json>::run(&cli),
-        FormatKind::Plist => ByteBackend::<Plist>::run(&cli),
-        FormatKind::Yaml => ByteBackend::<Yaml>::run(&cli),
-        FormatKind::Toml => ByteBackend::<Toml>::run(&cli),
-        FormatKind::Directory => Directory::run(&cli),
+    // The subcommand picks the format; dispatch statically -- the node type carries
+    // the format's leaf type, so each format is its own monomorphization of `run`.
+    let result = match cli.command {
+        Command::Json(a) => ByteBackend::<Json>::run(&RunArgs::from_byte(a.byte, a.indent, false)),
+        Command::Yaml(a) => ByteBackend::<Yaml>::run(&RunArgs::from_byte(a, None, false)),
+        Command::Toml(a) => ByteBackend::<Toml>::run(&RunArgs::from_byte(a, None, false)),
+        Command::Plist(a) => {
+            ByteBackend::<Plist>::run(&RunArgs::from_byte(a.byte, None, a.plist_binary))
+        }
+        Command::Directory(a) => Directory::run(&RunArgs::from_dir(a)),
     };
     match result {
         Ok(outcome) => process::exit(outcome.code()),

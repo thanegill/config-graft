@@ -17,7 +17,7 @@ fn creates_missing_target_with_parents() {
     let desired = dir.path().join("desired.toml");
     fs::write(&desired, "a = 1\n").unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     assert_eq!(fs::read_to_string(&target).unwrap(), "a = 1\n");
 }
@@ -35,6 +35,7 @@ fn first_apply_emits_canonical_nested_tables() {
     .unwrap();
 
     let out = run(&[
+        "toml",
         "--stdout",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -57,6 +58,7 @@ fn reconciles_in_place_three_way() {
     fs::write(&base, "a = 1\nb = 2\n").unwrap();
 
     let out = run(&[
+        "toml",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
         base.to_str().unwrap(),
@@ -85,7 +87,7 @@ fn preserves_comments_when_changing_a_value() {
     .unwrap();
     fs::write(&desired, "[db]\nhost = \"localhost\"\nport = 5433\n").unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     assert_eq!(
         fs::read_to_string(&target).unwrap(),
@@ -102,6 +104,7 @@ fn check_reports_pending_change_and_writes_nothing() {
     fs::write(&desired, "a = 2\n").unwrap();
 
     let out = run(&[
+        "toml",
         "--check",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -118,11 +121,14 @@ fn apply_is_idempotent() {
     fs::write(&target, "# keep\na = 1  # inline\n").unwrap();
     fs::write(&desired, "a = 2\n").unwrap();
 
-    assert!(run(&[target.to_str().unwrap(), desired.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        run(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
     // Second run changes nothing.
     let out = run(&[
+        "toml",
         "--check",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -143,6 +149,7 @@ fn stdout_does_not_modify_target() {
     fs::write(&desired, "a = 1\n").unwrap();
 
     let out = run(&[
+        "toml",
         "--stdout",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -162,7 +169,7 @@ fn datetime_round_trips_unchanged() {
     fs::write(&target, "when = 1979-05-27T07:32:00Z\nn = 1\n").unwrap();
     fs::write(&desired, "when = 1979-05-27T07:32:00Z\nn = 2\n").unwrap();
 
-    let out = run(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
     let text = fs::read_to_string(&target).unwrap();
     assert!(text.contains("when = 1979-05-27T07:32:00Z"), "{text}");
@@ -178,6 +185,7 @@ fn array_strategy_concat_appends() {
     fs::write(&desired, "ports = [443]\n").unwrap();
 
     let out = run(&[
+        "toml",
         "--array-strategy",
         "concat",
         target.to_str().unwrap(),
@@ -203,6 +211,7 @@ fn array_strategy_set_merges_ignoring_order() {
     fs::write(&desired, "tags = [\"b\", \"c\"]\n").unwrap();
 
     let out = run(&[
+        "toml",
         "--array-strategy",
         "set",
         target.to_str().unwrap(),
@@ -230,6 +239,7 @@ fn diff_reports_added_removed_changed() {
     fs::write(&base, "a = 1\n").unwrap();
 
     let out = run(&[
+        "toml",
         "--diff",
         "--check",
         target.to_str().unwrap(),
@@ -243,25 +253,6 @@ fn diff_reports_added_removed_changed() {
 }
 
 #[test]
-fn format_override_applies_toml_to_bare_extension() {
-    // A non-.toml filename forced to TOML via --format.
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("config.conf");
-    let desired = dir.path().join("desired.conf");
-    fs::write(&target, "a = 1  # keep\n").unwrap();
-    fs::write(&desired, "a = 2\n").unwrap();
-
-    let out = run(&[
-        "--format",
-        "toml",
-        target.to_str().unwrap(),
-        desired.to_str().unwrap(),
-    ]);
-    assert!(out.status.success());
-    assert_eq!(fs::read_to_string(&target).unwrap(), "a = 2  # keep\n");
-}
-
-#[test]
 fn sort_keys_orders_output() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.toml");
@@ -270,6 +261,7 @@ fn sort_keys_orders_output() {
     fs::write(&desired, "b = 1\na = 2\n").unwrap();
 
     let out = run(&[
+        "toml",
         "--sort-keys",
         "--stdout",
         target.to_str().unwrap(),
@@ -286,49 +278,25 @@ fn invalid_desired_exits_one_and_names_toml() {
     let desired = dir.path().join("desired.toml");
     fs::write(&desired, "= not valid\n").unwrap();
 
-    let err = stderr_of(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("not valid TOML"), "got: {err}");
 }
 
 #[test]
-fn indent_flag_is_rejected_for_toml() {
+fn indent_flag_is_a_usage_error_for_toml() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.toml");
     let desired = dir.path().join("desired.toml");
-    fs::write(&target, "a = 1\n").unwrap();
-    fs::write(&desired, "a = 2\n").unwrap();
+    fs::write(&desired, "a = 1\n").unwrap();
 
-    let err = stderr_of(&[
+    let out = run(&[
+        "toml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
         "--indent",
         "4",
-        target.to_str().unwrap(),
-        desired.to_str().unwrap(),
     ]);
-    assert!(
-        err.contains("--indent applies to JSON output only"),
-        "got: {err}"
-    );
-    assert_eq!(fs::read_to_string(&target).unwrap(), "a = 1\n"); // untouched
-}
-
-#[test]
-fn plist_binary_flag_is_rejected_for_toml() {
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("config.toml");
-    let desired = dir.path().join("desired.toml");
-    fs::write(&target, "a = 1\n").unwrap();
-    fs::write(&desired, "a = 2\n").unwrap();
-
-    let err = stderr_of(&[
-        "--plist-binary",
-        target.to_str().unwrap(),
-        desired.to_str().unwrap(),
-    ]);
-    assert!(
-        err.contains("--plist-binary applies to plist output only"),
-        "got: {err}"
-    );
-    assert_eq!(fs::read_to_string(&target).unwrap(), "a = 1\n"); // untouched
+    assert_eq!(out.status.code(), Some(2));
 }
 
 #[test]
@@ -342,6 +310,7 @@ fn no_prune_keeps_dropped_keys() {
     fs::write(&base, "a = 1\nb = 2\n").unwrap();
 
     let out = run(&[
+        "toml",
         "--no-prune",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),

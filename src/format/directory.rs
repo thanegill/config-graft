@@ -1,4 +1,4 @@
-//! Directory-tree backend for `--format directory`.
+//! Directory-tree backend for the `directory` subcommand.
 //!
 //! A directory is not a byte-oriented [`Format`](crate::format::Format) -- it has
 //! no single stream to parse or serialize. Instead it plugs into the same
