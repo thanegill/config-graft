@@ -207,6 +207,55 @@ fn plist_binary_output_is_binary_and_round_trips() {
 }
 
 #[test]
+fn binary_desired_with_control_char_key_round_trips() {
+    // NSUserKeyEquivalents-style: menu-path keys joined by ESC (0x1B), which is
+    // illegal in XML 1.0 and so can only live in a *binary* DESIRED. --plist-binary
+    // keeps the write byte-exact so the control character survives.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    // Target starts empty (XML); the ESC-keyed entry can only come from binary.
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    let esc_key = "\u{1b}Window\u{1b}New Window";
+    pdict(vec![(esc_key, plist::Value::String("@~n".into()))])
+        .to_file_binary(&desired)
+        .unwrap();
+
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+
+    // Output is a binary plist carrying the raw ESC byte ...
+    let bytes = fs::read(&target).unwrap();
+    assert!(
+        bytes.starts_with(b"bplist00"),
+        "expected binary plist output"
+    );
+    assert!(bytes.contains(&0x1b), "ESC byte must survive in the output");
+    // ... and round-trips to the reconciled value.
+    assert_eq!(
+        read_plist(&target),
+        pdict(vec![(esc_key, plist::Value::String("@~n".into()))])
+    );
+
+    // A second --check is a no-op: the ESC value reconciles clean and the binary
+    // write is deterministic.
+    let out = run(&[
+        "plist",
+        "--check",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
 fn plist_binary_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
