@@ -1,6 +1,6 @@
 [package]
 name = "config-graft"
-version = "0.0.3"
+version = "0.1.0"
 edition = "2021"
 description = "Three-way reconcile for app-owned JSON, plist, YAML, and TOML files"
 license = "MIT"

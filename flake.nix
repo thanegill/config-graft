@@ -18,7 +18,7 @@
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "config-graft";
-          version = "0.0.3";
+          version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           meta.mainProgram = "config-graft";
