@@ -122,7 +122,10 @@ inference.
   **both XML and binary** plist; output is normalized **XML by default** (a binary
   or differently-formatted target is rewritten as canonical XML on first apply —
   the same normalize-on-write behavior JSON has), or **binary** with
-  `--plist-binary`. plist has no `null`.
+  `--plist-binary`. plist has no `null`. Some values cannot be expressed in XML at
+  all — a string containing a byte illegal in XML 1.0 (e.g. the ESC `0x1B`
+  separators in `NSUserKeyEquivalents`) — and can only be read from, and written
+  as, **binary**; `--plist-binary` is required end to end for them.
 - **YAML** (1.2, via `saphyr`) — mappings, sequences, strings, integers, floats,
   booleans, `null`. **Unlike JSON/plist, an existing target is *not* normalized:**
   config-graft edits the original file text in place, so **comments, blank lines,

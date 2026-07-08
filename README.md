@@ -156,7 +156,11 @@ for a validating or specially configured type. `package` overrides the
 config-graft build for one entry. Plist entries accept `cfprefsdDomain` to
 reconcile through `cfprefsd` (`defaults`/`plutil`) instead of editing the file;
 that path is macOS only (asserted at build time), per-user under home-manager and
-system/global under nix-darwin.
+system/global under nix-darwin. Plist entries also accept `binary = true`, which
+generates a **binary** DESIRED (via `libplist` at build time) and reconciles with
+`--plist-binary`, so values XML cannot represent — a string with a byte illegal in
+XML 1.0, e.g. the ESC `0x1B` separators in `NSUserKeyEquivalents` — round-trip
+instead of corrupting the DESIRED.
 
 `managedDirectory` is the `directory` subcommand wrapper: each entry reconciles a
 `source` directory *tree* into `target`, keeping app-created files and pruning

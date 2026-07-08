@@ -95,7 +95,13 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   `cfprefsd.nix` (the `cfprefsdDomain` option, used by `common.nix`). Each entry's
   DESIRED comes from `settings` (a `pkgs.formats` generator, overridable per entry
   via `format`), or a pre-built `source` file; the two are mutually exclusive
-  (asserted); `target` defaults to the attribute name (entries keyed by path);
+  (asserted). Plist entries also take `binary` (plist only): the plist generator is
+  XML-only (`toPlist`), which can't hold bytes illegal in XML 1.0 (e.g. the ESC
+  `0x1B` in `NSUserKeyEquivalents`), so `binary = true` makes `mkDesired` render
+  `settings` to JSON and convert it to a binary plist with `pkgs.libplist`'s
+  `plistutil` (`-f bin -s`; key sort is irrelevant to reconcile), and
+  `mkEntryReconcileScript` adds `--plist-binary` on both the file and cfprefsd write
+  paths. `target` defaults to the attribute name (entries keyed by path);
   `package` defaults to the flake's own build (threaded in via `self`), so no
   overlay is needed. **`managedDirectory`** (the `directory` subcommand) lives *beside*
   the `formats` loop, not in it (a tree has no `settings`/generator): `common.nix`

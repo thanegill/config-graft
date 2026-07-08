@@ -15,7 +15,11 @@ in
   inherit safeName;
 
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
-  # generated from `settings` by the entry's `pkgs.formats` generator.
+  # generated from `settings` by the entry's `pkgs.formats` generator. plist entries
+  # with `binary = true` bypass the (XML-only) generator: they render `settings` to
+  # JSON and convert to a binary plist with libplist's `plistutil`, so values illegal
+  # in XML 1.0 (e.g. the ESC 0x1B separators in `NSUserKeyEquivalents`) round-trip.
+  # `-s` sorts keys for byte-stable output; key order is irrelevant to reconcile.
   mkDesired =
     {
       lib,
@@ -26,6 +30,12 @@ in
     }:
     if entry.source != null then
       entry.source
+    else if format.name == "plist" && entry.binary then
+      pkgs.runCommand "managed-plist-${safeName name}" { nativeBuildInputs = [ pkgs.libplist ]; } ''
+        ${lib.getExe pkgs.libplist} -f bin -s \
+          -i ${pkgs.writeText "managed-plist-${safeName name}.json" (builtins.toJSON entry.settings)} \
+          -o $out
+      ''
     else
       entry.format.generate "managed-${format.name}-${safeName name}" entry.settings;
 
@@ -102,6 +112,19 @@ in
               example = "com.example.app";
               description = cfprefsdDescription;
             };
+
+            binary = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                Generate the plist DESIRED as a binary plist and reconcile with
+                `--plist-binary`, so values XML cannot represent (bytes illegal in
+                XML 1.0, e.g. the ESC 0x1B separators in `NSUserKeyEquivalents`)
+                round-trip. When generated from {option}`settings` this uses
+                `pkgs.libplist` at build time; with {option}`source` it only forces
+                the binary write.
+              '';
+            };
           };
 
           config.target = lib.mkDefault name;
@@ -126,6 +149,12 @@ in
       desired,
       target,
     }:
+    let
+      # plist-only `binary` (the option exists only for plist), so guard the lookup.
+      binaryFlag = lib.optionalString (
+        format.name == "plist" && (entry.binary or false)
+      ) " --plist-binary";
+    in
     if format.name == "plist" && entry.cfprefsdDomain != null then
       ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
@@ -140,7 +169,7 @@ in
 
         # Graft our settings into the live state, then push it back through cfprefsd
         # so it adopts the merged result.
-        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev"
+        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev"${binaryFlag}
         run /usr/bin/defaults import "$_domain" "$_live"
         rm -f "$_live"
       ''
@@ -148,7 +177,7 @@ in
       ''
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
-        run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"
+        run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${binaryFlag}
       '';
 
   # Directory-format entry type. Unlike the byte formats there is no `settings`
