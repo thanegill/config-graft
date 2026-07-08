@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-07
+
+### Added
+
+- `managedPlist` entries gain a plist-only **`binary`** option (default `false`).
+  With `binary = true` the Nix module generates a **binary** plist DESIRED — via
+  `libplist`'s `plistutil` at build time — and reconciles with `--plist-binary`, so
+  preference values XML cannot represent (a string containing a byte illegal in XML
+  1.0, e.g. the ESC `0x1B` separators in `NSUserKeyEquivalents`) round-trip instead
+  of corrupting the DESIRED. Reconciling such a domain through `cfprefsdDomain`
+  merges the dict in place rather than clobbering it like `defaults write -dict`.
+  `plistutil` is a build-time dependency of the module only, pulled in only for
+  entries that opt in; the config-graft engine already read and wrote binary plist.
+
 ## [0.1.0] - 2026-07-07
 
 ### Added
@@ -157,7 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--check`, `--stdout`, and `--diff` modes; `--indent` control.
 - An empty BASE argument is treated as no base.
 
-[Unreleased]: https://github.com/thanegill/config-graft/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/thanegill/config-graft/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/thanegill/config-graft/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/thanegill/config-graft/compare/v0.0.3...v0.1.0
 [0.0.3]: https://github.com/thanegill/config-graft/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/thanegill/config-graft/compare/v0.0.1...v0.0.2
