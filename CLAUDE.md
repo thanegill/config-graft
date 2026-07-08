@@ -18,14 +18,19 @@ nix build                            # hermetic; runs the test suite in checkPha
 
 A format-agnostic engine over a generic value model; formats plug in via traits.
 
-- `src/value.rs` — `Node<L>` + the `Leaf` trait. **Each format owns its leaf type**
+- `src/value.rs` — `Node<L>` + the `Leaf` trait (bound `Clone + Eq + Hash + Debug`;
+  `Eq`/`Hash` let array set-union and the GTS internals dedup via `HashSet` rather than
+  linear scans, so every leaf keeps `Hash` consistent with `Eq` — the float-carrying
+  leaves canonicalize `-0.0`/`NaN` for that). **Each format owns its leaf type**
   (`JsonLeaf`/`YamlLeaf`/`PlistLeaf`/`TomlLeaf`/`FsLeaf`), so encoders are total —
   there is no single enum mixing formats. Don't reintroduce one. `Node::Map` carries
-  **no side payload** — it's a plain `#[derive]`'d enum. A format that needs
-  per-directory metadata (directory mode's mode/owner/xattrs) stores it as an
-  ordinary leaf under a reserved empty-string key, so it reconciles through the same
-  machinery as any entry (no `Leaf::LeafMeta` associated type, no hand-written
-  `Node` impls).
+  **no side payload**: a format that needs per-directory metadata (directory mode's
+  mode/owner/xattrs) stores it as an ordinary leaf under a reserved empty-string key,
+  so it reconciles through the same machinery as any entry (no `Leaf::LeafMeta`
+  associated type, no directory-specific `Node` impls). `Node` derives everything
+  except `Hash`, which is hand-written so a `Map` hashes order-independently (matching
+  `IndexMap`'s order-independent `PartialEq`). `Leaf::is_dir_attrs()` lets `--diff`
+  tell a directory's own-attributes leaf from a real empty-string key.
 - `src/reconcile.rs` — the pure three-way merge, generic `<L: Leaf>`, no I/O.
   Managed key paths are the `KeyPath` newtype. A directory's own attributes are
   just a leaf under the reserved key, so they prune/merge like any entry with no
