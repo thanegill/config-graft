@@ -122,6 +122,15 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   `mkMerge (mapAttrsToList … active)` at the top. Pruning uses the previous
   generation as BASE: HM via `$oldGenPath/home-files/<snap>`, system via
   `/run/current-system/<snap>` embedded with `system.systemBuilderCommands`.
+  Per-entry pruning only fires while an entry is declared, so `home-manager.nix`
+  also links a **manifest** of its file entries (`<format>\t<target>\t<snap>\t<binary>`,
+  one row each) and runs an **unconditional** `configGraftOrphanPrune` activation step:
+  it reads the previous generation's manifest and reconciles every target no longer
+  declared back to empty against that target's old snapshot (pure bash + the
+  config-graft binary; no external tools). This is what makes *removing* a whole
+  entry clean up, not just dropping keys within one. cfprefsd plist domains and
+  `managedDirectory` trees are excluded (no plain-file target); the system modules
+  don't have it yet.
   `examples/{home-manager,nixos,nix-darwin}/` are self-contained consumer flakes
   (input `github:thanegill/config-graft`; override with `--override-input
   config-graft path:.` to test a local checkout) that each evaluate to a full
