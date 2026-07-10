@@ -11,6 +11,16 @@
 # generation's copy is reachable at `$oldGenPath/home-files/<snapshot>` on the next
 # switch (GC-safe: the old generation is a GC root). Unset $oldGenPath on the first
 # switch -> no pruning.
+#
+# Orphan pruning: per-entry pruning only fires while the entry is still declared --
+# a *removed* entry (its `settings` emptied, or the whole entry deleted) drives no
+# reconcile, so its last-grafted keys would freeze in the committed file. Each
+# generation therefore also links a manifest listing its file entries (target +
+# snapshot path); on the next switch an unconditional activation step reads the
+# previous generation's manifest and, for every entry no longer declared, reconciles
+# its target back to empty against the old snapshot -- pruning exactly what we
+# grafted while keeping app/user keys. cfprefsd-backed plist domains and directory
+# trees are out of scope (no plain-file target).
 { self }:
 {
   config,
@@ -196,6 +206,83 @@ let
   managedTargets =
     lib.concatMap (x: lib.mapAttrsToList (_: entry: entry.target) x.active) byFormat
     ++ lib.mapAttrsToList (_: entry: entry.target) config.home.managedDirectory;
+
+  homeDir = config.home.homeDirectory;
+
+  # Every active byte-format entry that reconciles a plain *file*, flattened to the
+  # data the orphan-prune (below) needs: its format, target, snapshot path, and
+  # binary flag. cfprefsd-backed plist entries are excluded -- they reconcile a live
+  # preference domain, not a file, so there's no target to reconcile back to empty.
+  fileEntries = lib.concatMap (
+    x:
+    lib.mapAttrsToList
+      (name: entry: {
+        format = x.format.name;
+        inherit (entry) target;
+        snapshotRel = ".local/state/home-manager/managed-${x.format.name}/${configGraftLib.safeName name}";
+        binary = entry.binary or false;
+      })
+      (lib.filterAttrs (_: entry: !(x.format.name == "plist" && entry.cfprefsdDomain != null)) x.active)
+  ) byFormat;
+
+  # An empty DESIRED document per format (empty object / dictionary), reused by the
+  # orphan-prune to reconcile a removed entry's target back to empty.
+  emptyDesired = builtins.listToAttrs (
+    map (
+      format:
+      lib.nameValuePair format.name (
+        (pkgs.formats.${format.name} { }).generate "config-graft-empty.${format.fileExtension}" { }
+      )
+    ) formats
+  );
+
+  # Manifest of this generation's file entries, linked as a `home.file` snapshot so
+  # the *next* switch can read it (at `$oldGenPath/home-files/<manifestRel>`) to find
+  # entries that were removed. TSV rows: `<format>\t<target>\t<snapshotRel>\t<binary>`.
+  manifestRel = ".local/state/home-manager/config-graft-manifest";
+  manifestFile = pkgs.writeText "config-graft-manifest" (
+    lib.concatMapStrings (
+      e: "${e.format}\t${e.target}\t${e.snapshotRel}\t${if e.binary then "1" else "0"}\n"
+    ) fileEntries
+  );
+
+  # Format-qualified keys of the entries still managed this generation, as a
+  # newline-delimited string with sentinel newlines, for a pure-bash membership test.
+  currentKeys = "\n" + lib.concatMapStrings (e: "${e.format}\t${e.target}\n") fileEntries;
+
+  # Reconcile the target of every entry present last generation but gone this one back
+  # to empty: its old snapshot (still reachable in `$oldGenPath`) is BASE, so exactly
+  # the keys we last grafted are pruned while keys the app or user wrote are kept.
+  # Without this a removed entry (its `settings` emptied, or the whole entry deleted)
+  # would leave its last-applied keys frozen in the committed file -- no active entry
+  # drives their prune, and config-graft's snapshot is gone too. Runs unconditionally
+  # (even when no entry remains) since cleaning up after the *last* entry is removed is
+  # the whole point. No external tools: pure bash plus the config-graft binary.
+  orphanPruneScript = ''
+    if [[ -v oldGenPath && -e "$oldGenPath/home-files/${manifestRel}" ]]; then
+      while IFS=$'\t' read -r _cgFormat _cgTarget _cgSnap _cgBinary; do
+        [[ -n "$_cgFormat" ]] || continue
+        # Still managed this generation? Then its own entry prunes it; skip.
+        if [[ ${lib.escapeShellArg currentKeys} == *$'\n'"$_cgFormat"$'\t'"$_cgTarget"$'\n'* ]]; then
+          continue
+        fi
+        _cgBase="$oldGenPath/home-files/$_cgSnap"
+        [[ -e "$_cgBase" ]] || continue
+        case "$_cgFormat" in
+          json) _cgEmpty=${emptyDesired.json} ;;
+          yaml) _cgEmpty=${emptyDesired.yaml} ;;
+          toml) _cgEmpty=${emptyDesired.toml} ;;
+          plist) _cgEmpty=${emptyDesired.plist} ;;
+          *) continue ;;
+        esac
+        _cgBin=""
+        [[ "$_cgBinary" = 1 ]] && _cgBin="--plist-binary"
+        _i "Pruning removed managed %s file %s" "$_cgFormat" "${homeDir}/$_cgTarget"
+        run ${lib.getExe config.home.managed.package} \
+          "$_cgFormat" "${homeDir}/$_cgTarget" "$_cgEmpty" "$_cgBase" $_cgBin
+      done < "$oldGenPath/home-files/${manifestRel}"
+    fi
+  '';
 in
 {
   options.home =
@@ -222,15 +309,20 @@ in
   config = {
     # Link each DESIRED as a `home.file` snapshot, readable as BASE next switch (a
     # directory DESIRED becomes a symlink to the store tree, which config-graft
-    # follows as the BASE root).
-    home.file = builtins.listToAttrs (
-      lib.concatMap (
-        x: lib.mapAttrsToList (_: e: lib.nameValuePair e.snapshotRel { source = e.desired; }) x.entries
-      ) byFormat
-      ++ lib.mapAttrsToList (
-        _: e: lib.nameValuePair e.snapshotRel { source = e.source; }
-      ) directoryEntries
-    );
+    # follows as the BASE root). The file-entry manifest rides along the same way, so
+    # the next switch can read it to prune entries removed since (see orphanPrune).
+    home.file =
+      builtins.listToAttrs (
+        lib.concatMap (
+          x: lib.mapAttrsToList (_: e: lib.nameValuePair e.snapshotRel { source = e.desired; }) x.entries
+        ) byFormat
+        ++ lib.mapAttrsToList (
+          _: e: lib.nameValuePair e.snapshotRel { source = e.source; }
+        ) directoryEntries
+      )
+      // lib.optionalAttrs (fileEntries != [ ]) {
+        ${manifestRel}.source = manifestFile;
+      };
 
     # One activation entry per format (a static key), defined only when it has entries.
     home.activation = builtins.listToAttrs (
@@ -250,6 +342,13 @@ in
               lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) directoryEntries)
             )
           );
+        }
+        # Unconditional: it must still run in the generation that removed the *last*
+        # entry (when there are no active entries to key it off). It self-guards on a
+        # previous-generation manifest and no-ops when there's nothing to prune.
+        {
+          name = "configGraftOrphanPrune";
+          value = lib.hm.dag.entryAfter [ "writeBoundary" ] orphanPruneScript;
         }
       ]
     );

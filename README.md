@@ -168,6 +168,18 @@ files dropped from `source`. It takes `manageRoot`, `noOwner` (set it on a
 non-root home-manager activation — a store-built source is root-owned), and
 `xattrs` (`all`/`safe`/`none`) in place of `settings`.
 
+Removing a whole entry cleans up too. Per-key pruning fires only while an entry is
+still declared; a *removed* entry (its `settings` emptied, or the whole entry
+deleted) would otherwise leave its last-grafted keys frozen in the file, because no
+active entry drives their prune. The **home-manager** module handles this: each
+generation records a manifest of its managed files, and on the next switch it
+reconciles any target that is no longer declared back to empty against that target's
+old snapshot — pruning exactly the keys it grafted while keeping the app's and
+user's keys. So dropping a `home.managed<Format>` entry removes its managed keys on
+the next activation, the same as removing individual keys. (cfprefsd-backed plist
+domains and `managedDirectory` trees are out of scope for this cleanup; the system
+`environment.managed*` modules prune per-entry but not yet on whole-entry removal.)
+
 A home-manager `flake.nix` sketch:
 
 ```nix
