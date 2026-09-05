@@ -1,5 +1,7 @@
 # config-graft
 
+> **AI Disclosure:** This project falls under [Level 5: Bots coded, human understands completely](https://www.visidata.org/blog/2026/ai/). Exact model used varies by commit and is in the commit message. This is disclosed as useful context for anyone depending on, auditing, or forking this code, not because I think it lowers the bar on the quality. Reach out or report bugs the way you would for any other project.
+
 Three-way reconcile/merge for **JSON, plist, YAML, and TOML files** or a
 **directory tree**.
 
