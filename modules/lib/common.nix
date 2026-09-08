@@ -115,14 +115,25 @@ in
 
             binary = mkOption {
               type = types.bool;
-              default = false;
+              default = config.cfprefsdDomain != null;
+              defaultText = literalExpression "config.cfprefsdDomain != null";
               description = ''
                 Generate the plist DESIRED as a binary plist and reconcile with
                 `--plist-binary`, so values XML cannot represent (bytes illegal in
                 XML 1.0, e.g. the ESC 0x1B separators in `NSUserKeyEquivalents`)
-                round-trip. When generated from {option}`settings` this uses
-                `pkgs.libplist` at build time; with {option}`source` it only forces
-                the binary write.
+                round-trip. When generated from {option}`settings` this runs the
+                entry's {option}`format` generator and converts its output with
+                `pkgs.libplist` at build time, so a {option}`format` override still
+                applies; with {option}`source` it only forces the binary write.
+
+                Defaults to `true` for a {option}`cfprefsdDomain` entry, whose whole
+                round-trip is binary anyway ({command}`defaults export` produces a
+                binary plist and {command}`defaults import` reads one back), so
+                nothing a domain holds is squeezed through XML. Setting it to
+                `false` builds that entry's DESIRED as XML again, which is fine for
+                ordinary values but cannot carry a byte XML 1.0 forbids -- the write
+                to cfprefsd stays binary either way, so `false` narrows what the
+                DESIRED can express without widening anything.
               '';
             };
           };
