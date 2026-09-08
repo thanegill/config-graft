@@ -11,6 +11,7 @@ mod error;
 mod format;
 mod reconcile;
 mod value;
+mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, Toml, Yaml};
