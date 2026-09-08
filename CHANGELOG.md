@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The error names the key path and points at `--plist-binary`, which carries the
   value unchanged.
 
+### Changed
+
+- **`managedPlist`:** the cfprefsd reconcile now passes `--plist-binary`
+  unconditionally. Its scratch file comes from `defaults export` and goes straight
+  back through `defaults import`, both binary, so writing XML in between could only
+  narrow what survives.
+
 ### Fixed
 
 - **plist:** an XML run now floors `Date` values to whole seconds. CFPropertyList's

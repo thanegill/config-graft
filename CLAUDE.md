@@ -127,8 +127,16 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   `0x1B` in `NSUserKeyEquivalents`), so `binary = true` makes `mkDesired` render
   `settings` to JSON and convert it to a binary plist with `pkgs.libplist`'s
   `plistutil` (`-f bin -s`; key sort is irrelevant to reconcile), and
-  `mkEntryReconcileScript` adds `--plist-binary` on both the file and cfprefsd write
-  paths. `target` defaults to the attribute name (entries keyed by path);
+  `mkEntryReconcileScript` adds `--plist-binary` on the
+  file write path. The
+  **cfprefsd path always writes binary**, `binary` or not: its `$_live` scratch file
+  comes from `defaults export` (binary) and goes back through `defaults import`, so
+  routing it through XML only risks loss (XML-illegal bytes, sub-second dates).
+  The XML->binary conversion is type-faithful for
+  everything the `settings` type can hold -- bool stays `<true/>` rather than
+  becoming `<integer>1</integer>`, plus int/real/string/list/nested and empty
+  dict/list.
+  `target` defaults to the attribute name (entries keyed by path);
   `package` defaults to the flake's own build (threaded in via `self`), so no
   overlay is needed. **`managedDirectory`** (the `directory` subcommand) lives *beside*
   the `formats` loop, not in it (a tree has no `settings`/generator): `common.nix`
