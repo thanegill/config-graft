@@ -19,6 +19,7 @@ use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalized, WriteOpts};
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
+use crate::warning::Warning;
 use crate::RunArgs;
 
 /// Output preferences for this run. Built in one place so the read-time
@@ -103,6 +104,14 @@ fn lossy_collapses<L: Leaf>(
     // produce the same diagnostics.
     reported.sort();
     reported
+}
+
+/// Print run diagnostics to stderr. The one place a warning becomes text, so
+/// every source of them looks the same to a reader.
+pub(crate) fn emit<L: Leaf>(warnings: &[Warning<L>], sep: &str) {
+    for w in warnings {
+        eprintln!("config-graft: warning: {}", w.render(sep));
+    }
 }
 
 /// A reconciled result prepared for the output phase: its serialized bytes (byte
@@ -232,21 +241,12 @@ pub(crate) trait Backend {
             arrays: args.array_strategy,
             merge_keys: Self::merge_keys(args),
         };
-        let (mut result, conflicts) = reconcile(&target, &desired, base.as_ref(), &opts);
-        // A `merge` array where TARGET and DESIRED reorder the same elements
-        // contradictorily is resolved deterministically (TARGET order preferred);
-        // warn so the reorder isn't applied silently. Diagnostics only -- the exit
-        // code is unaffected. Byte formats only: a tree has no arrays, so
-        // `conflicts` is empty.
-        for c in &conflicts {
-            let elements: Vec<String> = c.elements.iter().map(Node::compact).collect();
-            eprintln!(
-                "config-graft: warning: array `{}` had a contradictory reorder of [{}] \
-                 between TARGET and DESIRED; resolved deterministically (TARGET order preferred)",
-                c.path.render(Self::COMPONENT_SEPARATOR),
-                elements.join(", ")
-            );
-        }
+        let (mut result, warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
+        // Anything the reconcile did to a value beyond applying the managed edits
+        // -- a contradictory reorder resolved by tie-break, an array identity that
+        // appeared twice and could only survive once. Diagnostics only: the exit
+        // code is unaffected.
+        emit(&warnings, Self::COMPONENT_SEPARATOR);
         for message in lossy_collapses(
             &target_risks,
             &desired_risks,

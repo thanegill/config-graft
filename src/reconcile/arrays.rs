@@ -7,12 +7,13 @@
 //! every element of both sides is an object carrying it -- by that key, deep-merging
 //! the matched records.
 
-use super::{reconcile, ArrayStrategy, Conflict, KeyPath, NodeList, Options};
+use super::{reconcile, ArrayStrategy, KeyPath, NodeList, Options};
 use crate::value::{Leaf, Node};
+use crate::warning::Warning;
 use std::collections::HashSet;
 
 /// Combine a TARGET array with a DESIRED array per `opts.arrays`, returning the
-/// new element list and any `merge` [`Conflict`]s (each with a path *relative to*
+/// new element list and any [`Warning`]s (each with a path *relative to*
 /// this array -- empty for a cross-over reorder of the array itself, a
 /// `[field=value]` element selector for a conflict nested inside a keyed record).
 /// `base` is the merge ancestor at this path (used only by `Merge`); only `Merge`
@@ -24,7 +25,7 @@ pub(super) fn combine<L: Leaf>(
     base: Option<&Node<L>>,
     opts: &Options,
     path: &[String],
-) -> (NodeList<L>, Vec<Conflict<L>>) {
+) -> (NodeList<L>, Vec<Warning<L>>) {
     match opts.arrays {
         // Atomic: DESIRED's array wins wholesale.
         ArrayStrategy::Replace => (desired.to_vec(), Vec::new()),
@@ -79,7 +80,7 @@ pub(super) fn combine<L: Leaf>(
 /// when `keys` names candidate fields and every element of both sides is an object
 /// carrying one, by that key field (a keyed record). Matched keyed records are
 /// three-way *merged* (fields reconciled); value-matched elements are taken as-is.
-/// Returns the ordered survivors and any [`Conflict`]s (a contradictory cross-over
+/// Returns the ordered survivors and any [`Warning`]s (a contradictory cross-over
 /// cycle at this array, plus, in keyed mode, conflicts nested inside a merged
 /// record).
 fn ordered_merge<L: Leaf>(
@@ -88,7 +89,7 @@ fn ordered_merge<L: Leaf>(
     base: &[Node<L>],
     opts: &Options,
     keys: &[String],
-) -> (NodeList<L>, Vec<Conflict<L>>) {
+) -> (NodeList<L>, Vec<Warning<L>>) {
     if !keys.is_empty() && all_keyed(target, keys) && all_keyed(desired, keys) {
         keyed_merge(target, desired, base, opts, keys)
     } else {
@@ -103,7 +104,7 @@ fn value_merge<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
-) -> (NodeList<L>, Vec<Conflict<L>>) {
+) -> (NodeList<L>, Vec<Warning<L>>) {
     let verts = membership_merge(target, desired, base);
     let id_of = |e: &Node<L>| verts.iter().position(|v| v == e);
     assemble(verts.len(), id_of, &verts, target, desired, base)
@@ -121,7 +122,7 @@ fn keyed_merge<L: Leaf>(
     base: &[Node<L>],
     opts: &Options,
     keys: &[String],
-) -> (NodeList<L>, Vec<Conflict<L>>) {
+) -> (NodeList<L>, Vec<Warning<L>>) {
     let key = |e: &Node<L>| identity(e, keys);
     let has = |seq: &[Node<L>], k: &Ident<L>| seq.iter().any(|e| key(e).as_ref() == Some(k));
 
@@ -149,7 +150,7 @@ fn keyed_merge<L: Leaf>(
     let find =
         |seq: &[Node<L>], k: &Ident<L>| seq.iter().find(|e| key(e).as_ref() == Some(k)).cloned();
     let mut merged: NodeList<L> = Vec::with_capacity(survivors.len());
-    let mut nested: Vec<Conflict<L>> = Vec::new();
+    let mut nested: Vec<Warning<L>> = Vec::new();
     for k in &survivors {
         let value = match (find(target, k), find(desired, k)) {
             (Some(t), Some(d)) => {
@@ -157,7 +158,7 @@ fn keyed_merge<L: Leaf>(
                 let (field, key_value) = k;
                 let selector = format!("[{field}={}]", render_value(key_value));
                 for mut c in conflicts {
-                    c.path.prepend(selector.clone());
+                    c.path_mut().prepend(selector.clone());
                     nested.push(c);
                 }
                 m
@@ -198,7 +199,7 @@ fn render_value<L: Leaf>(v: &Node<L>) -> String {
 /// Shared GTS assembly: given the survivor count `n`, a map from an input element
 /// to its survivor index (`id_of`), and the output value per survivor (`merged`),
 /// order the survivors move-aware and report any cross-over cycle as a single
-/// [`Conflict`] at this array (empty path -- callers prepend the array's own key).
+/// warning at this array (empty path -- callers prepend the array's own key).
 fn assemble<L: Leaf>(
     n: usize,
     id_of: impl Fn(&Node<L>) -> Option<usize>,
@@ -206,7 +207,7 @@ fn assemble<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
-) -> (NodeList<L>, Vec<Conflict<L>>) {
+) -> (NodeList<L>, Vec<Warning<L>>) {
     if n <= 1 {
         return (merged.to_vec(), Vec::new());
     }
@@ -229,7 +230,7 @@ fn assemble<L: Leaf>(
     let conflicts = if conflict_ids.is_empty() {
         Vec::new()
     } else {
-        vec![Conflict {
+        vec![Warning::ContradictoryReorder {
             path: KeyPath::new(),
             elements: conflict_ids.iter().map(|&i| merged[i].clone()).collect(),
         }]
