@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **`managedPlist`:** the cfprefsd reconcile now passes `--plist-binary` unconditionally. Its scratch file comes from `defaults export` and goes straight back through `defaults import`, both binary, so writing XML in between could only narrow what survives.
 - **`managedPlist`:** `binary` now defaults to `true` when `cfprefsdDomain` is set (it remains `false` otherwise), so a domain's DESIRED is generated as a binary plist too and the whole round-trip stays out of XML. Set `binary = false` on such an entry to keep an XML DESIRED.
+- **`managedPlist`:** a binary DESIRED is now built by running the entry's own `format` generator and converting its output with `libplist`'s `plistutil`, instead of rendering `settings` through `builtins.toJSON`. A `format` override is therefore honoured on the binary path too; previously it was silently ignored there, which the `binary` default above would have widened from an opt-in case to every `cfprefsdDomain` entry.
 
 ### Fixed
 
