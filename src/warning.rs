@@ -10,6 +10,22 @@
 use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
 
+/// Which of a run's inputs a warning is about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    Target,
+    Desired,
+}
+
+impl Source {
+    fn label(self) -> &'static str {
+        match self {
+            Source::Target => "TARGET",
+            Source::Desired => "DESIRED",
+        }
+    }
+}
+
 /// Something a run changed about a value beyond applying the managed edits.
 pub enum Warning<L: Leaf> {
     /// A `merge` array where TARGET and DESIRED reordered the same elements
@@ -19,6 +35,15 @@ pub enum Warning<L: Leaf> {
         path: KeyPath,
         elements: Vec<Node<L>>,
     },
+    /// One input array held the same identity twice. Membership is a set, so only
+    /// the first occurrence survives and the repeat is dropped.
+    DuplicateCollapsed {
+        path: KeyPath,
+        source: Source,
+        /// What repeated: an element's compact value, or a `[field=value]`
+        /// selector when the array is matched by merge key.
+        identity: String,
+    },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -26,7 +51,8 @@ impl<L: Leaf> Warning<L> {
     /// bubbles up out of a subtree and gains its parent key at each level.
     pub fn path_mut(&mut self) -> &mut KeyPath {
         match self {
-            Warning::ContradictoryReorder { path, .. } => path,
+            Warning::ContradictoryReorder { path, .. }
+            | Warning::DuplicateCollapsed { path, .. } => path,
         }
     }
 
@@ -43,6 +69,16 @@ impl<L: Leaf> Warning<L> {
                     elements.join(", ")
                 )
             }
+            Warning::DuplicateCollapsed {
+                path,
+                source,
+                identity,
+            } => format!(
+                "array `{}` in {} holds {identity} more than once; array membership is a \
+                 set, so only the first occurrence is kept",
+                path.render(sep),
+                source.label()
+            ),
         }
     }
 }
