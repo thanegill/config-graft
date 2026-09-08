@@ -327,34 +327,33 @@ in
             "\\f"
           ];
       in
-      lib.concatMap (name: [
-        {
-          assertion = active.${name}.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
-          message = ''
-            ${parent}.${format.optionName}."${name}".cfprefsdDomain is set,
-            but cfprefsd, defaults, and plutil exist only on macOS (this
-            configuration targets ${pkgs.stdenv.hostPlatform.system}). Unset it to
-            edit the plist file in place instead.
-          '';
-        }
-        {
-          # An XML DESIRED cannot carry such a character, and the reconcile refuses
-          # that write rather than emitting a file only macOS can read. Catch it at
-          # build time instead of at activation.
-          assertion =
-            active.${name}.binary
-            || active.${name}.source != null
-            || !(hasXmlIllegalByte active.${name}.settings);
-          message = ''
-            ${parent}.${format.optionName}."${name}" has `settings` holding a
-            character an XML plist cannot carry (a C0 control other than tab,
-            newline or carriage return -- e.g. the ESC 0x1B separators in
-            `NSUserKeyEquivalents`), but `binary` is false, so its DESIRED would be
-            generated as XML and the reconcile would refuse the write. Set
-            `binary = true` on this entry.
-          '';
-        }
-      ]) (builtins.attrNames active)
+      lib.concatLists (
+        lib.mapAttrsToList (name: entry: [
+          {
+            assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
+            message = ''
+              ${parent}.${format.optionName}."${name}".cfprefsdDomain is set,
+              but cfprefsd, defaults, and plutil exist only on macOS (this
+              configuration targets ${pkgs.stdenv.hostPlatform.system}). Unset it to
+              edit the plist file in place instead.
+            '';
+          }
+          {
+            # An XML DESIRED cannot carry such a character, and the reconcile refuses
+            # that write rather than emitting a file only macOS can read. Catch it at
+            # build time instead of at activation.
+            assertion = entry.binary || entry.source != null || !(hasXmlIllegalByte entry.settings);
+            message = ''
+              ${parent}.${format.optionName}."${name}" has `settings` holding a
+              character an XML plist cannot carry (a C0 control other than tab,
+              newline or carriage return -- e.g. the ESC 0x1B separators in
+              `NSUserKeyEquivalents`), but `binary` is false, so its DESIRED would be
+              generated as XML and the reconcile would refuse the write. Set
+              `binary = true` on this entry.
+            '';
+          }
+        ]) active
+      )
     )
     ++ lib.mapAttrsToList (name: entry: {
       assertion = !(entry.settings != { } && entry.source != null);
