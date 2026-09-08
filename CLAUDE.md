@@ -38,7 +38,34 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
 - `src/format/{json,plist,yaml,toml}.rs` — per-format leaf enum + `ValueCodec`
   (native ⇄ `Node`) + `Format` (parse/serialize). `mod.rs` holds the traits,
   `FormatKind` (a per-format tag, no longer the dispatch selector), `Indent`,
-  `read_file`.
+  `read_file`. `Format::normalize_for_run` (default: no-op) reduces a parsed node
+  to what the run's *output* encoding can hold; `Backend::run` applies it to
+  **all three inputs** (`read` stays a plain reader), so prune (TARGET vs BASE),
+  `--diff` and the byte change check never see three different precisions --
+  `--diff` keeps the pre-normalization TARGET so it shows the normalization it is
+  about to write rather than comparing two already-normalized sides. plist is its only implementor: an
+  XML run floors `Date`s to whole seconds there, not in `serialize` — flooring
+  only the written bytes leaves a floored TARGET unequal to its fractional BASE,
+  and a managed date key can then never be pruned. Two things it **refuses**
+  instead of writing: a floor that would make two elements of a managed array equal
+  (membership is a set, so an instant the app recorded would vanish), and a string
+  or key holding a character XML 1.0 forbids — a C0 control other than tab/newline/
+  carriage-return -- CR included, since XML normalizes a literal CR to LF. macOS
+  parses those bytes happily, so emitting them yields a file valid nowhere else;
+  `serialize` checks before writing XML and names the key path. The collapse is
+  **not** decided by the codec and is a **warning, not a refusal**:
+  `normalize_for_run` returns a `Normalized` per element it rewrote (path, original,
+  new value) and `Backend::run`'s `lossy_collapses` reports only where the result
+  keeps fewer copies than there were distinct originals -- so an unmanaged array,
+  `concat` and `replace` never trip it, while a collapse spread across TARGET and
+  DESIRED does. It reports nothing for a path `Node::get_path` cannot resolve to an
+  array (a date inside an array of dicts, issue #37) or that the result no longer
+  holds (a prune). An earlier revision *refused* instead, and because an
+  unresolvable path counted as zero survivors it failed a scalar date present on
+  both sides, an unmanaged array of dicts, and any prune of a date-bearing array --
+  don't reintroduce that.
+  `Format::NORMALIZES` lets `run` skip the `--diff` snapshot for formats that never
+  rewrite anything.
 - `src/backend.rs` — the `Backend` trait is the I/O boundary of a run (read the
   three inputs → reconcile → diff/check/stdout/apply); its provided `Backend::run`
   method owns that spine so **every format shares it**. Dispatch is **static**:

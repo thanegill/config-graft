@@ -26,17 +26,17 @@ pub struct KeyPath(Vec<String>);
 
 impl KeyPath {
     /// An empty path (the document root).
-    fn new() -> KeyPath {
+    pub(crate) fn new() -> KeyPath {
         KeyPath(Vec::new())
     }
 
     /// Append a key segment.
-    fn push(&mut self, seg: String) {
+    pub(crate) fn push(&mut self, seg: String) {
         self.0.push(seg);
     }
 
     /// Drop the last key segment.
-    fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.0.pop();
     }
 

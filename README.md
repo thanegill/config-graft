@@ -106,6 +106,23 @@ Plist notes:
 - Reads accept **both** XML and binary plist. Output is normalized **XML by
   default**; pass `--plist-binary` to write a binary plist instead.
 - plist's `Date`/`Data`/`Uid` scalars are atomic leaves and round-trip losslessly.
+  The one exception is date precision: an XML run floors a `Date` to a whole
+  second, because CFPropertyList's XML parser rejects a fractional-second `<date>`
+  and a date read out of a binary plist (as `defaults export` produces) almost
+  always has one. The floor happens as each input is read, so TARGET, DESIRED and
+  BASE stay comparable and a managed date key still prunes.
+- When flooring conflates two instants and the merge then keeps only one, the run
+  **says so on stderr** and writes anyway — the same normalization is what keeps
+  TARGET comparable to BASE, so refusing would strand the run instead. An array
+  absent from DESIRED is copied through untouched and never trips it.
+- An XML run **refuses** (exit 1, leaving the target untouched) when a string or key
+  holds a character an XML plist cannot carry unchanged: a C0 control other than tab
+  or newline, such as the ESC `0x1B` separators in `NSUserKeyEquivalents`, or a
+  carriage return, which XML requires parsers to turn into a newline. macOS tolerates
+  the control bytes, so writing them would produce a file that loads on macOS and is
+  invalid everywhere else.
+- `--plist-binary` sidesteps all of the above: no date is floored and no byte is
+  out of reach, so the values pass through untouched.
 - plist has no `null`. `--indent` is exposed only by the `json` subcommand.
 
 YAML notes:

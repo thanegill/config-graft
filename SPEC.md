@@ -118,14 +118,40 @@ inference.
 - **plist** — dictionaries, arrays, strings, integers, reals, booleans, and the
   plist-only scalars **`Date`**, **`Data`**, and **`Uid`**. The engine treats
   every non-dictionary value as an atomic leaf, so these exotic scalars
-  **round-trip losslessly** without the engine understanding them. Reads accept
+  **round-trip losslessly** without the engine understanding them (the one
+  exception is date precision on the XML write path, below). Reads accept
   **both XML and binary** plist; output is normalized **XML by default** (a binary
   or differently-formatted target is rewritten as canonical XML on first apply —
   the same normalize-on-write behavior JSON has), or **binary** with
   `--plist-binary`. plist has no `null`. Some values cannot be expressed in XML at
   all — a string containing a byte illegal in XML 1.0 (e.g. the ESC `0x1B`
   separators in `NSUserKeyEquivalents`) — and can only be read from, and written
-  as, **binary**; `--plist-binary` is required end to end for them.
+  as, **binary**; `--plist-binary` is required end to end for them. **An XML run
+  carries dates at one-second resolution**: CFPropertyList's XML parser accepts
+  only `YYYY-MM-DDTHH:MM:SSZ`, so a `Date` is floored to a whole second. A
+  sub-second component is the norm for a date read out of a **binary** plist
+  (where dates are `f64` seconds since 2001, as `defaults export` produces), so
+  passing such a date through unchanged would emit XML that `plutil`/`defaults
+  import` reject. The floor is applied **on read, to all three inputs** (TARGET,
+  DESIRED, BASE), not just to the bytes leaving the writer: pruning removes a
+  managed key only while TARGET still equals BASE, so flooring one side alone
+  would strand every managed date key permanently, and `--diff` would report a
+  change that `--check` refuses to make. A floor that conflates values an input
+  distinguished, where the reconcile then keeps fewer of them, is **reported on
+  stderr**: two instants under a second apart become one value, and array
+  membership is a set, so one is dropped. It is a warning rather than a refusal
+  because the same normalization is what keeps TARGET comparable to BASE. It is
+  judged against the result, so an array absent from DESIRED, `concat` and
+  `replace` say nothing; `merge` and `set` do, whether the two instants sat in one
+  input or one each. The check can only resolve arrays addressed by map keys, so a
+  date inside an array of dicts is not reported (issue #37), and a path the result
+  no longer holds is a prune rather than a collapse. One case *is* **refused**
+  (exit 1, target untouched): a string or key holding a character an XML plist cannot carry unchanged: a C0 control other
+  than tab or newline (e.g. the ESC `0x1B` separators in `NSUserKeyEquivalents`), or
+  a **carriage return**, which XML 1.0 §2.11 requires every parser to normalize to a
+  line feed. macOS's own parser tolerates the control bytes, so emitting them would
+  produce a file that loads there and is invalid to every conforming parser.
+  `--plist-binary` disables the floor and carries both cases unchanged.
 - **YAML** (1.2, via `saphyr`) — mappings, sequences, strings, integers, floats,
   booleans, `null`. **Unlike JSON/plist, an existing target is *not* normalized:**
   config-graft edits the original file text in place, so **comments, blank lines,
@@ -270,6 +296,7 @@ ever pruned.
 
 - Because removal is snapshot-driven (not null-sentinel), the tool **cannot set a managed key to `null`-meaning-delete**; `null` is a real value. This is intentional and the inverse of RFC 7386's limitation.
 - Atomic arrays mean you can't manage a single element of an app-written list; you own the whole array or none of it.
+- **plist:** an XML run floors dates to whole seconds on read (§7) — the sub-second component of a date read out of a binary plist is dropped. XML that keeps it is not loadable by CFPropertyList, so this is a lossy read rather than a broken file; `--plist-binary` avoids it.
 - **Directory mode (§5b):** the multi-file apply is best-effort, not transactional (§8) — re-run to complete a partial apply. An **empty declared directory** is created *and* is prunable: a directory carries its own attributes as a reserved-key leaf, so even an empty one has a managed leaf path and is removed when dropped from DESIRED (unlike a JSON key whose value is `{}`, which has no leaf path and can't be pruned). Further directory-mode trade-offs, all intentional (each is locked by a characterization test so it can't regress silently):
   - **Hardlinks are not preserved.** A changed file is rewritten via a fresh temp file and `rename`, giving it a new inode; any other name hardlinked to the old inode keeps the old content. config-graft treats each path independently and does not detect or re-link shared inodes.
   - **Read/apply is a two-step, so it's subject to TOCTOU.** The tree is read, reconciled, then applied; a concurrent writer that changes a file between the read and the overwrite can have its change clobbered (or, for a type change, trigger the app-content refuse spuriously). Point config-graft at a tree no other process is mutating.
