@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **plist:** an XML run now floors `Date` values to whole seconds. CFPropertyList's XML parser accepts only `YYYY-MM-DDTHH:MM:SSZ`, so a date carrying a fractional second — the norm for one read out of a binary plist, as `defaults export` produces — made `plutil -lint` and `defaults import` reject the file config-graft had just written. The floor is applied when TARGET, DESIRED and BASE are read, so all three stay comparable: pruning a managed date key still works, `--diff` no longer reports a change `--check` refuses to make, and `--diff` does show the floor it is about to write rather than hiding it by comparing two already-floored sides. A floor that conflates two instants is **reported on stderr** where the merge then keeps only one of them, rather than dropping a value the app recorded silently; an array config-graft does not manage is copied through untouched and never trips it. `--plist-binary` keeps full precision throughout.
 
+### Fixed
+
+- **JSON numbers are no longer reshaped by `f64`.** A number that isn't an exact 64-bit integer is now held as its **source literal** and re-emitted verbatim, so `1.2345678901234567890123` is no longer silently shortened and the integer `123456789012345678901234567890` no longer comes back as `1.2345678901234568e+29`. Most seriously, an exponent outside `f64`'s range (e.g. `1e400`) made the whole document fail to parse — and because an unparseable TARGET is treated as `{}`, the file was replaced by DESIRED, destroying every app-owned key with exit 0 and no warning. Numbers compare by the **value** their literal denotes rather than its spelling, so `0.10`, `0.1` and `1e-1` stay one number: a DESIRED spelled differently from TARGET isn't a change, and pruning still recognizes a value the user never touched. YAML and TOML were unaffected — they edit in place, so a value config-graft doesn't touch keeps its original text.
+
 ## [0.1.1] - 2026-07-07
 
 ### Added
