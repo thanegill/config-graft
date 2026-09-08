@@ -788,3 +788,34 @@ fn plist_binary_flag_is_a_usage_error_for_json() {
     ]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn empty_desired_with_base_prunes_managed_keys_and_keeps_the_rest() {
+    // The contract the home-manager module's orphan-prune leans on: when an entry is
+    // removed, its target is reconciled with an *empty* DESIRED against the last
+    // snapshot (BASE). Every key we grafted (still == BASE in TARGET) is pruned; keys
+    // the app/user added, or edited away from BASE, stay. The file is emptied of our
+    // keys, not deleted.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("empty.json");
+    let base = dir.path().join("base.json");
+    // BASE = what we last grafted (managed + managedEdited).
+    fs::write(&base, r#"{"managed":1,"managedEdited":5}"#).unwrap();
+    // TARGET = the committed file: our two keys plus a user key, and the user changed
+    // managedEdited out from under us.
+    fs::write(&target, r#"{"managed":1,"managedEdited":9,"user":2}"#).unwrap();
+    fs::write(&desired, "{}").unwrap();
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+
+    // managed pruned (TARGET == BASE); managedEdited kept (user changed it); user kept.
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"managedEdited":9,"user":2}));
+}

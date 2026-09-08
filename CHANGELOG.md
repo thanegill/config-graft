@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **home-manager: removing a `home.managed{Json,Yaml,Toml,Plist}` entry now prunes
+  its last-grafted keys** instead of freezing them in the committed file. Per-key
+  pruning only fired while an entry stayed declared; emptying an entry's `settings`
+  or deleting the whole entry dropped both its reconcile and its snapshot, so the
+  keys it last applied leaked. Each generation now links a manifest of its managed
+  files, and an unconditional activation step reconciles any target that is no longer
+  declared back to empty against that target's previous-generation snapshot — so a
+  removed entry cleans up exactly what it grafted, keeping app/user keys, the same as
+  removing individual keys. cfprefsd-backed plist domains and `managedDirectory`
+  trees are out of scope (no plain-file target); the system `environment.managed*`
+  modules are unchanged (still prune per-entry only).
+
 ## [0.1.1] - 2026-07-07
 
 ### Added
