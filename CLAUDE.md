@@ -122,12 +122,15 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   `cfprefsd.nix` (the `cfprefsdDomain` option, used by `common.nix`). Each entry's
   DESIRED comes from `settings` (a `pkgs.formats` generator, overridable per entry
   via `format`), or a pre-built `source` file; the two are mutually exclusive
-  (asserted). Plist entries also take `binary` (plist only): the plist generator is
-  XML-only (`toPlist`), which can't hold bytes illegal in XML 1.0 (e.g. the ESC
-  `0x1B` in `NSUserKeyEquivalents`), so `binary = true` makes `mkDesired` render
-  `settings` to JSON and convert it to a binary plist with `pkgs.libplist`'s
-  `plistutil` (`-f bin -s`; key sort is irrelevant to reconcile), and
-  `mkEntryReconcileScript` adds `--plist-binary` on the
+  (asserted). Plist entries also take `binary` (plist only): `binary = true` makes
+  `mkDesired` run the entry's own generator and convert its output to a binary plist
+  with `pkgs.libplist`'s `plistutil` (`-f bin -s`; key sort is irrelevant to
+  reconcile), so a `format` override still decides how `settings` is serialized.
+  The intermediate is XML carrying bytes XML 1.0 forbids (the ESC `0x1B` in
+  `NSUserKeyEquivalents`), which `plistutil` accepts; it never leaves the build, so
+  a stricter parser some day fails the build loudly instead of corrupting a DESIRED
+  at activation. Don't reintroduce the `builtins.toJSON` hop this replaced -- it
+  bypassed `format` entirely. `mkEntryReconcileScript` adds `--plist-binary` on the
   file write path. The
   **cfprefsd path always writes binary**, `binary` or not: its `$_live` scratch file
   comes from `defaults export` (binary) and goes back through `defaults import`, so

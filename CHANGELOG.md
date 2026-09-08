@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (it remains `false` otherwise), so a domain's DESIRED is generated as a binary
   plist too and the whole round-trip stays out of XML. Set `binary = false` on such
   an entry to keep an XML DESIRED.
+- **`managedPlist`:** a binary DESIRED is now built by running the entry's own
+  `format` generator and converting its output with `libplist`'s `plistutil`,
+  instead of rendering `settings` through `builtins.toJSON`. A `format` override is
+  therefore honoured on the binary path too; previously it was silently ignored
+  there, which the `binary` default above would have widened from an opt-in case to
+  every `cfprefsdDomain` entry.
 
 ### Fixed
 

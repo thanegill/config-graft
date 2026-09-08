@@ -15,11 +15,16 @@ in
   inherit safeName;
 
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
-  # generated from `settings` by the entry's `pkgs.formats` generator. plist entries
-  # with `binary = true` bypass the (XML-only) generator: they render `settings` to
-  # JSON and convert to a binary plist with libplist's `plistutil`, so values illegal
-  # in XML 1.0 (e.g. the ESC 0x1B separators in `NSUserKeyEquivalents`) round-trip.
-  # `-s` sorts keys for byte-stable output; key order is irrelevant to reconcile.
+  # generated from `settings` by the entry's `pkgs.formats` generator. A plist entry
+  # with `binary = true` runs that same generator and converts its output to a binary
+  # plist with libplist's `plistutil`, so the entry's `format` override still decides
+  # how `settings` is serialized. `-s` sorts keys for byte-stable output; key order is
+  # irrelevant to reconcile.
+  #
+  # The intermediate is XML holding raw bytes that XML 1.0 forbids (the ESC 0x1B
+  # separators in `NSUserKeyEquivalents`), which `plistutil` accepts. It exists only
+  # inside this build and is consumed immediately, so a stricter parser some day
+  # fails the build loudly rather than corrupting a DESIRED at activation time.
   mkDesired =
     {
       lib,
@@ -28,16 +33,17 @@ in
       name,
       entry,
     }:
+    let
+      generated = entry.format.generate "managed-${format.name}-${safeName name}" entry.settings;
+    in
     if entry.source != null then
       entry.source
     else if format.name == "plist" && entry.binary then
       pkgs.runCommand "managed-plist-${safeName name}" { nativeBuildInputs = [ pkgs.libplist ]; } ''
-        ${lib.getExe pkgs.libplist} -f bin -s \
-          -i ${pkgs.writeText "managed-plist-${safeName name}.json" (builtins.toJSON entry.settings)} \
-          -o $out
+        ${lib.getExe pkgs.libplist} -f bin -s -i ${generated} -o $out
       ''
     else
-      entry.format.generate "managed-${format.name}-${safeName name}" entry.settings;
+      generated;
 
   # The `attrsOf submodule` type for one format's entries. Every option is the same
   # on every platform except `target` (relative vs absolute) and the `cfprefsdDomain`
