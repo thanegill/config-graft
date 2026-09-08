@@ -253,14 +253,14 @@ fn floor_dates_to_whole_seconds(
 
 /// The first character an XML plist cannot carry unchanged, if any. Rust strings
 /// are valid UTF-8, so unpaired surrogates cannot occur; what remains is the C0
-/// controls plus the two non-characters. Tab and newline survive literally;
-/// **carriage return does not** -- XML 1.0 section 2.11 requires every parser to
-/// normalize a literal CR to LF, so writing one silently rewrites the value even
-/// though the byte is legal in the document.
+/// controls plus the two non-characters. Tab, newline and carriage return survive
+/// -- the first two literally, CR as the `&#13;` the `plist` crate writes for it.
 fn xml_unrepresentable(text: &str) -> Option<char> {
-    text.chars()
-        .find(|&c| (c < '\u{20}' && c != '\t' && c != '\n') || c == '\u{fffe}' || c == '\u{ffff}')
+    text.chars().find(|&c| {
+        (c < '\u{20}' && c != '\t' && c != '\n' && c != '\r') || c == '\u{fffe}' || c == '\u{ffff}'
+    })
 }
+
 
 /// Refuse a write whose XML no conforming parser could read. macOS's own parser
 /// happens to tolerate these bytes, so emitting them would produce a file that

@@ -213,6 +213,18 @@ let
       });
     }
     {
+      name = "a carriage return is accepted with `binary = false`";
+      expected = 0;
+      actual = builtins.length (assertionFailures {
+        entries.probe = {
+          # The writer emits a CR as `&#13;`, which XML carries, so unlike the ESC
+          # above this needs no binary DESIRED.
+          settings.a = "line1\rline2";
+          binary = false;
+        };
+      });
+    }
+    {
       name = "ordinary settings are accepted with `binary = false`";
       expected = 0;
       actual = builtins.length (assertionFailures {

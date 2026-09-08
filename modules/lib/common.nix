@@ -309,14 +309,13 @@ in
     lib.optionals (format.name == "plist") (
       let
         # Whether any string in `value` -- keys included -- holds a character an XML
-        # plist cannot carry unchanged. Tested on the JSON rendering, where exactly
-        # those characters survive as an escape: `builtins.toJSON` writes the C0
-        # controls as `\uXXXX`, `\b` or `\f`, and the two XML keeps literally (tab,
-        # newline) as `\t`/`\n`. A carriage return is `\r`, and counts -- XML
-        # normalizes a literal CR to LF, so it does not survive either. Escaped
-        # backslashes are dropped first, so a value holding the literal text
-        # `\u001b` is not mistaken for a control byte. Nix has no character-class
-        # regex, hence the substring test.
+        # plist cannot carry. Tested on the JSON rendering, where exactly those
+        # characters survive as an escape: `builtins.toJSON` writes the C0 controls
+        # as `\uXXXX`, `\b` or `\f`, and the three XML keeps (tab, newline, carriage
+        # return) as `\t`/`\n`/`\r`. `\r` is off the list because the writer emits a
+        # CR as the character reference `&#13;`. Escaped backslashes are dropped
+        # first, so a value holding the literal text `\u001b` is not mistaken for a
+        # control byte. Nix has no character-class regex, hence the substring test.
         hasXmlIllegalByte =
           value:
           let
@@ -326,7 +325,6 @@ in
             "\\u00"
             "\\b"
             "\\f"
-            "\\r"
           ];
       in
       lib.concatMap (name: [
@@ -349,8 +347,8 @@ in
             || !(hasXmlIllegalByte active.${name}.settings);
           message = ''
             ${parent}.${format.optionName}."${name}" has `settings` holding a
-            character an XML plist cannot carry unchanged (a C0 control other than
-            tab or newline, or a carriage return -- e.g. the ESC 0x1B separators in
+            character an XML plist cannot carry (a C0 control other than tab,
+            newline or carriage return -- e.g. the ESC 0x1B separators in
             `NSUserKeyEquivalents`), but `binary` is false, so its DESIRED would be
             generated as XML and the reconcile would refuse the write. Set
             `binary = true` on this entry.
