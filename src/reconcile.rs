@@ -320,7 +320,13 @@ pub fn deep_merge<L: Leaf>(
         }
         _ => {}
     }
-    *target = desired.clone();
+    // Only overwrite when the value actually differs. Two values can be equal and
+    // still spelled differently -- a JSON `2.5` and `2.50` are one number -- and
+    // replacing one with the other would rewrite the file for no change the diff
+    // can show, so `--diff` and `--check` would disagree.
+    if target != desired {
+        *target = desired.clone();
+    }
     Vec::new()
 }
 
@@ -1091,7 +1097,7 @@ mod tests {
     // ----- conflict surfacing -----
 
     fn conflict_paths(t: Value, d: Value, b: Option<Value>, arrays: ArrayStrategy) -> Vec<String> {
-        let (_result, mut conflicts) = reconcile(
+        let (_result, conflicts) = reconcile(
             &n(t),
             &n(d),
             b.map(n).as_ref(),
@@ -1101,10 +1107,7 @@ mod tests {
                 merge_keys: MergeKeys::default(),
             },
         );
-        conflicts
-            .iter_mut()
-            .map(|c| c.path_mut().render("."))
-            .collect()
+        conflicts.iter().map(|c| c.path().render(".")).collect()
     }
 
     fn keyed_conflict_paths(
@@ -1113,7 +1116,7 @@ mod tests {
         base: Option<Value>,
         global_keys: &[&str],
     ) -> Vec<String> {
-        let (_result, mut conflicts) = reconcile(
+        let (_result, conflicts) = reconcile(
             &n(target),
             &n(desired),
             base.map(n).as_ref(),
@@ -1126,10 +1129,7 @@ mod tests {
                 },
             },
         );
-        conflicts
-            .iter_mut()
-            .map(|c| c.path_mut().render("."))
-            .collect()
+        conflicts.iter().map(|c| c.path().render(".")).collect()
     }
 
     // ----- duplicate collapse -----
@@ -1162,7 +1162,7 @@ mod tests {
         );
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
         assert!(
-            warnings[0].contains("array `l` in TARGET holds \"a\" more than once"),
+            warnings[0].contains("array `l` in TARGET holds \"a\" 2 times"),
             "got: {}",
             warnings[0]
         );
@@ -1178,7 +1178,7 @@ mod tests {
         );
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
         assert!(
-            warnings[0].contains("array `l` in DESIRED holds \"a\" more than once"),
+            warnings[0].contains("array `l` in DESIRED holds \"a\" 2 times"),
             "got: {}",
             warnings[0]
         );
@@ -1208,7 +1208,7 @@ mod tests {
         );
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
         assert!(
-            warnings[0].contains("array `l` in TARGET holds [id=\"a\"] more than once"),
+            warnings[0].contains("array `l` in TARGET holds [id=\"a\"] 2 times"),
             "got: {}",
             warnings[0]
         );
@@ -1226,7 +1226,7 @@ mod tests {
         );
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
         assert!(
-            warnings[0].contains("array `l` in DESIRED holds \"b\" more than once"),
+            warnings[0].contains("array `l` in DESIRED holds \"b\" 2 times"),
             "got: {}",
             warnings[0]
         );

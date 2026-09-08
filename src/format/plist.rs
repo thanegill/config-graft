@@ -196,6 +196,12 @@ impl Format for Plist {
     }
 }
 
+/// Why an XML run cannot keep a date as it stands -- the tail of both the warning
+/// and, when the floor costs an element, the refusal.
+const XML_DATE_RESOLUTION: &str =
+    "an XML plist carries dates at one-second resolution; pass --plist-binary to \
+     keep the full value";
+
 // CFPropertyList's XML parser accepts only whole seconds, but the `plist` crate
 // writes an RFC 3339 fraction whenever it has one -- which is always for a date
 // read out of a binary plist, where dates are `f64` seconds since 2001. Applied on
@@ -205,47 +211,42 @@ impl Format for Plist {
 fn floor_dates_to_whole_seconds(
     node: &mut Node<PlistLeaf>,
     path: &mut KeyPath,
-    risks: &mut Vec<Normalized<PlistLeaf>>,
+    rewritten: &mut Vec<Normalized<PlistLeaf>>,
 ) -> Result<(), Error> {
     match node {
         Node::Map(m) => {
             for (key, value) in m.iter_mut() {
                 path.push(key.clone());
-                floor_dates_to_whole_seconds(value, path, risks)?;
+                floor_dates_to_whole_seconds(value, path, rewritten)?;
                 path.pop();
             }
         }
+        // Arrays are atomic for key paths, so an element is recorded under the
+        // array's own key -- which is what the collapse check needs to find it.
         Node::Array(a) => {
-            // Only arrays that actually hold a date can collapse, and almost none
-            // do -- so pay for the snapshot and the equality scan only then.
-            let holds_date = a
-                .iter()
-                .any(|e| matches!(e, Node::Leaf(PlistLeaf::Date(_))));
-            let before = holds_date.then(|| a.clone());
             for element in a.iter_mut() {
-                floor_dates_to_whole_seconds(element, path, risks)?;
-            }
-            // Report every element flooring rewrote. Two of them sharing a value
-            // without sharing an original can no longer both survive; the run
-            // works out whether this array is one where that costs anything.
-            let Some(before) = before else { return Ok(()) };
-            for (floored, original) in a.iter().zip(before.iter()) {
-                if floored != original {
-                    risks.push(Normalized {
-                        path: path.clone(),
-                        original: original.clone(),
-                        value: floored.clone(),
-                        hint: "pass --plist-binary to keep the dates distinct",
-                    });
-                }
+                floor_dates_to_whole_seconds(element, path, rewritten)?;
             }
         }
-        Node::Leaf(PlistLeaf::Date(d)) => {
-            *d = floor_date(*d).ok_or_else(|| Error::PlistDateOutOfRange {
+        Node::Leaf(leaf) => {
+            let PlistLeaf::Date(date) = leaf else {
+                return Ok(());
+            };
+            let floored = floor_date(*date).ok_or_else(|| Error::PlistDateOutOfRange {
                 path: path.render(Plist::PATH_SEP),
             })?;
+            if floored == *date {
+                return Ok(());
+            }
+            let original = node.clone();
+            *node = Node::Leaf(PlistLeaf::Date(floored));
+            rewritten.push(Normalized {
+                path: path.clone(),
+                original,
+                value: node.clone(),
+                because: XML_DATE_RESOLUTION,
+            });
         }
-        Node::Leaf(_) => {}
     }
     Ok(())
 }

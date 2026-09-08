@@ -113,13 +113,16 @@ pub trait Format: ValueCodec {
 /// set -- but whether that actually loses anything depends on the array strategy and
 /// on whether the array is managed at all, which only the run knows. So
 /// normalization reports what it rewrote and
-/// [`crate::backend::Backend::run`] decides. `hint` completes the refusal message
+/// [`crate::backend::Backend::run`] decides. `because` completes the refusal message
 /// with the format's way out.
 pub struct Normalized<L: Leaf> {
     pub path: KeyPath,
     pub original: Node<L>,
     pub value: Node<L>,
-    pub hint: &'static str,
+    /// Why the value could not be carried as it stood, completing both the
+    /// warning ("... was read as X because <because>") and, when the conflation
+    /// costs something, the refusal.
+    pub because: &'static str,
 }
 
 /// Output preferences threaded to [`Format::serialize`]. Each field is honored by

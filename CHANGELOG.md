@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Warnings whenever a run changes a value beyond applying the managed edits.**
+  config-graft passes through everything it doesn't manage, so the places where it
+  can't are now reported on stderr, each naming the key path: an input array
+  holding the same identity twice — by value, or by `--merge-key` field — where
+  membership is a set and only the first occurrence can survive, and a plist `Date`
+  floored to a whole second because the run's output is XML. Only *within-side*
+  array repeats count: a DESIRED element equal to a TARGET one is the union working
+  as asked, and `concat` keeps duplicates, so neither warns. A floored date is
+  reported for TARGET and DESIRED but not for BASE, which is config-graft's own
+  snapshot rather than a file anyone maintains. These join the existing `merge`
+  conflict warning behind one diagnostic channel, and like it are diagnostic only —
+  they never change the exit code.
 - **plist:** an XML write now **refuses** (exit 1, target untouched) a string or
   key holding a character an XML plist cannot carry unchanged — a C0 control other
   than tab or newline, such as the ESC `0x1B` separators in `NSUserKeyEquivalents`,

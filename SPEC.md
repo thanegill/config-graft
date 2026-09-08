@@ -114,7 +114,8 @@ printed in `--check` and `--stdout` runs too, since those report what a write
 would do. The cases:
 
 - a `merge` array with a **contradictory cross-over reorder**, resolved by tie-break rather than agreement (see §5);
-- an input array holding **the same identity twice** — by value, or by `--merge-key` field — where membership is a set and only the first occurrence can survive (see §5).
+- an input array holding **the same identity twice** — by value, or by `--merge-key` field — where membership is a set and only the first occurrence can survive (see §5);
+- a **value the output encoding cannot spell**, rewritten on the way to disk: today only a plist `Date` written as XML, floored to a whole second (§5a).
 
 ## 5a. Formats
 
@@ -140,7 +141,8 @@ inference.
   separators in `NSUserKeyEquivalents`) — and can only be read from, and written
   as, **binary**; `--plist-binary` is required end to end for them. **An XML run
   carries dates at one-second resolution**: CFPropertyList's XML parser accepts
-  only `YYYY-MM-DDTHH:MM:SSZ`, so a `Date` is floored to a whole second. A
+  only `YYYY-MM-DDTHH:MM:SSZ`, so a `Date` is floored to a whole second, and each floored date is reported on
+  stderr (see *Diagnostics*). A
   sub-second component is the norm for a date read out of a **binary** plist
   (where dates are `f64` seconds since 2001, as `defaults export` produces), so
   passing such a date through unchanged would emit XML that `plutil`/`defaults

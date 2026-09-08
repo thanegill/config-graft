@@ -103,6 +103,14 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   that **refuses rather than corrupt** on anything they can't safely edit.
   Empty/first-apply targets are emitted canonically. YAML splices byte spans
   (saphyr `MarkedYaml`); TOML mutates `toml_edit`'s format-preserving `DocumentMut`.
+- `src/warning.rs` — `Warning<L>`, the one type behind every run diagnostic
+  (contradictory reorder, duplicate array identity collapsed, value normalized to
+  what the output encoding can hold). Rendered in one method and printed by
+  `backend::emit`; diagnostics only, never an exit code. The normalization warnings
+  come from `Format::normalize_for_run` (default: no-op), which `Backend::run`
+  applies to **each input** with the `Source` it came from — TARGET and DESIRED
+  warn, BASE is silent (it's our own snapshot, and normalizing it is what keeps a
+  floored TARGET comparable to it). plist is its only implementor.
 - `src/error.rs` — typed `Error` (format-specific) + `Outcome`; `main` maps to
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
 - `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
