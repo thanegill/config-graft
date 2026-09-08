@@ -809,3 +809,99 @@ fn plist_binary_flag_is_a_usage_error_for_json() {
     ]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+// ----- number fidelity -----
+
+#[test]
+fn high_precision_numbers_survive_a_reconcile() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // Values the app owns, none of which fit an f64: a long decimal and an
+    // integer past u64. config-graft only passes them through.
+    fs::write(
+        &target,
+        r#"{"ratio":1.2345678901234567890123,"id":123456789012345678901234567890,"a":1}"#,
+    )
+    .unwrap();
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+
+    let written = fs::read_to_string(&target).unwrap();
+    assert!(
+        written.contains("1.2345678901234567890123"),
+        "decimal was shortened:\n{written}"
+    );
+    assert!(
+        written.contains("123456789012345678901234567890"),
+        "integer was turned into a float:\n{written}"
+    );
+
+    // ... and re-applying changes nothing.
+    let out = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "re-apply was not a no-op");
+}
+
+#[test]
+fn an_out_of_range_exponent_does_not_destroy_the_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // `1e400` overflows f64. It must not make the whole file unreadable -- that
+    // would treat TARGET as empty and replace every app-owned key with DESIRED.
+    fs::write(&target, r#"{"huge":1e400,"keep":"mine","a":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+
+    let written = fs::read_to_string(&target).unwrap();
+    assert!(written.contains("mine"), "clobbered an app key:\n{written}");
+    // Compared as a value: serde_json normalizes the exponent's sign (`1e400` ->
+    // `1e+400`), so pinning the spelling would test serde_json, not config-graft.
+    let written_value: serde_json::Value = serde_json::from_str(&written).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(r#"{"huge":1e400}"#).unwrap();
+    assert_eq!(
+        written_value["huge"], expected["huge"],
+        "lost the value:\n{written}"
+    );
+
+    // And it stays put on a re-apply.
+    let out = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "re-apply was not a no-op");
+}
+
+#[test]
+fn a_number_spelled_differently_still_prunes() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    // We managed `x` as 0.1; the app rewrote the file and spelled it 0.10 -- the
+    // same number, not a user edit. Dropping it from DESIRED must still prune it.
+    fs::write(&target, r#"{"x":0.10,"app":true}"#).unwrap();
+    fs::write(&desired, r#"{}"#).unwrap();
+    fs::write(&base, r#"{"x":0.1}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"app": true}));
+}
