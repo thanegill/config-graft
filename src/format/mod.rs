@@ -45,6 +45,17 @@ pub enum FormatKind {
 }
 
 impl FormatKind {
+    /// The format's name, for diagnostics that are not per-format errors.
+    pub fn name(self) -> &'static str {
+        match self {
+            FormatKind::Json => "JSON",
+            FormatKind::Plist => "plist",
+            FormatKind::Yaml => "YAML",
+            FormatKind::Toml => "TOML",
+            FormatKind::Directory => "a directory",
+        }
+    }
+
     /// The format-specific error for DESIRED failing to parse.
     pub fn invalid_desired(self, path: PathBuf) -> Error {
         match self {
@@ -86,6 +97,13 @@ pub trait Format: ValueCodec {
     const NORMALIZES: bool = false;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
+    /// Scalars this format's *parser* rewrote before config-graft saw them, as
+    /// `(source, stored)` pairs. Reported so a rewrite the engine cannot see -- and
+    /// therefore cannot put in a `--diff` -- is still not silent. Default: parsing
+    /// preserves what it reads.
+    fn rewritten_on_read(_bytes: &[u8]) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// Reduce a freshly parsed node to the precision this run's output encoding
     /// can actually hold. Applied to **every** input (TARGET, DESIRED, BASE), so
     /// the prune comparison, `--diff` and the change check all see the values
@@ -181,7 +199,50 @@ pub fn parse_indent(spec: &str) -> Result<Indent, String> {
 
 /// Read and parse `path` with format `F`. Returns `None` if the file is missing or
 /// does not parse as that format. Keeps file I/O out of the [`Format`] trait.
-pub fn read_file<F: Format>(path: &Path) -> Option<Node<F::Leaf>> {
-    let bytes = std::fs::read(path).ok()?;
-    F::parse(&bytes)
+/// Read and parse `path` with format `F`. `Ok(None)` means the file is not there
+/// (or is empty, which is how a caller stages a first apply); an `Err` means it is
+/// there and could not be understood. Keeping those apart matters: the run treats
+/// an absent TARGET as `{}`, which is right for a first apply and destructive for a
+/// file that merely failed to parse.
+pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::Read {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    match F::parse(&bytes) {
+        Some(node) => Ok(Some(Input {
+            node,
+            rewritten: F::rewritten_on_read(&bytes),
+        })),
+        None => Err(Error::Unreadable {
+            path: path.to_path_buf(),
+            kind: F::KIND,
+        }),
+    }
+}
+
+/// One of a run's inputs as it was read: the parsed value, plus anything the
+/// parser rewrote on the way in.
+pub struct Input<L: Leaf> {
+    pub node: Node<L>,
+    pub rewritten: Vec<(String, String)>,
+}
+
+impl<L: Leaf> Input<L> {
+    /// An input nothing rewrote -- what a reader that does its own parsing returns.
+    pub fn clean(node: Node<L>) -> Input<L> {
+        Input {
+            node,
+            rewritten: Vec::new(),
+        }
+    }
 }

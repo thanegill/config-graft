@@ -120,6 +120,14 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   applies to **each input** with the `Source` it came from — TARGET and DESIRED
   warn, BASE is silent (it's our own snapshot, and normalizing it is what keeps a
   floored TARGET comparable to it). plist is its only implementor.
+- `read_file` returns `Result<Option<Node>, Error>`: `Ok(None)` is "absent or empty"
+  (a first apply), `Err` is "there but unreadable". `Backend::run` refuses a TARGET
+  that parses to a non-mapping for the same reason. **Don't collapse those back into
+  one `Option`** — treating an unreadable TARGET as `{}` makes the reconciled result
+  DESIRED alone, so the write replaces every app-owned key with exit 0. That single
+  mechanism is what turned the `1e400` JSON parse failure into whole-file loss, and
+  what `arbitrary_precision`'s `$serde_json::private::Number` token key would have
+  reopened.
 - `src/error.rs` — typed `Error` (format-specific) + `Outcome`; `main` maps to
   exit codes: `0` ok, `1` runtime error, `2` usage (clap), `3` `--check` pending.
 - `modules/` — the Nix wrappers exposed by the flake (`homeManagerModules` +
@@ -191,6 +199,9 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
 ## Gotchas
 
 - `--diff` output comes from `Leaf::render()`; keep it byte-stable (tests assert it).
+  A JSON number renders its **source literal**, so `0.10` shows as `0.10` rather than
+  serde_json's `0.1` -- that is what the write puts on disk, so the diff and the file
+  agree.
 - saphyr is pre-1.0 (0.0.x), YAML 1.2; `Cargo.lock` is pinned for `nix build`.
 - `serde_json` carries `arbitrary_precision` (with `preserve_order`). Don't drop it:
   without it `Number::as_str()` is gone and JSON numbers collapse back to `f64`.

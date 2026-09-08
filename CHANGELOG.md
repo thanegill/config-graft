@@ -49,8 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore honoured on the binary path too; previously it was silently ignored
   there, which the `binary` default above would have widened from an opt-in case to
   every `cfprefsdDomain` entry.
+- **A managed value equal to the one already in TARGET no longer overwrites it.**
+  DESIRED used to win unconditionally, so a JSON `2.50` replaced an identical `2.5`
+  — an empty `--diff` while `--check` reported a pending change and the apply
+  rewrote the file. Values that compare equal are now left as the file has them.
 
 ### Fixed
+
+- **A TARGET that exists but cannot be read is no longer treated as empty.** It was
+  reconciled as `{}`, so the reconciled result was DESIRED alone and the write
+  replaced a file full of app-owned keys — exit 0, no warning. That is what made the
+  `1e400` bug below catastrophic rather than merely lossy, and it applied equally to
+  a truncated write, a byte-order mark, a root that is not a mapping, and any future
+  parse regression. An absent or empty TARGET is still a first apply; anything else
+  that fails to parse now exits 1 and leaves the file alone. An unreadable BASE still
+  only disables pruning, since BASE is never written.
 
 - **plist:** an XML run now floors `Date` values to whole seconds. CFPropertyList's
   XML parser accepts only `YYYY-MM-DDTHH:MM:SSZ`, so a date carrying a fractional
