@@ -237,6 +237,27 @@ fn merge_conflict_warns_on_stderr_without_failing() {
 }
 
 #[test]
+fn duplicate_array_element_warns_on_stderr_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // The app wrote the same element twice; membership is a set, so one is lost.
+    fs::write(&target, r#"{"l":["x","x","y"]}"#).unwrap();
+    fs::write(&desired, r#"{"l":["y"]}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success()); // diagnostics don't change the exit code
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("in TARGET holds \"x\" more than once"),
+        "stderr was: {err}"
+    );
+    assert!(err.contains("`l`"), "stderr was: {err}");
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"l":["x","y"]}));
+}
+
+#[test]
 fn clean_merge_does_not_warn() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");

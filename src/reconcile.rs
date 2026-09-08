@@ -1132,6 +1132,118 @@ mod tests {
             .collect()
     }
 
+    // ----- duplicate collapse -----
+
+    /// Every warning a reconcile produced, rendered with `.` separators.
+    fn warnings_of(t: Value, d: Value, arrays: ArrayStrategy, global_keys: &[&str]) -> Vec<String> {
+        let (_result, warnings) = reconcile(
+            &n(t),
+            &n(d),
+            None,
+            &Options {
+                prune: true,
+                arrays,
+                merge_keys: MergeKeys {
+                    global: global_keys.iter().map(|s| s.to_string()).collect(),
+                    scoped: HashMap::new(),
+                },
+            },
+        );
+        warnings.iter().map(|w| w.render(".")).collect()
+    }
+
+    #[test]
+    fn merge_warns_when_target_repeats_an_element() {
+        let warnings = warnings_of(
+            json!({"l": ["a", "a", "b"]}),
+            json!({"l": ["b"]}),
+            ArrayStrategy::Merge,
+            &[],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in TARGET holds \"a\" more than once"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn merge_warns_when_desired_repeats_an_element() {
+        let warnings = warnings_of(
+            json!({"l": ["b"]}),
+            json!({"l": ["a", "a"]}),
+            ArrayStrategy::Merge,
+            &[],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in DESIRED holds \"a\" more than once"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn merge_does_not_warn_when_the_two_sides_share_an_element() {
+        // The same value on both sides is the union working, not a collapse.
+        assert!(warnings_of(
+            json!({"l": ["a", "b"]}),
+            json!({"l": ["a"]}),
+            ArrayStrategy::Merge,
+            &[],
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn keyed_merge_warns_when_one_side_repeats_a_key() {
+        // Two records with the same key: only the first survives, so the second
+        // record's fields are dropped entirely.
+        let warnings = warnings_of(
+            json!({"l": [{"id": "a", "v": 1}, {"id": "a", "v": 2}]}),
+            json!({"l": [{"id": "a", "v": 3}]}),
+            ArrayStrategy::Merge,
+            &["id"],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in TARGET holds [id=\"a\"] more than once"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn set_warns_when_desired_repeats_an_element_but_not_across_sides() {
+        // A DESIRED repeat collapses; a DESIRED element equal to a TARGET one is
+        // the union working as asked.
+        let warnings = warnings_of(
+            json!({"l": ["a"]}),
+            json!({"l": ["a", "b", "b"]}),
+            ArrayStrategy::Set,
+            &[],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in DESIRED holds \"b\" more than once"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn concat_does_not_warn_about_duplicates() {
+        // `concat` keeps duplicates, so nothing is collapsed and nothing to say.
+        assert!(warnings_of(
+            json!({"l": ["a", "a"]}),
+            json!({"l": ["a"]}),
+            ArrayStrategy::Concat,
+            &[],
+        )
+        .is_empty());
+    }
+
     #[test]
     fn keypath_render_uses_the_given_separator() {
         let mut p = KeyPath::new();
@@ -1156,7 +1268,12 @@ mod tests {
             },
         );
         assert_eq!(conflicts.len(), 1);
-        let Warning::ContradictoryReorder { elements, .. } = &conflicts[0];
+        let Warning::ContradictoryReorder { elements, .. } = &conflicts[0] else {
+            panic!(
+                "expected a contradictory-reorder warning, got: {}",
+                conflicts[0].render(".")
+            );
+        };
         assert_eq!(j(&Node::Array(elements.clone())), json!(["x", "y"]));
     }
 
