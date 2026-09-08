@@ -3,11 +3,13 @@
 
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
+use std::time::{Duration, SystemTime};
 
 use indexmap::IndexMap;
 
-use super::{Format, FormatKind, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, Normalized, ValueCodec, WriteOpts};
 use crate::error::Error;
+use crate::reconcile::KeyPath;
 use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// Apple plist codec.
@@ -150,10 +152,23 @@ impl ValueCodec for Plist {
 impl Format for Plist {
     const KIND: FormatKind = FormatKind::Plist;
     const PATH_SEP: &'static str = ":";
+    const NORMALIZES: bool = true;
 
     fn parse(bytes: &[u8]) -> Option<Node<PlistLeaf>> {
         let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;
         Plist::decode(&value)
+    }
+
+    fn normalize_for_run(
+        node: &mut Node<PlistLeaf>,
+        opts: WriteOpts,
+    ) -> Result<Vec<Normalized<PlistLeaf>>, Error> {
+        if opts.plist_binary {
+            return Ok(Vec::new());
+        }
+        let mut rewritten = Vec::new();
+        floor_dates_to_whole_seconds(node, &mut KeyPath::new(), &mut rewritten)?;
+        Ok(rewritten)
     }
 
     fn serialize(
@@ -168,6 +183,7 @@ impl Format for Plist {
                 .to_writer_binary(&mut buf)
                 .map_err(Error::PlistSerialize)?;
         } else {
+            refuse_xml_unrepresentable(node, &mut KeyPath::new())?;
             value
                 .to_writer_xml(&mut buf)
                 .map_err(Error::PlistSerialize)?;
@@ -178,6 +194,126 @@ impl Format for Plist {
         }
         Ok(buf)
     }
+}
+
+// CFPropertyList's XML parser accepts only whole seconds, but the `plist` crate
+// writes an RFC 3339 fraction whenever it has one -- which is always for a date
+// read out of a binary plist, where dates are `f64` seconds since 2001. Applied on
+// *read* rather than on write so BASE, TARGET and DESIRED agree: flooring only the
+// bytes leaving the writer would make a floored TARGET never equal its fractional
+// BASE, and a managed date key could then never be pruned.
+fn floor_dates_to_whole_seconds(
+    node: &mut Node<PlistLeaf>,
+    path: &mut KeyPath,
+    rewritten: &mut Vec<Normalized<PlistLeaf>>,
+) -> Result<(), Error> {
+    match node {
+        Node::Map(m) => {
+            for (key, value) in m.iter_mut() {
+                path.push(key.clone());
+                floor_dates_to_whole_seconds(value, path, rewritten)?;
+                path.pop();
+            }
+        }
+        // Arrays are atomic for key paths, so an element is recorded under the
+        // array's own key -- which is what the collapse check needs to find it.
+        Node::Array(a) => {
+            for element in a.iter_mut() {
+                floor_dates_to_whole_seconds(element, path, rewritten)?;
+            }
+        }
+        Node::Leaf(leaf) => {
+            let PlistLeaf::Date(date) = leaf else {
+                return Ok(());
+            };
+            let floored = floor_date(*date).ok_or_else(|| Error::PlistDateOutOfRange {
+                path: path.render(Plist::PATH_SEP),
+            })?;
+            if floored == *date {
+                return Ok(());
+            }
+            let original = node.clone();
+            *node = Node::Leaf(PlistLeaf::Date(floored));
+            rewritten.push(Normalized {
+                path: path.clone(),
+                original,
+                value: node.clone(),
+                hint: "pass --plist-binary to keep the dates distinct",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The first character an XML plist cannot carry unchanged, if any. Rust strings
+/// are valid UTF-8, so unpaired surrogates cannot occur; what remains is the C0
+/// controls plus the two non-characters. Tab and newline survive literally;
+/// **carriage return does not** -- XML 1.0 section 2.11 requires every parser to
+/// normalize a literal CR to LF, so writing one silently rewrites the value even
+/// though the byte is legal in the document.
+fn xml_unrepresentable(text: &str) -> Option<char> {
+    text.chars()
+        .find(|&c| (c < '\u{20}' && c != '\t' && c != '\n') || c == '\u{fffe}' || c == '\u{ffff}')
+}
+
+/// Refuse a write whose XML no conforming parser could read. macOS's own parser
+/// happens to tolerate these bytes, so emitting them would produce a file that
+/// works here and is invalid everywhere else -- `--plist-binary` carries them
+/// properly. Keys are reported as `<key>` under their map so the message never
+/// echoes a control byte.
+fn refuse_xml_unrepresentable(node: &Node<PlistLeaf>, path: &mut KeyPath) -> Result<(), Error> {
+    let refuse = |path: &KeyPath, character: char| Error::PlistXmlUnrepresentable {
+        path: path.render(Plist::PATH_SEP),
+        character,
+    };
+    match node {
+        Node::Map(m) => {
+            for (key, value) in m {
+                if let Some(character) = xml_unrepresentable(key) {
+                    path.push("<key>".to_string());
+                    return Err(refuse(path, character));
+                }
+                path.push(key.clone());
+                refuse_xml_unrepresentable(value, path)?;
+                path.pop();
+            }
+        }
+        Node::Array(a) => {
+            for element in a {
+                refuse_xml_unrepresentable(element, path)?;
+            }
+        }
+        Node::Leaf(PlistLeaf::String(text)) => {
+            if let Some(character) = xml_unrepresentable(text) {
+                return Err(refuse(path, character));
+            }
+        }
+        Node::Leaf(_) => {}
+    }
+    Ok(())
+}
+
+// Flooring moves an instant toward the past, which for a pre-epoch date means
+// *away* from the epoch (-1.5s floors to -2s) -- so neither arm can assume the
+// result is representable just because the input was. Both go through the checked
+// arithmetic and keep the original date if it isn't; unreachable via the plist
+// parsers (an `f64` loses its fraction long before that magnitude, and RFC 3339
+// caps the year at 9999), but not something to leave to a panicking operator.
+fn floor_date(date: plist::Date) -> Option<plist::Date> {
+    let floored = match SystemTime::from(date).duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since_epoch) => {
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(since_epoch.as_secs()))
+        }
+        Err(before_epoch) => {
+            let before_epoch = before_epoch.duration();
+            let whole_seconds = before_epoch
+                .as_secs()
+                .checked_add(u64::from(before_epoch.subsec_nanos() != 0));
+            whole_seconds
+                .and_then(|secs| SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(secs)))
+        }
+    };
+    floored.map(plist::Date::from)
 }
 
 fn leaf_to_plist(l: &PlistLeaf) -> plist::Value {
@@ -196,8 +332,8 @@ fn leaf_to_plist(l: &PlistLeaf) -> plist::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::Indent;
     use crate::reconcile::{reconcile, ArrayStrategy, MergeKeys, Options};
-    use std::time::{Duration, SystemTime};
 
     fn pint(i: i64) -> plist::Value {
         plist::Value::Integer(i.into())
@@ -238,6 +374,84 @@ mod tests {
         let original = sample_plist();
         let back = Plist::encode(&Plist::decode(&original).unwrap());
         assert_eq!(back, original);
+    }
+
+    /// A date carrying a sub-second component, as read out of a binary plist
+    /// (where dates are `f64` seconds since 2001, so a fraction is the norm).
+    fn fractional_date() -> plist::Value {
+        plist::Value::Date(plist::Date::from(
+            SystemTime::UNIX_EPOCH + Duration::new(1_000_000, 500_000_000),
+        ))
+    }
+
+    /// A whole run's value path: decode, normalize for the chosen output
+    /// encoding (as `Backend::read` does), then serialize.
+    fn run_to_bytes(value: &plist::Value, plist_binary: bool) -> Vec<u8> {
+        let opts = WriteOpts {
+            indent: Indent::Spaces(2),
+            plist_binary,
+        };
+        let mut node = Plist::decode(value).unwrap();
+        Plist::normalize_for_run(&mut node, opts).unwrap();
+        Plist::serialize(&node, &[], opts).unwrap()
+    }
+
+    #[test]
+    fn xml_output_floors_sub_second_dates() {
+        let mut d = plist::Dictionary::new();
+        d.insert("when".to_string(), fractional_date());
+        let xml = run_to_bytes(&plist::Value::Dictionary(d), false);
+
+        let xml = String::from_utf8(xml).unwrap();
+        assert!(
+            xml.contains("<date>1970-01-12T13:46:40Z</date>"),
+            "expected a whole-second date, got:\n{xml}"
+        );
+    }
+
+    #[test]
+    fn xml_output_floors_pre_epoch_dates_toward_the_past() {
+        let mut d = plist::Dictionary::new();
+        d.insert(
+            "when".to_string(),
+            plist::Value::Date(plist::Date::from(
+                SystemTime::UNIX_EPOCH - Duration::new(1, 500_000_000),
+            )),
+        );
+        let xml = String::from_utf8(run_to_bytes(&plist::Value::Dictionary(d), false)).unwrap();
+        assert!(
+            xml.contains("<date>1969-12-31T23:59:58Z</date>"),
+            "expected a floored whole-second date, got:\n{xml}"
+        );
+    }
+
+    #[test]
+    fn xml_output_floors_dates_nested_in_arrays_and_dictionaries() {
+        let mut inner = plist::Dictionary::new();
+        inner.insert(
+            "list".to_string(),
+            plist::Value::Array(vec![fractional_date()]),
+        );
+        let mut d = plist::Dictionary::new();
+        d.insert("nested".to_string(), plist::Value::Dictionary(inner));
+        let xml = String::from_utf8(run_to_bytes(&plist::Value::Dictionary(d), false)).unwrap();
+        assert!(
+            xml.contains("<date>1970-01-12T13:46:40Z</date>"),
+            "nested dates should be floored too, got:\n{xml}"
+        );
+    }
+
+    #[test]
+    fn binary_output_keeps_sub_second_dates() {
+        let mut d = plist::Dictionary::new();
+        d.insert("when".to_string(), fractional_date());
+        let original = plist::Value::Dictionary(d);
+
+        let bytes = run_to_bytes(&original, true);
+        assert_eq!(
+            plist::Value::from_reader(Cursor::new(bytes)).unwrap(),
+            original
+        );
     }
 
     #[test]

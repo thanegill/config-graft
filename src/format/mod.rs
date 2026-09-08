@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
 
 pub(crate) mod directory;
@@ -80,8 +81,22 @@ pub trait Format: ValueCodec {
     /// Separator between key-path segments in user-facing diagnostics (`--diff`,
     /// conflict warnings).
     const PATH_SEP: &'static str;
+    /// Whether [`Format::normalize_for_run`] can change a node at all -- lets the
+    /// run skip work that would be a no-op for formats that never normalize.
+    const NORMALIZES: bool = false;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
+    /// Reduce a freshly parsed node to the precision this run's output encoding
+    /// can actually hold. Applied to **every** input (TARGET, DESIRED, BASE), so
+    /// the prune comparison, `--diff` and the change check all see the values
+    /// that will land on disk rather than three different precisions. Default: the
+    /// model already round-trips, so nothing to do.
+    fn normalize_for_run(
+        _node: &mut Node<Self::Leaf>,
+        _opts: WriteOpts,
+    ) -> Result<Vec<Normalized<Self::Leaf>>, Error> {
+        Ok(Vec::new())
+    }
     /// Serialize `node` to bytes. `current` is the target's existing on-disk bytes
     /// (used by YAML to preserve comments; ignored by JSON/plist). Output is bytes
     /// (not text) so plist can write binary. See [`WriteOpts`] for per-format prefs.
@@ -90,6 +105,21 @@ pub trait Format: ValueCodec {
         current: &[u8],
         opts: WriteOpts,
     ) -> Result<Vec<u8>, Error>;
+}
+
+/// One array element that [`Format::normalize_for_run`] rewrote: `original` is what
+/// the file held, `value` what the run will use. Two elements that shared a `value`
+/// but not an `original` can no longer both survive, since array membership is a
+/// set -- but whether that actually loses anything depends on the array strategy and
+/// on whether the array is managed at all, which only the run knows. So
+/// normalization reports what it rewrote and
+/// [`crate::backend::Backend::run`] decides. `hint` completes the refusal message
+/// with the format's way out.
+pub struct Normalized<L: Leaf> {
+    pub path: KeyPath,
+    pub original: Node<L>,
+    pub value: Node<L>,
+    pub hint: &'static str,
 }
 
 /// Output preferences threaded to [`Format::serialize`]. Each field is honored by
