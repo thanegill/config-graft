@@ -196,6 +196,12 @@ impl Format for Plist {
     }
 }
 
+/// Why an XML run cannot keep a date as it stands -- the tail of both the warning
+/// and, when the floor costs an element, the refusal.
+const XML_DATE_RESOLUTION: &str =
+    "an XML plist carries dates at one-second resolution; pass --plist-binary to \
+     keep the full value";
+
 // CFPropertyList's XML parser accepts only whole seconds, but the `plist` crate
 // writes an RFC 3339 fraction whenever it has one -- which is always for a date
 // read out of a binary plist, where dates are `f64` seconds since 2001. Applied on
@@ -238,7 +244,7 @@ fn floor_dates_to_whole_seconds(
                 path: path.clone(),
                 original,
                 value: node.clone(),
-                hint: "pass --plist-binary to keep the dates distinct",
+                because: XML_DATE_RESOLUTION,
             });
         }
     }

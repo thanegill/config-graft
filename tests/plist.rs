@@ -386,6 +386,16 @@ fn xml_write_emits_whole_second_dates_cfpropertylist_can_parse() {
         written.contains("<date>1970-01-12T13:46:40Z</date>"),
         "expected a whole-second date, got:\n{written}"
     );
+    // Reshaping a value config-graft only passes through is not done silently.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(
+            "`SULastCheckTime` in TARGET: <date 1970-01-12T13:46:40.5Z> \
+                      was read as <date 1970-01-12T13:46:40Z>"
+        ),
+        "stderr was: {err}"
+    );
+    assert!(err.contains("--plist-binary"), "stderr was: {err}");
 
     // Re-applying is a no-op: the truncated date is already what we would write.
     let before = fs::read(&target).unwrap();
@@ -507,6 +517,8 @@ fn plist_binary_write_keeps_sub_second_dates() {
         read_plist(&target),
         pdict(vec![("SULastCheckTime", fractional_date()), ("a", pint(2))])
     );
+    // Nothing was rewritten, so nothing to warn about.
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 }
 
 #[test]
