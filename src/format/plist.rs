@@ -187,6 +187,7 @@ impl Format for Plist {
             value
                 .to_writer_xml(&mut buf)
                 .map_err(Error::PlistSerialize)?;
+            buf = escape_carriage_returns(buf);
             // The XML writer ends at `</plist>` with no trailing newline; add one
             // for a consistent canonical form (matching the JSON path). Binary
             // output is left exactly as written.
@@ -253,13 +254,40 @@ fn floor_dates_to_whole_seconds(
 
 /// The first character an XML plist cannot carry unchanged, if any. Rust strings
 /// are valid UTF-8, so unpaired surrogates cannot occur; what remains is the C0
-/// controls plus the two non-characters. Tab and newline survive literally;
-/// **carriage return does not** -- XML 1.0 section 2.11 requires every parser to
-/// normalize a literal CR to LF, so writing one silently rewrites the value even
-/// though the byte is legal in the document.
+/// controls plus the two non-characters. Tab, newline and carriage return survive
+/// -- the first two literally, CR as a character reference (see
+/// [`escape_carriage_returns`]).
 fn xml_unrepresentable(text: &str) -> Option<char> {
-    text.chars()
-        .find(|&c| (c < '\u{20}' && c != '\t' && c != '\n') || c == '\u{fffe}' || c == '\u{ffff}')
+    text.chars().find(|&c| {
+        (c < '\u{20}' && c != '\t' && c != '\n' && c != '\r') || c == '\u{fffe}' || c == '\u{ffff}'
+    })
+}
+
+/// Rewrite every literal CR in the serialized document as `&#13;`.
+///
+/// XML 1.0 section 2.11 has a conforming parser normalize a *literal* CR to LF, so
+/// writing one would change the value; a character reference is exempt from that
+/// normalization and reads back as a CR. The `plist` crate escapes only the five
+/// predefined entities, so this has to happen after serialization.
+///
+/// Operating on the whole buffer is sound because every other byte the writer
+/// emits is fixed: the XML declaration, the doctype, the element names, an RFC
+/// 3339 date, base64 data, and `\n`-plus-tab indentation. None of them holds a CR,
+/// so any `0x0D` in the output came from a string or key. It cannot be a fragment
+/// of a multi-byte character either -- UTF-8 continuation bytes are all >= 0x80.
+fn escape_carriage_returns(buf: Vec<u8>) -> Vec<u8> {
+    if !buf.contains(&b'\r') {
+        return buf;
+    }
+    let mut escaped = Vec::with_capacity(buf.len());
+    for byte in buf {
+        if byte == b'\r' {
+            escaped.extend_from_slice(b"&#13;");
+        } else {
+            escaped.push(byte);
+        }
+    }
+    escaped
 }
 
 /// Refuse a write whose XML no conforming parser could read. macOS's own parser

@@ -150,8 +150,8 @@ impl fmt::Display for Error {
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::PlistXmlUnrepresentable { path, character } => write!(
                 f,
-                "`{path}` contains U+{:04X}, which XML 1.0 cannot represent, so this \
-                 run cannot write XML; pass --plist-binary to keep the value",
+                "`{path}` contains U+{:04X}, which XML 1.0 cannot represent at all, \
+                 so this run cannot write XML; pass --plist-binary to keep the value",
                 *character as u32
             ),
             Error::PlistDateOutOfRange { path } => write!(

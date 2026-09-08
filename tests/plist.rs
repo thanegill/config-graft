@@ -742,34 +742,65 @@ fn normalization_does_not_warn_where_nothing_is_dropped() {
 }
 
 #[test]
-fn a_carriage_return_is_refused_because_xml_would_turn_it_into_a_newline() {
-    // XML 1.0 section 2.11 makes every parser normalize a literal CR to LF, so
-    // writing one changes the value even though the byte is legal in the document.
+fn a_carriage_return_survives_an_xml_run_as_a_character_reference() {
+    // XML 1.0 section 2.11 has a conforming parser normalize a *literal* CR to LF,
+    // so the writer emits `&#13;` instead -- a character reference is exempt from
+    // that normalization and reads back unchanged.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
 
     pdict(vec![]).to_file_xml(&target).unwrap();
-    pdict(vec![("k", plist::Value::String("line1\rline2".into()))])
-        .to_file_binary(&desired)
-        .unwrap();
+    pdict(vec![(
+        "cr\rkey",
+        plist::Value::String("line1\rline2".into()),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
 
-    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(err.contains("U+000D"), "got: {err}");
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    // Binary carries it unchanged, which is the whole point of the flag.
-    let out = run(&[
-        "plist",
-        "--plist-binary",
-        target.to_str().unwrap(),
-        desired.to_str().unwrap(),
-    ]);
-    assert!(out.status.success());
+    let bytes = std::fs::read(&target).unwrap();
+    assert!(
+        !bytes.contains(&b'\r'),
+        "wrote a literal CR:\n{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        bytes.windows(5).filter(|w| w == b"&#13;").count(),
+        2,
+        "expected the key and the string to each carry one:\n{}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    let expected = plist::Value::String("line1\rline2".into());
     let plist::Value::Dictionary(d) = read_plist(&target) else {
         panic!("expected a dictionary");
     };
-    assert_eq!(
-        d.get("k").unwrap().clone(),
-        plist::Value::String("line1\rline2".into())
-    );
+    assert_eq!(d.get("cr\rkey").unwrap().clone(), expected);
+
+    // The escape is a serialization detail, so re-applying is still a no-op.
+    let again = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(again.status.success());
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+
+    // Binary carries it unchanged, as it always did.
+    let binary_target = dir.path().join("binary.plist");
+    pdict(vec![]).to_file_xml(&binary_target).unwrap();
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        binary_target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let plist::Value::Dictionary(d) = read_plist(&binary_target) else {
+        panic!("expected a dictionary");
+    };
+    assert_eq!(d.get("cr\rkey").unwrap().clone(), expected);
 }
