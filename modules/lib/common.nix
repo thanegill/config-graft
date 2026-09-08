@@ -149,12 +149,6 @@ in
       desired,
       target,
     }:
-    let
-      # plist-only `binary` (the option exists only for plist), so guard the lookup.
-      binaryFlag = lib.optionalString (
-        format.name == "plist" && (entry.binary or false)
-      ) " --plist-binary";
-    in
     if format.name == "plist" && entry.cfprefsdDomain != null then
       ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
@@ -168,8 +162,10 @@ in
         [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
 
         # Graft our settings into the live state, then push it back through cfprefsd
-        # so it adopts the merged result.
-        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev"${binaryFlag}
+        # so it adopts the merged result. `--plist-binary` is unconditional here (not
+        # `binary`-gated): routing this scratch file through XML would drop
+        # XML-illegal bytes and sub-second dates that both `defaults` ends carry.
+        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-binary
         run /usr/bin/defaults import "$_domain" "$_live"
         rm -f "$_live"
       ''
@@ -177,7 +173,9 @@ in
       ''
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
-        run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${binaryFlag}
+        run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${
+          lib.optionalString (format.name == "plist" && entry.binary) " --plist-binary"
+        }
       '';
 
   # Directory-format entry type. Unlike the byte formats there is no `settings`

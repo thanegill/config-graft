@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **plist:** an XML write now **refuses** (exit 1, target untouched) a string or key holding a character an XML plist cannot carry unchanged — a C0 control other than tab or newline, such as the ESC `0x1B` separators in `NSUserKeyEquivalents`, or a carriage return, which XML 1.0 requires every parser to normalize to a line feed. macOS's own parser tolerates those bytes, so config-graft was emitting a file that loads there and is invalid to every conforming parser. The error names the key path and points at `--plist-binary`, which carries the value unchanged.
 
+### Changed
+
+- **`managedPlist`:** the cfprefsd reconcile now passes `--plist-binary` unconditionally. Its scratch file comes from `defaults export` and goes straight back through `defaults import`, both binary, so writing XML in between could only narrow what survives.
+
 ### Fixed
 
 - **plist:** an XML run now floors `Date` values to whole seconds. CFPropertyList's XML parser accepts only `YYYY-MM-DDTHH:MM:SSZ`, so a date carrying a fractional second — the norm for one read out of a binary plist, as `defaults export` produces — made `plutil -lint` and `defaults import` reject the file config-graft had just written. The floor is applied when TARGET, DESIRED and BASE are read, so all three stay comparable: pruning a managed date key still works, `--diff` no longer reports a change `--check` refuses to make, and `--diff` does show the floor it is about to write rather than hiding it by comparing two already-floored sides. A floor that conflates two instants is **reported on stderr** where the merge then keeps only one of them, rather than dropping a value the app recorded silently; an array config-graft does not manage is copied through untouched and never trips it. `--plist-binary` keeps full precision throughout.
