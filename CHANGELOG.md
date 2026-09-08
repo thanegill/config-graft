@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - **plist:** an XML write now **refuses** (exit 1, target untouched) a string or key holding a character an XML plist cannot carry unchanged — a C0 control other than tab or newline, such as the ESC `0x1B` separators in `NSUserKeyEquivalents`, or a carriage return, which XML 1.0 requires every parser to normalize to a line feed. macOS's own parser tolerates those bytes, so config-graft was emitting a file that loads there and is invalid to every conforming parser. The error names the key path and points at `--plist-binary`, which carries the value unchanged.
+- **`managedPlist`:** a build-time assertion rejects an entry whose `settings` hold such a character while `binary` is false, so the mistake fails the build instead of the activation.
 
 ### Changed
 
