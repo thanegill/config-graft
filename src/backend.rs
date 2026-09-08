@@ -266,16 +266,20 @@ pub(crate) trait Backend {
             .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
             .map(|input| input.node)
             .filter(Node::is_map);
-        if let Some(base) = base.as_mut() {
-            // BASE must be normalized too, or a floored TARGET never equals it and a
-            // managed key can never be pruned. Normalizing mutates in place and can
-            // fail part-way, which would leave BASE half-normalized and silently
-            // reintroduce exactly that bug -- so normalize a copy and adopt it only
-            // if it succeeded. A failure is about BASE alone, which is never
-            // written, so it is not a reason to fail the run.
-            let mut normalized = base.clone();
-            if Self::normalize_for_run(args, &mut normalized).is_ok() {
-                *base = normalized;
+        // BASE must be normalized too, or a floored TARGET never equals it and a
+        // managed key can never be pruned. Normalizing mutates in place and can fail
+        // part-way, which would leave BASE half-normalized and silently reintroduce
+        // exactly that bug -- so normalize a copy and adopt it only if it succeeded.
+        // A failure is about BASE alone, which is never written, so it is not a
+        // reason to fail the run. The clone is why the whole block is gated: for a
+        // backend that normalizes nothing it would copy an entire tree or document
+        // to hand it to a no-op.
+        if Self::NORMALIZES {
+            if let Some(base) = base.as_mut() {
+                let mut normalized = base.clone();
+                if Self::normalize_for_run(args, &mut normalized).is_ok() {
+                    *base = normalized;
+                }
             }
         }
 
