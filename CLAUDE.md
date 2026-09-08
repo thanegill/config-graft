@@ -132,6 +132,9 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   **cfprefsd path always writes binary**, `binary` or not: its `$_live` scratch file
   comes from `defaults export` (binary) and goes back through `defaults import`, so
   routing it through XML only risks loss (XML-illegal bytes, sub-second dates).
+  `binary` itself **defaults to `cfprefsdDomain != null`** (with a `defaultText`,
+  since the default is computed), so a domain's DESIRED is binary too and the whole
+  round-trip stays out of XML.
   The XML->binary conversion is type-faithful for
   everything the `settings` type can hold -- bool stays `<true/>` rather than
   becoming `<integer>1</integer>`, plus int/real/string/list/nested and empty

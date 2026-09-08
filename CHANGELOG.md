@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unconditionally. Its scratch file comes from `defaults export` and goes straight
   back through `defaults import`, both binary, so writing XML in between could only
   narrow what survives.
+- **`managedPlist`:** `binary` now defaults to `true` when `cfprefsdDomain` is set
+  (it remains `false` otherwise), so a domain's DESIRED is generated as a binary
+  plist too and the whole round-trip stays out of XML. Set `binary = false` on such
+  an entry to keep an XML DESIRED.
 
 ### Fixed
 
