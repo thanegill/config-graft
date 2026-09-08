@@ -72,6 +72,14 @@
         };
       });
 
+      checks = forAllSystems (pkgs: {
+        modules = import ./modules/tests.nix {
+          inherit pkgs;
+          inherit (pkgs) lib;
+          common = import ./modules/lib/common.nix;
+        };
+      });
+
       formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
     };
 }
