@@ -44,6 +44,15 @@ pub enum Error {
     StdoutWrite(std::io::Error),
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
+    /// A value at `path` holds a character XML 1.0 cannot represent, so writing
+    /// the target as XML would produce a file no conforming parser can read. The
+    /// write is refused; `--plist-binary` carries the value as-is.
+    PlistXmlUnrepresentable { path: String, character: char },
+    /// A date at `path` is so far from the epoch that flooring it overflows, so
+    /// the XML this run would write cannot hold it. Unreachable through the plist
+    /// parsers; refused rather than emitted as the fractional date an XML parser
+    /// rejects.
+    PlistDateOutOfRange { path: String },
     /// The YAML target can't be edited while preserving comments without risking
     /// corruption, so the write was refused.
     YamlUnsafe,
@@ -125,6 +134,18 @@ impl fmt::Display for Error {
             Error::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
             Error::StdoutWrite(e) => write!(f, "writing to stdout: {e}"),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
+            Error::PlistXmlUnrepresentable { path, character } => write!(
+                f,
+                "`{path}` contains U+{:04X}, which XML 1.0 cannot represent, so this \
+                 run cannot write XML; pass --plist-binary to keep the value",
+                *character as u32
+            ),
+            Error::PlistDateOutOfRange { path } => write!(
+                f,
+                "the date at `{path}` is too far from the epoch to floor to a whole \
+                 second, which an XML plist requires; pass --plist-binary to write it \
+                 unchanged"
+            ),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
             Error::TomlUnsafe => f.write_str(TOML_UNSAFE),
             Error::UnsupportedFileType(p) => write!(
