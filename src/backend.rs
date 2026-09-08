@@ -19,7 +19,7 @@ use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalized, WriteOpts};
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
-use crate::warning::Warning;
+use crate::warning::{Source, Warning};
 use crate::RunArgs;
 
 /// Output preferences for this run. Built in one place so the read-time
@@ -97,13 +97,29 @@ fn lossy_collapses<L: Leaf>(
                 .iter()
                 .chain(desired_rewritten.iter())
                 .find(|n| &n.path == *path)
-                .map_or("", |n| n.hint),
+                .map_or("", |n| n.because),
         ));
     }
     // A `HashMap` iterates in an arbitrary order; sort so the same inputs always
     // produce the same diagnostics.
     reported.sort();
     reported
+}
+
+/// The diagnostics for values normalization rewrote in one input. Built here rather
+/// than in the codec, which has no idea which of the three inputs it is looking at
+/// -- and so that BASE's, which nobody needs, are never built at all.
+fn normalization_warnings<L: Leaf>(rewritten: &[Normalized<L>], source: Source) -> Vec<Warning<L>> {
+    rewritten
+        .iter()
+        .map(|n| Warning::ValueNormalized {
+            path: n.path.clone(),
+            source,
+            from: n.original.compact(),
+            to: n.value.compact(),
+            because: n.because,
+        })
+        .collect()
 }
 
 /// Print run diagnostics to stderr. The one place a warning becomes text, so
@@ -246,6 +262,9 @@ pub(crate) trait Backend {
         // -- a contradictory reorder resolved by tie-break, an array identity that
         // appeared twice and could only survive once. Diagnostics only: the exit
         // code is unaffected.
+        let mut warnings = warnings;
+        warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
+        warnings.extend(normalization_warnings(&target_risks, Source::Target));
         emit(&warnings, Self::COMPONENT_SEPARATOR);
         for message in lossy_collapses(
             &target_risks,
