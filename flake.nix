@@ -72,6 +72,17 @@
         };
       });
 
+      # Module-layer assertions. The Rust suite never exercises these decisions:
+      # a wrong `binary` default or a re-gated `--plist-binary` would reintroduce
+      # issue #33 with `cargo test` fully green.
+      checks = forAllSystems (pkgs: {
+        modules = import ./modules/tests.nix {
+          inherit pkgs;
+          inherit (pkgs) lib;
+          common = import ./modules/lib/common.nix;
+        };
+      });
+
       formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
     };
 }

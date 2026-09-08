@@ -137,7 +137,10 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   routing it through XML only risks loss (XML-illegal bytes, sub-second dates).
   `binary` itself **defaults to `cfprefsdDomain != null`** (with a `defaultText`,
   since the default is computed), so a domain's DESIRED is binary too and the whole
-  round-trip stays out of XML.
+  round-trip stays out of XML. `mkAssertions` rejects at build time an entry whose
+  `settings` hold an XML-illegal byte while `binary` is false, so that fails the
+  build rather than the activation (the predicate matches `builtins.toJSON`'s
+  escapes, since Nix has no character-class regex).
   The XML->binary conversion is type-faithful for
   everything the `settings` type can hold -- bool stays `<true/>` rather than
   becoming `<integer>1</integer>`, plus int/real/string/list/nested and empty

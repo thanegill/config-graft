@@ -186,7 +186,9 @@ at build time) *and* reconciles with `--plist-binary`. Values XML cannot represe
 a string holding a byte XML 1.0 forbids, such as the ESC `0x1B` separators in
 `NSUserKeyEquivalents` — therefore survive on a file target too. It defaults to
 `true` for a `cfprefsdDomain` entry, whose round-trip is already binary at both
-ends, and to `false` otherwise; set it explicitly to override either way.
+ends, and to `false` otherwise; set it explicitly to override either way. If
+`settings` holds such a byte while `binary` is false, a build-time assertion says
+so rather than letting the reconcile refuse at activation.
 
 `managedDirectory` is the `directory` subcommand wrapper: each entry reconciles a
 `source` directory *tree* into `target`, keeping app-created files and pruning
