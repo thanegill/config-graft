@@ -9,7 +9,7 @@
 
 use super::{reconcile, ArrayStrategy, KeyPath, NodeList, Options};
 use crate::value::{Leaf, Node};
-use crate::warning::Warning;
+use crate::warning::{Source, Warning};
 use std::collections::HashSet;
 
 /// Combine a TARGET array with a DESIRED array per `opts.arrays`, returning the
@@ -53,7 +53,10 @@ pub(super) fn combine<L: Leaf>(
                     out.push(e.clone());
                 }
             }
-            (out, Vec::new())
+            // Only DESIRED's *own* repeats are a loss here: TARGET keeps its
+            // duplicates, and a DESIRED element equal to a TARGET one is the union
+            // working as asked, not a collapse.
+            (out, value_duplicates(desired, Source::Desired))
         }
         // Three-way, move-aware merge against BASE -- the only strategy that can
         // conflict. BASE elements only matter when BASE is itself an array here;
@@ -107,7 +110,10 @@ fn value_merge<L: Leaf>(
 ) -> (NodeList<L>, Vec<Warning<L>>) {
     let verts = membership_merge(target, desired, base);
     let id_of = |e: &Node<L>| verts.iter().position(|v| v == e);
-    assemble(verts.len(), id_of, &verts, target, desired, base)
+    let (out, mut warnings) = assemble(verts.len(), id_of, &verts, target, desired, base);
+    warnings.extend(value_duplicates(target, Source::Target));
+    warnings.extend(value_duplicates(desired, Source::Desired));
+    (out, warnings)
 }
 
 /// Key-identity merge: elements are matched by the first present `keys` field.
@@ -173,7 +179,50 @@ fn keyed_merge<L: Leaf>(
     let id_of = |e: &Node<L>| key(e).and_then(|k| survivors.iter().position(|s| *s == k));
     let (out, mut conflicts) = assemble(survivors.len(), id_of, &merged, target, desired, base);
     conflicts.append(&mut nested);
+    conflicts.extend(key_duplicates(target, keys, Source::Target));
+    conflicts.extend(key_duplicates(desired, keys, Source::Desired));
     (out, conflicts)
+}
+
+/// The identities `items` holds more than once, in first-occurrence order --
+/// each reported once however often it repeats.
+fn repeats<T: Clone + Eq + std::hash::Hash>(items: impl Iterator<Item = T>) -> Vec<T> {
+    let mut seen: HashSet<T> = HashSet::new();
+    let mut reported: HashSet<T> = HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if !seen.insert(item.clone()) && reported.insert(item.clone()) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+/// Warn for each element `seq` repeats under value identity. The path is empty --
+/// relative to this array, as callers expect.
+fn value_duplicates<L: Leaf>(seq: &[Node<L>], source: Source) -> Vec<Warning<L>> {
+    repeats(seq.iter().cloned())
+        .into_iter()
+        .map(|e| Warning::DuplicateCollapsed {
+            path: KeyPath::new(),
+            source,
+            identity: e.compact(),
+        })
+        .collect()
+}
+
+/// The same for key identity: two records sharing a merge key collapse to one, so
+/// the loser's fields go entirely. Reported with the `[field=value]` selector that
+/// names the record elsewhere.
+fn key_duplicates<L: Leaf>(seq: &[Node<L>], keys: &[String], source: Source) -> Vec<Warning<L>> {
+    repeats(seq.iter().filter_map(|e| identity(e, keys)))
+        .into_iter()
+        .map(|(field, value)| Warning::DuplicateCollapsed {
+            path: KeyPath::new(),
+            source,
+            identity: format!("[{field}={}]", render_value(&value)),
+        })
+        .collect()
 }
 
 /// Render a keyed record's identity value for an element selector. Key fields are
