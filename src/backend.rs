@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
-use crate::format::{read_file, Format, FormatKind, Indent, Normalized, WriteOpts};
+use crate::format::{read_file, Format, FormatKind, Indent, Input, Normalized, WriteOpts};
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
@@ -158,10 +158,14 @@ pub(crate) trait Backend {
     fn error_invalid_desired(path: PathBuf) -> Error;
     /// Error for a DESIRED whose root is not this backend's mapping shape.
     fn error_desired_not_mapping(path: PathBuf) -> Error;
+    /// Error for a TARGET that parsed but whose root is not this backend's mapping
+    /// shape -- a JSON array at the root, say. Distinct from an absent TARGET,
+    /// which is legitimately empty.
+    fn error_target_not_mapping(path: PathBuf) -> Error;
 
     /// Read a path into a `Node`. `Ok(None)` means absent/coercible-to-empty; an
     /// `Err` is a hard failure (e.g. a non-directory target for the tree backend).
-    fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<Self::Leaf>>, Error>;
+    fn read(args: &RunArgs, path: &Path) -> Result<Option<Input<Self::Leaf>>, Error>;
 
     /// Reduce a freshly read input to the precision this run's output encoding can
     /// hold. [`Backend::run`] calls it on each of TARGET, DESIRED and BASE, so all
@@ -210,18 +214,40 @@ pub(crate) trait Backend {
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
     /// `ByteBackend::<Json>::run(args)` / `Directory::run(args)`.
     fn run(args: &RunArgs) -> Result<Outcome, Error> {
-        let mut desired = Self::read(args, &args.desired)?
+        let desired_input = Self::read(args, &args.desired)?
             .ok_or_else(|| Self::error_invalid_desired(args.desired.clone()))?;
+        let mut desired = desired_input.node;
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
         let desired_risks = Self::normalize_for_run(args, &mut desired)?;
 
-        // Missing/unparseable/non-map TARGET is treated as empty (a hard read error,
-        // e.g. a non-directory tree target, still propagates).
-        let mut target = Self::read(args, &args.target)?
-            .filter(Node::is_map)
-            .unwrap_or_else(Node::empty_map);
+        // An absent TARGET is empty -- that is the first apply. A TARGET that is
+        // *there* but unreadable is not: reconciling it as empty would write DESIRED
+        // over a file full of keys the app owns, so `read` errors and that
+        // propagates. Parsing to something that is not a mapping is the same
+        // hazard by another route (a JSON array at the root, or an object
+        // serde_json resolves to a bare number), so refuse that too.
+        let target_input = Self::read(args, &args.target)?;
+        let mut target = match &target_input {
+            Some(input) if input.node.is_map() => input.node.clone(),
+            Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
+            None => Node::empty_map(),
+        };
+        // The parser can rewrite a scalar before the engine ever sees it -- a JSON
+        // exponent's spelling, say. The value is unchanged, so no diff can show it,
+        // but the bytes on disk will differ; say so rather than rewrite quietly.
+        for (source, stored) in target_input
+            .iter()
+            .flat_map(|i| i.rewritten.iter())
+            .map(|(s, t)| (s, t))
+            .chain(desired_input.rewritten.iter().map(|(s, t)| (s, t)))
+        {
+            eprintln!(
+                "config-graft: warning: the number `{source}` is stored as `{stored}`, \
+                 so writing normalizes its spelling"
+            );
+        }
         // `--diff` reports what a write would change, and normalizing the target is
         // one of those changes, so keep the node as it was read. Without this the
         // diff compares two already-normalized sides, prints nothing, and disagrees
@@ -238,6 +264,7 @@ pub(crate) trait Backend {
             .filter(|p| !p.is_empty());
         let mut base = base_path
             .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
+            .map(|input| input.node)
             .filter(Node::is_map);
         if let Some(base) = base.as_mut() {
             // BASE must be normalized too, or a floored TARGET never equals it and a
@@ -257,12 +284,11 @@ pub(crate) trait Backend {
             arrays: args.array_strategy,
             merge_keys: Self::merge_keys(args),
         };
-        let (mut result, warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
+        let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
         // Anything the reconcile did to a value beyond applying the managed edits
         // -- a contradictory reorder resolved by tie-break, an array identity that
         // appeared twice and could only survive once. Diagnostics only: the exit
         // code is unaffected.
-        let mut warnings = warnings;
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
         emit(&warnings, Self::COMPONENT_SEPARATOR);
@@ -352,8 +378,15 @@ impl<F: Format> Backend for ByteBackend<F> {
         F::KIND.desired_not_mapping(path)
     }
 
-    fn read(_args: &RunArgs, path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
-        Ok(read_file::<F>(path))
+    fn error_target_not_mapping(path: PathBuf) -> Error {
+        Error::Unreadable {
+            path,
+            kind: F::KIND,
+        }
+    }
+
+    fn read(_args: &RunArgs, path: &Path) -> Result<Option<Input<F::Leaf>>, Error> {
+        read_file::<F>(path)
     }
 
     fn prepare(
@@ -406,8 +439,15 @@ impl Backend for Directory {
         FormatKind::Directory.desired_not_mapping(path)
     }
 
-    fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<FsLeaf>>, Error> {
-        directory::read_tree(path, args.manage_root, args.dir_policy())
+    // A tree's root is always a map and `read_tree` already refuses a non-directory,
+    // so this is unreachable; it exists to keep the trait total.
+    fn error_target_not_mapping(path: PathBuf) -> Error {
+        Error::NotDirectory(path)
+    }
+
+    fn read(args: &RunArgs, path: &Path) -> Result<Option<Input<FsLeaf>>, Error> {
+        // A tree is walked, not parsed, so nothing can be rewritten on the way in.
+        Ok(directory::read_tree(path, args.manage_root, args.dir_policy())?.map(Input::clean))
     }
 
     fn prepare(
