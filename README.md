@@ -68,17 +68,16 @@ The merge engine is format-agnostic; **JSON**, Apple **plist**, **YAML**, and **
 
 JSON notes:
 
-- Numbers keep their **source spelling** when they aren't exact 64-bit integers, so a high-precision decimal, an integer larger than `u64`, or an exponent past `f64`'s range round-trips untouched rather than being shortened, turned into `1.2345e29`, or (for the exponent) making the whole file unreadable. They still compare by value, so `0.10` and `0.1` are the same number.
+- Numbers keep their **source spelling**, so a high-precision decimal, an integer larger than `u64`, or an exponent past `f64`'s range round-trips rather than being shortened, turned into `1.2345e29`, or (for the exponent) making the whole file unreadable. They compare by value across every spelling — `10`, `10.0` and `1e1` are one number — so a value the app rewrote in another form still prunes, and a DESIRED spelled differently from TARGET leaves the file alone. The one spelling config-graft cannot preserve is an exponent's, which serde_json normalizes while parsing (`1e1` is stored as `1e+1`); that is reported on stderr.
 - Output is pretty-printed per `--indent`, preserving key order.
 
 Plist notes:
 
 - Reads accept **both** XML and binary plist. Output is normalized **XML by default**; pass `--plist-binary` to write a binary plist instead.
-- plist's `Date`/`Data`/`Uid` scalars are atomic leaves and round-trip losslessly. The one exception is date precision: an XML run floors a `Date` to a whole second, because CFPropertyList's XML parser rejects a fractional-second `<date>` and a date read out of a binary plist (as `defaults export` produces) almost always has one. The floor happens as each input is read, so TARGET, DESIRED and BASE stay comparable and a managed date key still prunes, and each floored date is reported on stderr.
-- When flooring conflates two instants and the merge then keeps only one, the run **says so on stderr** and writes anyway — the same normalization is what keeps TARGET comparable to BASE, so refusing would strand the run instead. An array absent from DESIRED is copied through untouched and never trips it.
-- An XML run **refuses** (exit 1, leaving the target untouched) when a string or key holds a character an XML plist cannot carry unchanged: a C0 control other than tab or newline, such as the ESC `0x1B` separators in `NSUserKeyEquivalents`, or a carriage return, which XML requires parsers to turn into a newline. macOS tolerates the control bytes, so writing them would produce a file that loads on macOS and is invalid everywhere else.
-- `--plist-binary` sidesteps all of the above: no date is floored and no byte is out of reach, so the values pass through untouched.
-- plist has no `null`. `--indent` is exposed only by the `json` subcommand.
+- `Date`/`Data`/`Uid` are atomic leaves and round-trip losslessly, with one exception: an XML run floors a `Date` to a whole second. CFPropertyList's XML parser rejects a fractional-second `<date>`, and a date read out of a binary plist — which is what `defaults export` hands over — almost always has one. The floor is applied as each input is read, so TARGET, DESIRED and BASE stay comparable and a managed date key still prunes; every floored date is reported on stderr.
+- Flooring can make two instants under a second apart into one value. Where the merge then keeps only one, the run **says so and writes anyway** — the same normalization is what keeps TARGET comparable to BASE, so refusing would strand the run rather than protect it. An array config-graft does not manage is copied through untouched and never trips it.
+- An XML run **refuses** (exit 1, target untouched) when a string or key holds a character an XML plist cannot carry unchanged: a C0 control other than tab or newline — such as the ESC `0x1B` separators in `NSUserKeyEquivalents` — or a carriage return, which XML requires parsers to turn into a newline. macOS tolerates those bytes, so writing them would produce a file that loads on macOS and is invalid everywhere else.
+- `--plist-binary` sidesteps all of that: nothing is floored and no byte is out of reach, so values pass through as they stand.
 - plist has no `null`. `--indent` is exposed only by the `json` subcommand.
 
 YAML notes:

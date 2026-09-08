@@ -1,6 +1,7 @@
 //! Typed errors and the process outcome, replacing stringly-typed results and
 //! magic exit codes.
 
+use crate::format::FormatKind;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,12 @@ pub enum Error {
     },
     /// Writing the reconciled output to stdout (`--stdout`) failed.
     StdoutWrite(std::io::Error),
+    /// A file exists at `path` but does not parse as its format, or parses as
+    /// something that is not this format's mapping type. Distinct from "absent":
+    /// an absent TARGET is legitimately reconciled as empty, but treating an
+    /// unreadable one that way would replace a file full of app-owned data with
+    /// DESIRED alone.
+    Unreadable { path: PathBuf, kind: FormatKind },
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
     /// A value at `path` holds a character XML 1.0 cannot represent, so writing
@@ -133,6 +140,13 @@ impl fmt::Display for Error {
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
             Error::StdoutWrite(e) => write!(f, "writing to stdout: {e}"),
+            Error::Unreadable { path, kind } => write!(
+                f,
+                "{} exists but is not valid {}; refusing to treat it as empty, which \
+                 would replace it with DESIRED. Fix or remove the file.",
+                path.display(),
+                kind.name()
+            ),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::PlistXmlUnrepresentable { path, character } => write!(
                 f,
