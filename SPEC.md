@@ -127,7 +127,16 @@ cross-format conversion. The format is selected by the subcommand
 inference.
 
 - **JSON** — objects, arrays, strings, numbers, booleans, `null`. Output is
-  pretty-printed per `--indent`, key order preserved (§8).
+  pretty-printed per `--indent`, key order preserved (§8). A number that is **not
+  an exact 64-bit integer** is held as its **source literal** and re-emitted
+  verbatim, so a high-precision decimal, an integer past `u64`, and an exponent
+  beyond `f64`'s range all round-trip unchanged (an `f64` would shorten the first,
+  turn the second into `1.2345e29`, and reject the third outright — taking the
+  whole file with it, since an unparseable TARGET is treated as `{}`). Numbers
+  compare by the **value** their literal denotes, not its spelling, so `0.10`,
+  `0.1` and `1e-1` are one number: a DESIRED spelled differently from TARGET is
+  not a change, and pruning still recognizes an untouched value. (The exponent's
+  sign is normalized by the parser — `1e400` reads back as `1e+400`.)
 - **plist** — dictionaries, arrays, strings, integers, reals, booleans, and the
   plist-only scalars **`Date`**, **`Data`**, and **`Uid`**. The engine treats
   every non-dictionary value as an atomic leaf, so these exotic scalars

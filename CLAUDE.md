@@ -35,6 +35,15 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
   Managed key paths are the `KeyPath` newtype. A directory's own attributes are
   just a leaf under the reserved key, so they prune/merge like any entry with no
   special engine path (DESIRED wins on conflict, as for any leaf).
+- `src/format/json.rs` — `JsonLeaf::Number(String)` holds a non-integer number as
+  its **source literal** (serde_json's `arbitrary_precision`), re-emitted verbatim
+  via `Number::from_string_unchecked`; there is deliberately **no `Float(f64)`** —
+  it shortened high-precision decimals, turned integers past `u64` into floats, and
+  made an out-of-range exponent unparseable (which silently replaced the file, since
+  an unparseable TARGET is treated as `{}`). `PartialEq`/`Hash` normalize via
+  `decimal_parts` so `0.10` == `0.1` (spelling is not a change, and pruning still
+  matches an untouched value); a literal whose exponent overflows `i64` falls back to
+  literal comparison, consistently in both `eq` and `hash`.
 - `src/format/{json,plist,yaml,toml}.rs` — per-format leaf enum + `ValueCodec`
   (native ⇄ `Node`) + `Format` (parse/serialize). `mod.rs` holds the traits,
   `FormatKind` (a per-format tag, no longer the dispatch selector), `Indent`,
@@ -183,6 +192,10 @@ A format-agnostic engine over a generic value model; formats plug in via traits.
 
 - `--diff` output comes from `Leaf::render()`; keep it byte-stable (tests assert it).
 - saphyr is pre-1.0 (0.0.x), YAML 1.2; `Cargo.lock` is pinned for `nix build`.
+- `serde_json` carries `arbitrary_precision` (with `preserve_order`). Don't drop it:
+  without it `Number::as_str()` is gone and JSON numbers collapse back to `f64`.
+  It also makes `as_f64()` return `None` for a non-finite literal — nothing calls it
+  now, and nothing should start.
 - TOML root is always a table, so `Toml::parse` → map is total and `NotTomlTable`
   is structurally unreachable (kept only for `FormatKind` symmetry).
 - Directory mode: `FsLeaf::File` equality is `(len, digest, attrs)` and ignores

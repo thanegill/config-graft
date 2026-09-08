@@ -101,6 +101,15 @@ the subcommand (`config-graft json|plist|yaml|toml|directory ...`) and governs
 every file in the run (TARGET, DESIRED, BASE, and output) — there is no
 cross-format conversion.
 
+JSON notes:
+
+- Numbers keep their **source spelling** when they aren't exact 64-bit integers,
+  so a high-precision decimal, an integer larger than `u64`, or an exponent past
+  `f64`'s range round-trips untouched rather than being shortened, turned into
+  `1.2345e29`, or (for the exponent) making the whole file unreadable. They still
+  compare by value, so `0.10` and `0.1` are the same number.
+- Output is pretty-printed per `--indent`, preserving key order.
+
 Plist notes:
 
 - Reads accept **both** XML and binary plist. Output is normalized **XML by
