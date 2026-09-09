@@ -80,7 +80,7 @@ impl std::fmt::Debug for PlistLeaf {
             PlistLeaf::Uint(u) => write!(f, "Uint({u:?})"),
             PlistLeaf::Float(x) => write!(f, "Float({x:?})"),
             PlistLeaf::String(s) => write!(f, "String({s:?})"),
-            PlistLeaf::Date(d) => write!(f, "Date({})", d.to_xml_format()),
+            PlistLeaf::Date(d) => write!(f, "Date({})", spell_date(*d)),
             PlistLeaf::Data(bytes) => write!(f, "Data({} bytes)", bytes.len()),
             PlistLeaf::Uid(u) => write!(f, "Uid({u:?})"),
         }
@@ -95,7 +95,7 @@ impl Leaf for PlistLeaf {
             PlistLeaf::Uint(u) => u.to_string(),
             PlistLeaf::Float(f) => render_f64(*f),
             PlistLeaf::String(s) => quote(s),
-            PlistLeaf::Date(d) => format!("<date {}>", d.to_xml_format()),
+            PlistLeaf::Date(d) => format!("<date {}>", spell_date(*d)),
             PlistLeaf::Data(bytes) => format!("<data {} bytes>", bytes.len()),
             PlistLeaf::Uid(u) => format!("<uid {u}>"),
         }
@@ -193,8 +193,7 @@ impl Format for Plist {
         if opts.plist_binary {
             return Ok(None);
         }
-        refuse_unspellable_dates(node, &mut KeyPath::new())?;
-        if !holds_a_fractional_date(node) {
+        if !scan_dates(node, &mut KeyPath::new())? {
             return Ok(None);
         }
         let mut normalized = node.clone();
@@ -318,8 +317,8 @@ fn is_xml_plist(bytes: &[u8]) -> bool {
 /// for, while the same text somewhere new is.
 #[derive(Default)]
 struct Represented {
-    keys: std::collections::HashSet<(String, String)>,
-    values: std::collections::HashSet<(String, String)>,
+    keys: std::collections::HashSet<(KeyPath, String)>,
+    values: std::collections::HashSet<(KeyPath, String)>,
 }
 
 fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Represented) {
@@ -328,8 +327,7 @@ fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Re
             for (key, value) in m {
                 path.push(key.clone());
                 if xml_unrepresentable(key).is_some() {
-                    into.keys
-                        .insert((path.render(Plist::PATH_SEP), key.clone()));
+                    into.keys.insert((path.clone(), key.clone()));
                 }
                 collect_represented(value, path, into);
                 path.pop();
@@ -341,8 +339,7 @@ fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Re
             }
         }
         Node::Leaf(PlistLeaf::String(text)) if xml_unrepresentable(text).is_some() => {
-            into.values
-                .insert((path.render(Plist::PATH_SEP), text.clone()));
+            into.values.insert((path.clone(), text.clone()));
         }
         Node::Leaf(_) => {}
     }
@@ -362,8 +359,8 @@ struct Carried {
 }
 
 fn carried_over(target: &Represented, result: &Represented) -> Carried {
-    let texts = |a: &std::collections::HashSet<(String, String)>,
-                 b: &std::collections::HashSet<(String, String)>| {
+    let texts = |a: &std::collections::HashSet<(KeyPath, String)>,
+                 b: &std::collections::HashSet<(KeyPath, String)>| {
         a.intersection(b).map(|(_, text)| text.clone()).collect()
     };
     Carried {
@@ -431,6 +428,20 @@ fn check_xml_representable(
     Ok(())
 }
 
+/// A date as a diagnostic can print it. `to_xml_format` **panics** outside years
+/// 0..=9999, and rendering happens on every path -- including `--plist-binary`,
+/// which is allowed to carry such a date -- so the out-of-range spelling falls back
+/// to seconds from the epoch rather than aborting the run.
+fn spell_date(date: plist::Date) -> String {
+    if is_spellable_in_xml(date) {
+        return date.to_xml_format();
+    }
+    match SystemTime::from(date).duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since) => format!("{}s after 1970", since.as_secs()),
+        Err(before) => format!("{}s before 1970", before.duration().as_secs()),
+    }
+}
+
 /// Whether `date` can be spelled in the RFC 3339 form an XML plist uses. The
 /// `plist` crate **panics** rather than erroring outside years 0..=9999 -- in its
 /// writer and in `to_xml_format`, which `Leaf::render` reaches -- so a run that
@@ -451,40 +462,35 @@ fn is_spellable_in_xml(date: plist::Date) -> bool {
     (YEAR_0..YEAR_10000).contains(&seconds)
 }
 
-/// Refuse a date the XML writer cannot spell, before anything tries to render it.
-fn refuse_unspellable_dates(node: &Node<PlistLeaf>, path: &mut KeyPath) -> Result<(), Error> {
+/// One read-only pass over the dates: refuse any the XML writer cannot spell, and
+/// report whether a floor is needed. The range check has to come first, so it is
+/// done here rather than in a second traversal.
+fn scan_dates(node: &Node<PlistLeaf>, path: &mut KeyPath) -> Result<bool, Error> {
+    let mut needs_floor = false;
     match node {
         Node::Map(m) => {
             for (key, value) in m {
                 path.push(key.clone());
-                refuse_unspellable_dates(value, path)?;
+                needs_floor |= scan_dates(value, path)?;
                 path.pop();
             }
         }
         Node::Array(a) => {
             for element in a {
-                refuse_unspellable_dates(element, path)?;
+                needs_floor |= scan_dates(element, path)?;
             }
         }
-        Node::Leaf(PlistLeaf::Date(date)) if !is_spellable_in_xml(*date) => {
-            return Err(Error::PlistDateOutOfRange {
-                path: path.render(Plist::PATH_SEP),
-            })
+        Node::Leaf(PlistLeaf::Date(date)) => {
+            if !is_spellable_in_xml(*date) {
+                return Err(Error::PlistDateOutOfRange {
+                    path: path.render(Plist::PATH_SEP),
+                });
+            }
+            needs_floor = floor_date(*date) != Some(*date);
         }
         Node::Leaf(_) => {}
     }
-    Ok(())
-}
-
-/// Whether any date here would change under flooring. A read-only pass, so a plist
-/// with nothing to floor is copied no more than one that needs no normalizing.
-fn holds_a_fractional_date(node: &Node<PlistLeaf>) -> bool {
-    match node {
-        Node::Map(m) => m.values().any(holds_a_fractional_date),
-        Node::Array(a) => a.iter().any(holds_a_fractional_date),
-        Node::Leaf(PlistLeaf::Date(date)) => floor_date(*date) != Some(*date),
-        Node::Leaf(_) => false,
-    }
+    Ok(needs_floor)
 }
 
 // Flooring moves an instant toward the past, which for a pre-epoch date means

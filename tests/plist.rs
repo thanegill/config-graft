@@ -788,6 +788,239 @@ fn a_diagnostic_about_a_nested_value_does_not_echo_a_control_byte() {
     );
 }
 
+/// An XML plist target whose body is `body`, written verbatim so a raw control
+/// byte survives -- `plist`'s own writer escapes or refuses some of these.
+fn xml_target(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n<dict>\n{body}</dict>\n</plist>\n"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_byte_is_passed_through_only_while_the_file_still_carries_it() {
+    // "Already there" is judged by position -- a value still where the file had it
+    // is one this run did not put there -- but licensed by value, so relocating it
+    // introduces nothing. When the target's own copy is pruned the byte becomes
+    // this run's alone, and that is refused.
+    let dir = tempfile::tempdir().unwrap();
+    let esc = char::from(27u8);
+    let body = format!(
+        "\t<key>a</key>\n\t<string>{esc}X</string>\n\t<key>keep</key>\n\t<integer>1</integer>\n"
+    );
+
+    let base = dir.path().join("base.plist");
+    pdict(vec![("a", plist::Value::String(format!("{esc}X")))])
+        .to_file_binary(&base)
+        .unwrap();
+
+    // The original survives: relocating the same text is not introducing it.
+    let moved = dir.path().join("moved.plist");
+    pdict(vec![("c", plist::Value::String(format!("{esc}X")))])
+        .to_file_binary(&moved)
+        .unwrap();
+    let target = xml_target(dir.path(), "keep.plist", &body);
+    let out = run(&["plist", target.to_str().unwrap(), moved.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "relocation was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // BASE prunes `a`, so nothing carries over and the byte is newly ours.
+    let target = xml_target(dir.path(), "pruned.plist", &body);
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&[
+        "plist",
+        "--base",
+        base.to_str().unwrap(),
+        target.to_str().unwrap(),
+        moved.to_str().unwrap(),
+    ]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+#[test]
+fn a_key_that_renders_like_a_nested_path_does_not_license_a_byte() {
+    // Positions are compared as key paths, not as their rendered form: a key called
+    // `a:b` must not be mistaken for the nested path `a` -> `b`.
+    let dir = tempfile::tempdir().unwrap();
+    let esc = char::from(27u8);
+    let target = xml_target(
+        dir.path(),
+        "config.plist",
+        &format!("\t<key>a</key>\n\t<dict>\n\t\t<key>b</key>\n\t\t<string>{esc}X</string>\n\t</dict>\n\t<key>keep</key>\n\t<integer>1</integer>\n"),
+    );
+    let base = dir.path().join("base.plist");
+    pdict(vec![(
+        "a",
+        pdict(vec![("b", plist::Value::String(format!("{esc}X")))]),
+    )])
+    .to_file_binary(&base)
+    .unwrap();
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a:b", plist::Value::String(format!("{esc}X")))])
+        .to_file_binary(&desired)
+        .unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&[
+        "plist",
+        "--base",
+        base.to_str().unwrap(),
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+#[test]
+fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
+    // The reported path escapes at render time only; escaping the segments would
+    // make `get_path` miss the array and silently drop this warning.
+    let dir = tempfile::tempdir().unwrap();
+    let key = format!("a{}b", char::from(127u8));
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![(
+        &key[..],
+        plist::Value::Array(vec![
+            instant(1_000_000, 200_000_000),
+            instant(1_000_000, 700_000_000),
+        ]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![(
+        &key[..],
+        plist::Value::Array(vec![instant(1_000_000, 0)]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains("that normalizing made identical"),
+        "the collapse diagnostic was lost: {err}"
+    );
+    assert!(err.contains(r"a\u{7f}b"), "path not escaped: {err}");
+    assert!(!out.stderr.contains(&127u8), "raw byte reached stderr");
+}
+
+#[test]
+fn a_date_outside_the_years_xml_can_spell_is_refused_not_a_panic() {
+    // `plist`'s RFC 3339 formatter panics outside years 0..=9999, and 1.10 clamps
+    // only the future end on read, so a pre-year-0 date reaches it.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let far_past =
+        std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(100_000_000_000);
+    pdict(vec![
+        ("when", plist::Value::Date(plist::Date::from(far_past))),
+        ("a", pint(1)),
+    ])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![("a", pint(2))])
+        .to_file_binary(&desired)
+        .unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("0 to 9999"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+
+    // Binary can hold it, so the run must succeed -- and rendering it for `--diff`
+    // must not abort either. DESIRED replaces the date itself, so the diff has to
+    // print the old value: rendering is where the formatter panics.
+    let replaces = dir.path().join("replaces.plist");
+    pdict(vec![("when", plist::Value::String("replaced".into()))])
+        .to_file_binary(&replaces)
+        .unwrap();
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        "--diff",
+        target.to_str().unwrap(),
+        replaces.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "binary run aborted: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_duplicate_is_reported_only_when_the_file_really_held_one() {
+    // Normalization can make elements equal that the file distinguished, so the
+    // duplicate report must subtract the equalities it introduced -- but not the
+    // repeats the file genuinely held. The three shapes differ only in the array.
+    let dir = tempfile::tempdir().unwrap();
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![(
+        "l",
+        plist::Value::Array(vec![instant(1_000_000, 0)]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let reports = |name: &str, elements: Vec<plist::Value>| {
+        let target = dir.path().join(format!("{name}.plist"));
+        pdict(vec![("l", plist::Value::Array(elements))])
+            .to_file_binary(&target)
+            .unwrap();
+        let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter(|l| l.contains("times; array membership"))
+            .count()
+    };
+
+    // Two different instants floored together: the file held no duplicate.
+    assert_eq!(
+        reports(
+            "distinct",
+            vec![
+                instant(1_000_000, 500_000_000),
+                instant(1_000_000, 200_000_000)
+            ]
+        ),
+        0
+    );
+    // One instant twice: a real duplicate, still worth saying.
+    assert_eq!(
+        reports(
+            "repeated",
+            vec![
+                instant(1_000_000, 500_000_000),
+                instant(1_000_000, 500_000_000)
+            ]
+        ),
+        1
+    );
+    // One already whole, one floored onto it: again two different instants.
+    assert_eq!(
+        reports(
+            "untouched",
+            vec![instant(1_000_000, 0), instant(1_000_000, 500_000_000)]
+        ),
+        0
+    );
+}
+
 #[test]
 fn a_binary_target_is_refused_rather_than_rewritten_as_xml_with_the_byte() {
     // Rewriting a binary plist as XML emits every byte anew, so nothing in it is

@@ -278,28 +278,57 @@ pub(crate) trait Backend {
         // `n` distinct originals collapsing onto one value introduce `n - 1`
         // equalities that were not in the file; occurrences beyond that are repeats
         // the file genuinely held, and those are still worth reporting.
-        let mut origins: HashMap<(&KeyPath, String), HashSet<String>> = HashMap::new();
-        for n in target_risks.iter().chain(desired_risks.iter()) {
+        // How many equalities normalization introduced at each (path, value), per
+        // input -- `DuplicateCollapsed` counts occurrences within one side, so the
+        // two sides must not share a bucket. `n` distinct originals collapsing onto
+        // one value introduce `n - 1` equalities, or `n` when an occurrence already
+        // held that value untouched, since that one was equal to none of them
+        // before. The rest of the repeats are ones the file genuinely held.
+        let equalities = |risks: &[Normalized<Self::Leaf>], node: &Node<Self::Leaf>| {
+            // Distinct originals decide how many equalities a collapse introduces;
+            // the record count decides whether an occurrence was left untouched,
+            // and two identical originals produce two records but one distinct.
+            let mut origins: HashMap<(&KeyPath, String), (HashSet<String>, usize)> = HashMap::new();
+            for n in risks {
+                let entry = origins.entry((&n.path, n.value.compact())).or_default();
+                entry.0.insert(n.original.compact());
+                entry.1 += 1;
+            }
             origins
-                .entry((&n.path, n.value.compact()))
-                .or_default()
-                .insert(n.original.compact());
-        }
+                .into_iter()
+                .map(|((path, value), (distinct, records))| {
+                    let occurrences = match node.get_path(path) {
+                        Some(Node::Array(a)) => a.iter().filter(|e| e.compact() == value).count(),
+                        _ => 0,
+                    };
+                    let untouched = occurrences > records;
+                    let made = distinct.len() - usize::from(!untouched);
+                    ((path.clone(), value), made)
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let made_in = [
+            (Source::Target, equalities(&target_risks, &target)),
+            (Source::Desired, equalities(&desired_risks, &desired)),
+        ];
         warnings.retain_mut(|w| match w {
             Warning::DuplicateCollapsed {
                 path,
+                source,
                 identity,
                 held,
-                ..
+                kept,
             } => {
-                // Subtract the repeats normalization made, not the whole report: the
-                // file may also hold a genuine duplicate, which is still worth
-                // saying even when a floor lands on the same value.
-                let made = origins
-                    .get(&(&*path, identity.clone()))
-                    .map_or(0, |o| o.len().saturating_sub(1));
+                let made = made_in
+                    .iter()
+                    .find(|(s, _)| s == source)
+                    .and_then(|(_, m)| m.get(&(path.clone(), identity.clone())))
+                    .copied()
+                    .unwrap_or(0);
                 *held = held.saturating_sub(made);
-                *held >= 2
+                // Re-establish what `value_duplicates` already required: a repeat is
+                // only worth reporting if something was actually dropped.
+                *held >= 2 && *held > *kept
             }
             _ => true,
         });
