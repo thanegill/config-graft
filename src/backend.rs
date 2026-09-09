@@ -64,8 +64,7 @@ fn lossy_collapses<L: Leaf>(
     for n in target_rewritten.iter().chain(desired_rewritten.iter()) {
         let entry = rewritten.entry((&n.path, &n.value)).or_default();
         entry.0.push(&n.original);
-        // From a record that produced *this* value, not merely one sharing the path,
-        // so the message cannot attribute the loss to an unrelated rewrite.
+        // From a record that produced *this* value, not one merely sharing the path.
         entry.1 = n.because;
     }
     let mut reported: Vec<Warning<L>> = Vec::new();
@@ -209,7 +208,13 @@ pub(crate) trait Backend {
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
     /// `ByteBackend::<Json>::run(args)` / `Directory::run(args)`.
     fn run(args: &RunArgs) -> Result<Outcome, Error> {
-        let desired_input = Self::read(args, &args.desired)?
+        // The unreadable-TARGET wording is about not mistaking it for empty, which
+        // says nothing about DESIRED.
+        let desired_input = Self::read(args, &args.desired)
+            .map_err(|e| match e {
+                Error::Unreadable { path, kind } => Error::UnreadableDesired { path, kind },
+                other => other,
+            })?
             .ok_or_else(|| Self::error_invalid_desired(args.desired.clone()))?;
         let mut desired = desired_input.node;
         if !desired.is_map() {
@@ -217,24 +222,19 @@ pub(crate) trait Backend {
         }
         let desired_risks = Self::normalize_for_run(args, &mut desired)?;
 
-        // An absent TARGET is empty -- that is the first apply. A TARGET that is
-        // *there* but unreadable is not: reconciling it as empty would write DESIRED
-        // over a file full of keys the app owns, so `read` errors and that
-        // propagates. Parsing to something that is not a mapping is the same
-        // hazard by another route (a JSON array at the root, or an object
-        // serde_json resolves to a bare number), so refuse that too.
+        // Only an *absent* TARGET is empty. Treating an unreadable or non-mapping
+        // one as empty would write DESIRED over a file of keys the app owns.
         let target_input = Self::read(args, &args.target)?;
-        let mut target = match &target_input {
-            Some(input) if input.node.is_map() => input.node.clone(),
+        let (mut target, target_rewritten) = match target_input {
+            Some(input) if input.node.is_map() => (input.node, input.rewritten),
             Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
-            None => Node::empty_map(),
+            None => (Node::empty_map(), Vec::new()),
         };
         // The parser can rewrite a scalar before the engine ever sees it -- a JSON
         // exponent's spelling, say. The value is unchanged, so no diff can show it,
         // but the bytes on disk will differ; say so rather than rewrite quietly.
-        let respellings: Vec<Warning<Self::Leaf>> = target_input
+        let respellings: Vec<Warning<Self::Leaf>> = target_rewritten
             .iter()
-            .flat_map(|i| i.rewritten.iter())
             .map(|r| (r, Source::Target))
             .chain(desired_input.rewritten.iter().map(|r| (r, Source::Desired)))
             .map(|(r, source)| Warning::NumberRespelled {
@@ -263,14 +263,8 @@ pub(crate) trait Backend {
             .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
             .map(|input| input.node)
             .filter(Node::is_map);
-        // BASE must be normalized too, or a floored TARGET never equals it and a
-        // managed key can never be pruned. Normalizing mutates in place and can fail
-        // part-way, which would leave BASE half-normalized and silently reintroduce
-        // exactly that bug -- so normalize a copy and adopt it only if it succeeded.
-        // A failure is about BASE alone, which is never written, so it is not a
-        // reason to fail the run. The clone is why the whole block is gated: for a
-        // backend that normalizes nothing it would copy an entire tree or document
-        // to hand it to a no-op.
+        // Normalize a copy: a part-way failure would leave BASE unequal to a
+        // normalized TARGET, and a managed key could then never be pruned.
         if Self::NORMALIZES {
             if let Some(base) = base.as_mut() {
                 let mut normalized = base.clone();
@@ -380,7 +374,7 @@ impl<F: Format> Backend for ByteBackend<F> {
     }
 
     fn error_target_not_mapping(path: PathBuf) -> Error {
-        Error::Unreadable {
+        Error::TargetNotMapping {
             path,
             kind: F::KIND,
         }
@@ -395,10 +389,8 @@ impl<F: Format> Backend for ByteBackend<F> {
         target: &Node<F::Leaf>,
         result: &Node<F::Leaf>,
     ) -> Result<Prepared, Error> {
-        // Read the current on-disk text *once*: YAML/TOML use it as the basis for
-        // comment-preserving edits, and change detection compares against it (JSON/
-        // plist ignore it when serializing). A single read keeps the serialized
-        // output and the "changed?" verdict consistent against one snapshot.
+        // Read once: two reads could serialize from a template the target no longer
+        // matches, making the output and the "changed?" verdict disagree.
         let current = fs::read(&args.target).unwrap_or_default();
         F::refuse_on_write(result, target, write_opts(args))?;
         let output = F::serialize(result, &current, write_opts(args))?;

@@ -53,13 +53,10 @@ pub(super) fn combine<L: Leaf>(
                     out.push(e.clone());
                 }
             }
-            // Only DESIRED's *own* repeats are a loss here: TARGET keeps its
-            // duplicates, and a DESIRED element equal to a TARGET one is the union
-            // working as asked, not a collapse.
-            (
-                out.clone(),
-                value_duplicates(desired, &out, Source::Desired),
-            )
+            // DESIRED's own repeats only: a DESIRED element equal to a TARGET one
+            // is the union working as asked, not a collapse.
+            let warnings = value_duplicates(desired, &out, Source::Desired);
+            (out, warnings)
         }
         // Three-way, move-aware merge against BASE -- the only strategy that can
         // conflict. BASE elements only matter when BASE is itself an array here;

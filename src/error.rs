@@ -49,6 +49,11 @@ pub enum Error {
     /// unreadable one that way would replace a file full of app-owned data with
     /// DESIRED alone.
     Unreadable { path: PathBuf, kind: FormatKind },
+    /// DESIRED exists but could not be parsed. Distinct from [`Error::Unreadable`],
+    /// which is about a TARGET that must not be mistaken for empty.
+    UnreadableDesired { path: PathBuf, kind: FormatKind },
+    /// TARGET parsed, but its root is not this format's mapping shape.
+    TargetNotMapping { path: PathBuf, kind: FormatKind },
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
     /// A JSON input uses serde_json's sentinel as an object key, which the parser
@@ -156,6 +161,20 @@ impl fmt::Display for Error {
                  number rather than an object; refusing rather than rewriting the \
                  value. Rename the key.",
                 path.display()
+            ),
+            Error::UnreadableDesired { path, kind } => write!(
+                f,
+                "DESIRED at {} is not valid {}; nothing was written.",
+                path.display(),
+                kind.name()
+            ),
+            Error::TargetNotMapping { path, kind } => write!(
+                f,
+                "{} is valid {} but its root is not {}; refusing, because there is \
+                 nothing to merge the managed keys into.",
+                path.display(),
+                kind.name(),
+                kind.mapping_name()
             ),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::PlistXmlUnrepresentable { path, character } => write!(
