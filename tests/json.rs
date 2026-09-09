@@ -237,6 +237,27 @@ fn merge_conflict_warns_on_stderr_without_failing() {
 }
 
 #[test]
+fn duplicate_array_element_warns_on_stderr_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // The app wrote the same element twice; membership is a set, so one is lost.
+    fs::write(&target, r#"{"l":["x","x","y"]}"#).unwrap();
+    fs::write(&desired, r#"{"l":["y"]}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success()); // diagnostics don't change the exit code
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("in TARGET holds \"x\" 2 times"),
+        "stderr was: {err}"
+    );
+    assert!(err.contains("`l`"), "stderr was: {err}");
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"l":["x","y"]}));
+}
+
+#[test]
 fn clean_merge_does_not_warn() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
@@ -787,4 +808,334 @@ fn plist_binary_flag_is_a_usage_error_for_json() {
         "--plist-binary",
     ]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+// ----- number fidelity -----
+
+#[test]
+fn high_precision_numbers_survive_a_reconcile() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // Values the app owns, none of which fit an f64: a long decimal and an
+    // integer past u64. config-graft only passes them through.
+    fs::write(
+        &target,
+        r#"{"ratio":1.2345678901234567890123,"id":123456789012345678901234567890,"a":1}"#,
+    )
+    .unwrap();
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+
+    let written = fs::read_to_string(&target).unwrap();
+    assert!(
+        written.contains("1.2345678901234567890123"),
+        "decimal was shortened:\n{written}"
+    );
+    assert!(
+        written.contains("123456789012345678901234567890"),
+        "integer was turned into a float:\n{written}"
+    );
+
+    // ... and re-applying changes nothing.
+    let out = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "re-apply was not a no-op");
+}
+
+#[test]
+fn an_out_of_range_exponent_does_not_destroy_the_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    // `1e400` overflows f64. It must not make the whole file unreadable -- that
+    // would treat TARGET as empty and replace every app-owned key with DESIRED.
+    fs::write(&target, r#"{"huge":1e400,"keep":"mine","a":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+
+    let written = fs::read_to_string(&target).unwrap();
+    assert!(written.contains("mine"), "clobbered an app key:\n{written}");
+    // Byte-for-byte: the literal is carried through as the file spelled it, so the
+    // assertion can name it rather than compare parsed values.
+    assert!(
+        written.contains("\"huge\": 1e400"),
+        "lost the literal:\n{written}"
+    );
+
+    // And it stays put on a re-apply.
+    let out = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "re-apply was not a no-op");
+}
+
+#[test]
+fn a_number_spelled_differently_still_prunes() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    // We managed `x` as 0.1; the app rewrote the file and spelled it 0.10 -- the
+    // same number, not a user edit. Dropping it from DESIRED must still prune it.
+    fs::write(&target, r#"{"x":0.10,"app":true}"#).unwrap();
+    fs::write(&desired, r#"{}"#).unwrap();
+    fs::write(&base, r#"{"x":0.1}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"app": true}));
+}
+
+// ----- an unreadable TARGET is not an empty one -----
+
+#[test]
+fn an_unparseable_target_is_refused_not_replaced() {
+    // Reconciling a file that failed to parse as `{}` writes DESIRED over every key
+    // the app owns. An absent TARGET is empty; a present one that cannot be read is
+    // not.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"token":"app-owned","hal"#).unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("is not valid JSON"), "got: {err}");
+    assert!(err.contains("refusing to treat it as empty"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+#[test]
+fn a_target_that_parses_to_a_non_object_is_refused() {
+    // Same hazard by another route: it parses, but not into something the engine
+    // can merge into, so the old `filter(is_map)` sent it down the empty path.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, "[1,2,3]").unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    // Valid JSON; the problem is the root's shape, not a syntax error.
+    assert!(err.contains("root is not an object"), "got: {err}");
+    assert!(!err.contains("not valid JSON"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+#[test]
+fn the_serde_json_number_token_key_is_ordinary_data() {
+    // Under serde_json's `arbitrary_precision`, an object whose first key was this
+    // decoded to a bare number at every depth, and the rewrite was invisible after
+    // the parse. The JSON codec no longer goes through serde_json, so the name
+    // carries no meaning and needs no guard.
+    let dir = tempfile::tempdir().unwrap();
+    let desired = dir.path().join("desired.json");
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    let kept = |name: &str, contents: &str| {
+        let target = dir.path().join(name);
+        fs::write(&target, contents).unwrap();
+        let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+        assert!(
+            out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let written = fs::read_to_string(&target).unwrap();
+        assert!(
+            written.contains("$serde_json::private::Number"),
+            "{name}: the app-owned object was rewritten:\n{written}"
+        );
+        written
+    };
+
+    kept(
+        "root.json",
+        r#"{"$serde_json::private::Number":"1","other":true}"#,
+    );
+    let nested = kept(
+        "nested.json",
+        r#"{"keep":{"$serde_json::private::Number":"1"},"a":1}"#,
+    );
+    // Still an object, not the bare number it used to collapse to.
+    assert!(
+        nested.contains("\"keep\": {"),
+        "collapsed to a number:\n{nested}"
+    );
+    // A payload that is not a number at all was previously unparseable.
+    kept(
+        "nonnumeric.json",
+        r#"{"keep":{"$serde_json::private::Number":"hello"}}"#,
+    );
+}
+
+#[test]
+fn the_number_token_as_a_value_is_an_ordinary_string() {
+    // Only a *key* triggers the routing; as a value it is ordinary data.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"note":"$serde_json::private::Number","a":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    assert!(
+        run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(written["note"], "$serde_json::private::Number");
+    assert_eq!(written["a"], 2);
+}
+
+#[test]
+fn an_absent_or_empty_target_is_still_a_first_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let desired = dir.path().join("desired.json");
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    // Absent.
+    let absent = dir.path().join("absent.json");
+    assert!(
+        run(&["json", absent.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&absent).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"a":1}));
+
+    // Present but empty -- how a caller stages a file it wants filled in.
+    let empty = dir.path().join("empty.json");
+    fs::write(&empty, "").unwrap();
+    assert!(
+        run(&["json", empty.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&empty).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"a":1}));
+}
+
+#[test]
+fn a_number_spelled_differently_in_desired_does_not_rewrite_the_target() {
+    // `2.5` and `2.50` are one number, so there is nothing for --diff to show --
+    // and --check must agree rather than rewriting the file behind an empty diff.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, "{\n  \"f\": 2.5\n}\n").unwrap();
+    fs::write(&desired, r#"{"f":2.50}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "--check disagreed with --diff");
+    assert!(fs::read_to_string(&target).unwrap().contains("2.5\n"));
+}
+
+#[test]
+fn a_number_reaches_the_writer_spelled_as_the_file_spelled_it() {
+    // serde_json rewrote an exponent while scanning (`1e1` -> `1e+1`), so the
+    // engine never saw the source spelling and the run could only report it.
+    // `json-syntax` keeps the literal, so there is nothing to report.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(
+        &target,
+        "{\n  \"x\": 1e1,\n  \"y\": 1E2,\n  \"z\": 2.50,\n  \"a\": 1\n}\n",
+    )
+    .unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).is_empty(),
+        "nothing was rewritten, so nothing should be reported: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let written = fs::read_to_string(&target).unwrap();
+    for literal in ["1e1", "1E2", "2.50"] {
+        assert!(
+            written.contains(literal),
+            "{literal} was respelled:\n{written}"
+        );
+    }
+
+    // And an untouched file is still a no-op, not a rewrite.
+    let out = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "re-apply was not a no-op");
+}
+
+#[test]
+fn an_unparseable_desired_is_reported_as_desired() {
+    // The unreadable-TARGET wording says nothing about a DESIRED that fails to parse.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":"#).unwrap();
+
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("DESIRED"), "got: {err}");
+    assert!(
+        !err.contains("refusing to treat it as empty"),
+        "TARGET wording leaked onto the DESIRED path: {err}"
+    );
+}
+
+#[test]
+fn a_duplicate_warning_needs_something_to_have_been_dropped() {
+    // `set` starts from TARGET and keeps its duplicates, so a repeat can survive
+    // intact. Warning then announces a loss and its own tail reports none.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"l":["b","b"]}"#).unwrap();
+    fs::write(&desired, r#"{"l":["b","b"]}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        "--array-strategy",
+        "set",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("array membership is a set"),
+        "warned about a loss that did not happen: {err}"
+    );
 }

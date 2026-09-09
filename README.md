@@ -66,10 +66,18 @@ Give several candidate fields (`--merge-key name,id`, first present wins), or sc
 
 The merge engine is format-agnostic; **JSON**, Apple **plist**, **YAML**, and **TOML** are supported (plus a **directory** mode, below). The format is chosen by the subcommand (`config-graft json|plist|yaml|toml|directory ...`) and governs every file in the run (TARGET, DESIRED, BASE, and output) — there is no cross-format conversion.
 
+JSON notes:
+
+- Numbers keep their **source spelling**, so a high-precision decimal, an integer larger than `u64`, or an exponent past `f64`'s range round-trips rather than being shortened, turned into `1.2345e29`, or (for the exponent) making the whole file unreadable. They compare by value across every spelling — `10`, `10.0` and `1e1` are one number — so a value the app rewrote in another form still prunes, and a DESIRED spelled differently from TARGET leaves the file alone. Every spelling survives, including an exponent's: `1e1`, `1E2` and `2.50` reach disk exactly as the file wrote them.
+- Output is pretty-printed per `--indent`, preserving key order.
+
 Plist notes:
 
 - Reads accept **both** XML and binary plist. Output is normalized **XML by default**; pass `--plist-binary` to write a binary plist instead.
-- plist's `Date`/`Data`/`Uid` scalars are atomic leaves and round-trip losslessly.
+- `Date`/`Data`/`Uid` are atomic leaves and round-trip losslessly, with one exception: an XML run floors a `Date` to a whole second. CFPropertyList's XML parser rejects a fractional-second `<date>`, and a date read out of a binary plist — which is what `defaults export` hands over — almost always has one. The floor is applied as each input is read, so TARGET, DESIRED and BASE stay comparable and a managed date key still prunes; every floored date is reported on stderr.
+- Flooring can make two instants under a second apart into one value. Where the merge then keeps only one, the run **says so and writes anyway** — the same normalization is what keeps TARGET comparable to BASE, so refusing would strand the run rather than protect it. An array config-graft does not manage is copied through untouched and never trips it.
+- An XML run **refuses** (exit 1, target untouched) when it would *introduce* a string or key holding a character an XML plist cannot carry at all: a C0 control other than tab, newline or carriage return — such as the ESC `0x1B` separators in `NSUserKeyEquivalents`. macOS tolerates those bytes, so writing them would produce a file that loads on macOS and is invalid everywhere else. A value the file already holds is passed through untouched rather than refused, so a run that changes nothing never fails on a file macOS itself wrote — but that leaves a file no conforming parser accepts, so each one is reported on stderr. This applies only when the target is already XML; rewriting a **binary** plist as XML writes every byte afresh, so an unrepresentable value there is refused. A carriage return is written as `&#13;`, which XML's line-ending normalization leaves alone, so it survives.
+- `--plist-binary` sidesteps all of that: nothing is floored and no byte is out of reach, so values pass through as they stand.
 - plist has no `null`. `--indent` is exposed only by the `json` subcommand.
 
 YAML notes:
@@ -96,7 +104,11 @@ The flake exposes:
 - `nixosModules.default` / `darwinModules.default`: `environment.managed*`, absolute targets, reconciled during system activation.
 - `overlays.default`: optional. It adds the `config-graft` CLI to `pkgs`; the modules don't need it, since they run the flake's own build by store path.
 
-Each byte-format entry takes `settings` (freeform data) or a pre-built `source` file (any generator, template, or derivation); an entry with neither is inert. Freeform formats accept a `format` override, any `pkgs.formats`-style generator, for a validating or specially configured type. `package` overrides the config-graft build for one entry. Plist entries accept `cfprefsdDomain` to reconcile through `cfprefsd` (`defaults`/`plutil`) instead of editing the file; that path is macOS only (asserted at build time), per-user under home-manager and system/global under nix-darwin. Plist entries also accept `binary = true`, which generates a **binary** DESIRED (via `libplist` at build time) and reconciles with `--plist-binary`, so values XML cannot represent — a string with a byte illegal in XML 1.0, e.g. the ESC `0x1B` separators in `NSUserKeyEquivalents` — round-trip instead of corrupting the DESIRED.
+Each byte-format entry takes `settings` (freeform data) or a pre-built `source` file (any generator, template, or derivation); an entry with neither is inert. Freeform formats accept a `format` override, any `pkgs.formats`-style generator, for a validating or specially configured type. `package` overrides the config-graft build for one entry. Plist entries take two more options.
+
+`cfprefsdDomain` reconciles through `cfprefsd` (`defaults`/`plutil`) instead of editing the file — macOS only, asserted at build time, per-user under home-manager and system/global under nix-darwin. That path always writes its scratch snapshot as a **binary** plist, since `defaults export` hands over binary and `defaults import` reads it back, so nothing a domain holds is squeezed through XML on the way.
+
+`binary` covers both ends of a plain file target: it generates a **binary** DESIRED (by running the entry's `format` generator and converting the output with `libplist` at build time) *and* reconciles with `--plist-binary`. Values XML cannot represent — a string holding a byte XML 1.0 forbids, such as the ESC `0x1B` separators in `NSUserKeyEquivalents` — therefore survive on a file target too. It defaults to `true` for a `cfprefsdDomain` entry, whose round-trip is already binary at both ends, and to `false` otherwise; set it explicitly to override either way. If `settings` holds such a byte while `binary` is false, a build-time assertion says so rather than letting the reconcile refuse at activation.
 
 `managedDirectory` is the `directory` subcommand wrapper: each entry reconciles a `source` directory *tree* into `target`, keeping app-created files and pruning files dropped from `source`. It takes `manageRoot`, `noOwner` (set it on a non-root home-manager activation — a store-built source is root-owned), and `xattrs` (`all`/`safe`/`none`) in place of `settings`.
 

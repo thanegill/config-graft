@@ -5,6 +5,7 @@
 //! is reconciled and pruned as a whole, never element-by-element.
 
 use crate::value::{Leaf, Node};
+use crate::warning::Warning;
 use clap::ValueEnum;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
@@ -24,19 +25,38 @@ pub type NodeList<L> = Vec<Node<L>>;
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct KeyPath(Vec<String>);
 
+/// Escape anything unprintable, so rendering a path cannot emit a control byte into
+/// the reader's terminal. Only *rendering* escapes: a segment stays the real key, or
+/// a path built for display could no longer be looked up.
+pub(crate) fn escape_unprintable(segment: &str) -> String {
+    if !segment.chars().any(|c| c < '\u{20}' || c == '\u{7f}') {
+        return segment.to_string();
+    }
+    segment
+        .chars()
+        .map(|c| {
+            if c < '\u{20}' || c == '\u{7f}' {
+                format!("\\u{{{:x}}}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 impl KeyPath {
     /// An empty path (the document root).
-    fn new() -> KeyPath {
+    pub(crate) fn new() -> KeyPath {
         KeyPath(Vec::new())
     }
 
     /// Append a key segment.
-    fn push(&mut self, seg: String) {
+    pub(crate) fn push(&mut self, seg: String) {
         self.0.push(seg);
     }
 
     /// Drop the last key segment.
-    fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.0.pop();
     }
 
@@ -64,7 +84,7 @@ impl KeyPath {
             if i > 0 && !seg.starts_with('[') {
                 out.push_str(sep);
             }
-            out.push_str(seg);
+            out.push_str(&escape_unprintable(seg));
         }
         out
     }
@@ -133,28 +153,18 @@ pub struct Options {
     pub merge_keys: MergeKeys,
 }
 
-/// A `merge` array conflict: at `path`, TARGET and DESIRED reordered `elements`
-/// contradictorily (a cross-over move). The reconcile still resolves the order
-/// deterministically; this records where and what so a caller can surface it.
-pub struct Conflict<L: Leaf> {
-    /// The object path of the conflicted array.
-    pub path: KeyPath,
-    /// The elements caught in the contradictory reorder (in membership order).
-    pub elements: NodeList<L>,
-}
-
 /// Reconcile DESIRED into a clone of TARGET, using BASE as the merge ancestor.
-/// Returns the reconciled value plus any [`Conflict`]s where the `merge` strategy
-/// hit a contradictory cross-over reorder (TARGET and DESIRED order the same
-/// elements oppositely) that the tie-break had to resolve arbitrarily. The result
-/// is still deterministic; the conflicts let a caller surface that the order was
-/// resolved, not agreed.
+/// Returns the reconciled value plus any [`Warning`]s the run produced -- where the
+/// `merge` strategy hit a contradictory cross-over reorder that the tie-break had
+/// to resolve arbitrarily, and where an array held one identity twice so only the
+/// first occurrence could survive. The result is still deterministic; the warnings
+/// let a caller surface what was resolved or dropped rather than agreed or kept.
 pub fn reconcile<L: Leaf>(
     target: &Node<L>,
     desired: &Node<L>,
     base: Option<&Node<L>>,
     opts: &Options,
-) -> (Node<L>, Vec<Conflict<L>>) {
+) -> (Node<L>, Vec<Warning<L>>) {
     let mut result = match target {
         Node::Map(..) => target.clone(),
         _ => Node::empty_map(),
@@ -183,9 +193,9 @@ pub fn reconcile<L: Leaf>(
 
     // 4: deep-merge DESIRED (DESIRED wins leaf conflicts). BASE is threaded
     // alongside so the three-way `Merge` array strategy can see it. Array
-    // conflicts bubble up as `deep_merge`'s return, gaining a path segment at each
-    // level, so a location is built only for the (rare) conflicts.
-    let conflicts = deep_merge(&mut result, desired, base, opts, &mut KeyPath::new());
+    // warnings bubble up as `deep_merge`'s return, gaining a path segment at each
+    // level, so a location is built only for the (rare) warnings.
+    let warnings = deep_merge(&mut result, desired, base, opts, &mut KeyPath::new());
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
@@ -205,7 +215,7 @@ pub fn reconcile<L: Leaf>(
         }
     }
 
-    (result, conflicts)
+    (result, warnings)
 }
 
 impl<L: Leaf> Node<L> {
@@ -281,9 +291,9 @@ fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
 /// concat / set-union / three-way merge); every other case -- scalars, type
 /// changes, array-vs-non-array -- is replaced wholesale by `desired`.
 ///
-/// Returns any `merge` [`Conflict`]s found, each with a path *relative to*
-/// `target`. Callers prepend their own key as the conflicts bubble up, so a
-/// location is built only for the (rare) conflicts, never for clean subtrees.
+/// Returns any [`Warning`]s found, each with a path *relative to*
+/// `target`. Callers prepend their own key as the warnings bubble up, so a
+/// location is built only for the (rare) warnings, never for clean subtrees.
 ///
 /// `path` is this node's full object-key path from the reconcile root (the Map arm
 /// pushes each key as it descends, and pops after); the array engine uses it to
@@ -294,11 +304,11 @@ pub fn deep_merge<L: Leaf>(
     base: Option<&Node<L>>,
     opts: &Options,
     path: &mut KeyPath,
-) -> Vec<Conflict<L>> {
+) -> Vec<Warning<L>> {
     match desired {
         Node::Map(d) => {
             if let Node::Map(t) = target {
-                let mut conflicts = Vec::new();
+                let mut warnings = Vec::new();
                 for (k, dv) in d {
                     let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
                     if let Some(tv) = t.get_mut(k) {
@@ -306,30 +316,36 @@ pub fn deep_merge<L: Leaf>(
                         let sub = deep_merge(tv, dv, bv, opts, path);
                         path.pop();
                         for mut c in sub {
-                            c.path.prepend(k.clone());
-                            conflicts.push(c);
+                            c.path_mut().prepend(k.clone());
+                            warnings.push(c);
                         }
                     } else {
                         t.insert(k.clone(), dv.clone());
                     }
                 }
-                return conflicts;
+                return warnings;
             }
         }
         Node::Array(d) => {
             if let Node::Array(t) = target {
-                let (combined, conflicts) = arrays::combine(t, d, base, opts, path);
+                let (combined, warnings) = arrays::combine(t, d, base, opts, path);
                 *t = combined;
-                // Conflicts arrive with paths relative to this array (empty for a
-                // reorder of the array itself, a `[field=value]` selector + subpath
-                // for one nested in a keyed record); the Map arm above prepends this
-                // array's own key as they bubble further up.
-                return conflicts;
+                // Warnings arrive with paths relative to this array (empty for the
+                // array itself, a `[field=value]` selector + subpath for one nested
+                // in a keyed record); the Map arm above prepends this array's own
+                // key as they bubble further up.
+                return warnings;
             }
         }
         _ => {}
     }
-    *target = desired.clone();
+    // Only overwrite when the value actually differs. Two values can be equal and
+    // still spelled differently -- a JSON `2.5` and `2.50` are one number -- and
+    // replacing one with the other would rewrite the file for no change the diff
+    // can show, so `--diff` and `--check` would disagree.
+    if target != desired {
+        *target = desired.clone();
+    }
     Vec::new()
 }
 
@@ -338,17 +354,20 @@ mod tests {
     use super::*;
     use crate::format::json::JsonLeaf;
     use crate::format::{Json, ValueCodec};
+    use json_syntax::{Parse, Print};
     use serde_json::{json, Value};
 
-    /// JSON value → `Node` (the JSON codec), so the tests can keep expressing
-    /// inputs and expectations as readable `json!(...)` literals.
+    /// JSON value → `Node`, so the tests can keep expressing inputs and
+    /// expectations as readable `json!(...)` literals. Routed through the codec's
+    /// own value type by text, which is also what the engine sees at runtime.
     fn n(v: Value) -> Node<JsonLeaf> {
-        Json::decode(&v).unwrap()
+        let text = v.to_string();
+        Json::decode(&json_syntax::Value::parse_str(&text).unwrap().0).unwrap()
     }
 
     /// `Node` → JSON value, for comparing results against `json!(...)`.
     fn j(node: &Node<JsonLeaf>) -> Value {
-        Json::encode(node)
+        serde_json::from_str(&Json::encode(node).compact_print().to_string()).unwrap()
     }
 
     fn reconciled(t: Value, d: Value, b: Option<Value>, prune: bool) -> Value {
@@ -1110,7 +1129,7 @@ mod tests {
                 merge_keys: MergeKeys::default(),
             },
         );
-        conflicts.iter().map(|c| c.path.render(".")).collect()
+        conflicts.iter().map(|c| c.path().render(".")).collect()
     }
 
     fn keyed_conflict_paths(
@@ -1132,7 +1151,119 @@ mod tests {
                 },
             },
         );
-        conflicts.iter().map(|c| c.path.render(".")).collect()
+        conflicts.iter().map(|c| c.path().render(".")).collect()
+    }
+
+    // ----- duplicate collapse -----
+
+    /// Every warning a reconcile produced, rendered with `.` separators.
+    fn warnings_of(t: Value, d: Value, arrays: ArrayStrategy, global_keys: &[&str]) -> Vec<String> {
+        let (_result, warnings) = reconcile(
+            &n(t),
+            &n(d),
+            None,
+            &Options {
+                prune: true,
+                arrays,
+                merge_keys: MergeKeys {
+                    global: global_keys.iter().map(|s| s.to_string()).collect(),
+                    scoped: HashMap::new(),
+                },
+            },
+        );
+        warnings.iter().map(|w| w.render(".")).collect()
+    }
+
+    #[test]
+    fn merge_warns_when_target_repeats_an_element() {
+        let warnings = warnings_of(
+            json!({"l": ["a", "a", "b"]}),
+            json!({"l": ["b"]}),
+            ArrayStrategy::Merge,
+            &[],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in TARGET holds \"a\" 2 times"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn merge_warns_when_desired_repeats_an_element() {
+        let warnings = warnings_of(
+            json!({"l": ["b"]}),
+            json!({"l": ["a", "a"]}),
+            ArrayStrategy::Merge,
+            &[],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in DESIRED holds \"a\" 2 times"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn merge_does_not_warn_when_the_two_sides_share_an_element() {
+        // The same value on both sides is the union working, not a collapse.
+        assert!(warnings_of(
+            json!({"l": ["a", "b"]}),
+            json!({"l": ["a"]}),
+            ArrayStrategy::Merge,
+            &[],
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn keyed_merge_warns_when_one_side_repeats_a_key() {
+        // Two records with the same key: only the first survives, so the second
+        // record's fields are dropped entirely.
+        let warnings = warnings_of(
+            json!({"l": [{"id": "a", "v": 1}, {"id": "a", "v": 2}]}),
+            json!({"l": [{"id": "a", "v": 3}]}),
+            ArrayStrategy::Merge,
+            &["id"],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in TARGET holds [id=\"a\"] 2 times"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn set_warns_when_desired_repeats_an_element_but_not_across_sides() {
+        // A DESIRED repeat collapses; a DESIRED element equal to a TARGET one is
+        // the union working as asked.
+        let warnings = warnings_of(
+            json!({"l": ["a"]}),
+            json!({"l": ["a", "b", "b"]}),
+            ArrayStrategy::Set,
+            &[],
+        );
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("array `l` in DESIRED holds \"b\" 2 times"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn concat_does_not_warn_about_duplicates() {
+        // `concat` keeps duplicates, so nothing is collapsed and nothing to say.
+        assert!(warnings_of(
+            json!({"l": ["a", "a"]}),
+            json!({"l": ["a"]}),
+            ArrayStrategy::Concat,
+            &[],
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1159,10 +1290,13 @@ mod tests {
             },
         );
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(
-            j(&Node::Array(conflicts[0].elements.clone())),
-            json!(["x", "y"])
-        );
+        let Warning::ContradictoryReorder { elements, .. } = &conflicts[0] else {
+            panic!(
+                "expected a contradictory-reorder warning, got: {}",
+                conflicts[0].render(".")
+            );
+        };
+        assert_eq!(j(&Node::Array(elements.clone())), json!(["x", "y"]));
     }
 
     #[test]

@@ -15,11 +15,16 @@ in
   inherit safeName;
 
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
-  # generated from `settings` by the entry's `pkgs.formats` generator. plist entries
-  # with `binary = true` bypass the (XML-only) generator: they render `settings` to
-  # JSON and convert to a binary plist with libplist's `plistutil`, so values illegal
-  # in XML 1.0 (e.g. the ESC 0x1B separators in `NSUserKeyEquivalents`) round-trip.
-  # `-s` sorts keys for byte-stable output; key order is irrelevant to reconcile.
+  # generated from `settings` by the entry's `pkgs.formats` generator. A plist entry
+  # with `binary = true` runs that same generator and converts its output to a binary
+  # plist with libplist's `plistutil`, so the entry's `format` override still decides
+  # how `settings` is serialized. `-s` sorts keys for byte-stable output; key order is
+  # irrelevant to reconcile.
+  #
+  # The intermediate is XML holding raw bytes that XML 1.0 forbids (the ESC 0x1B
+  # separators in `NSUserKeyEquivalents`), which `plistutil` accepts. It exists only
+  # inside this build and is consumed immediately, so a stricter parser some day
+  # fails the build loudly rather than corrupting a DESIRED at activation time.
   mkDesired =
     {
       lib,
@@ -28,16 +33,17 @@ in
       name,
       entry,
     }:
+    let
+      generated = entry.format.generate "managed-${format.name}-${safeName name}" entry.settings;
+    in
     if entry.source != null then
       entry.source
     else if format.name == "plist" && entry.binary then
       pkgs.runCommand "managed-plist-${safeName name}" { nativeBuildInputs = [ pkgs.libplist ]; } ''
-        ${lib.getExe pkgs.libplist} -f bin -s \
-          -i ${pkgs.writeText "managed-plist-${safeName name}.json" (builtins.toJSON entry.settings)} \
-          -o $out
+        ${lib.getExe pkgs.libplist} -f bin -s -i ${generated} -o $out
       ''
     else
-      entry.format.generate "managed-${format.name}-${safeName name}" entry.settings;
+      generated;
 
   # The `attrsOf submodule` type for one format's entries. Every option is the same
   # on every platform except `target` (relative vs absolute) and the `cfprefsdDomain`
@@ -115,14 +121,25 @@ in
 
             binary = mkOption {
               type = types.bool;
-              default = false;
+              default = config.cfprefsdDomain != null;
+              defaultText = literalExpression "config.cfprefsdDomain != null";
               description = ''
                 Generate the plist DESIRED as a binary plist and reconcile with
                 `--plist-binary`, so values XML cannot represent (bytes illegal in
                 XML 1.0, e.g. the ESC 0x1B separators in `NSUserKeyEquivalents`)
-                round-trip. When generated from {option}`settings` this uses
-                `pkgs.libplist` at build time; with {option}`source` it only forces
-                the binary write.
+                round-trip. When generated from {option}`settings` this runs the
+                entry's {option}`format` generator and converts its output with
+                `pkgs.libplist` at build time, so a {option}`format` override still
+                applies; with {option}`source` it only forces the binary write.
+
+                Defaults to `true` for a {option}`cfprefsdDomain` entry, whose whole
+                round-trip is binary anyway ({command}`defaults export` produces a
+                binary plist and {command}`defaults import` reads one back), so
+                nothing a domain holds is squeezed through XML. Setting it to
+                `false` builds that entry's DESIRED as XML again, which is fine for
+                ordinary values but cannot carry a byte XML 1.0 forbids -- the write
+                to cfprefsd stays binary either way, so `false` narrows what the
+                DESIRED can express without widening anything.
               '';
             };
           };
@@ -149,12 +166,6 @@ in
       desired,
       target,
     }:
-    let
-      # plist-only `binary` (the option exists only for plist), so guard the lookup.
-      binaryFlag = lib.optionalString (
-        format.name == "plist" && (entry.binary or false)
-      ) " --plist-binary";
-    in
     if format.name == "plist" && entry.cfprefsdDomain != null then
       ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
@@ -168,8 +179,10 @@ in
         [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
 
         # Graft our settings into the live state, then push it back through cfprefsd
-        # so it adopts the merged result.
-        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev"${binaryFlag}
+        # so it adopts the merged result. `--plist-binary` is unconditional here (not
+        # `binary`-gated): routing this scratch file through XML would drop
+        # XML-illegal bytes and sub-second dates that both `defaults` ends carry.
+        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-binary
         run /usr/bin/defaults import "$_domain" "$_live"
         rm -f "$_live"
       ''
@@ -177,7 +190,9 @@ in
       ''
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
-        run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${binaryFlag}
+        run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${
+          lib.optionalString (format.name == "plist" && entry.binary) " --plist-binary"
+        }
       '';
 
   # Directory-format entry type. Unlike the byte formats there is no `settings`
@@ -292,15 +307,58 @@ in
       active,
     }:
     lib.optionals (format.name == "plist") (
-      lib.mapAttrsToList (name: entry: {
-        assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
-        message = ''
-          ${parent}.${format.optionName}."${name}".cfprefsdDomain is set,
-          but cfprefsd, defaults, and plutil exist only on macOS (this
-          configuration targets ${pkgs.stdenv.hostPlatform.system}). Unset it to
-          edit the plist file in place instead.
-        '';
-      }) active
+      let
+        # Whether any string in `value` -- keys included -- holds a character an XML
+        # plist cannot carry. Tested on the JSON rendering, where exactly those
+        # characters survive as an escape: `builtins.toJSON` writes the C0 controls
+        # as `\uXXXX`, `\b` or `\f`, and the three XML keeps (tab, newline, carriage
+        # return) as `\t`/`\n`/`\r`. `\r` is off the list because the writer emits a
+        # CR as the character reference `&#13;`. Escaped backslashes are dropped
+        # first, so a value holding the literal text `\u001b` is not mistaken for a
+        # control byte. Nix has no character-class regex, hence the substring test.
+        hasXmlIllegalByte =
+          value:
+          let
+            escapes = builtins.replaceStrings [ "\\\\" ] [ "" ] (builtins.toJSON value);
+          in
+          lib.any (needle: lib.hasInfix needle escapes) [
+            "\\u00"
+            "\\b"
+            "\\f"
+            # The two non-characters the writer also refuses. `builtins.toJSON`
+            # emits these raw rather than as an escape, so they are matched as
+            # themselves.
+            (builtins.fromJSON ''"\uFFFE"'')
+            (builtins.fromJSON ''"\uFFFF"'')
+          ];
+      in
+      lib.concatLists (
+        lib.mapAttrsToList (name: entry: [
+          {
+            assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
+            message = ''
+              ${parent}.${format.optionName}."${name}".cfprefsdDomain is set,
+              but cfprefsd, defaults, and plutil exist only on macOS (this
+              configuration targets ${pkgs.stdenv.hostPlatform.system}). Unset it to
+              edit the plist file in place instead.
+            '';
+          }
+          {
+            # An XML DESIRED cannot carry such a character, and the reconcile refuses
+            # that write rather than emitting a file only macOS can read. Catch it at
+            # build time instead of at activation.
+            assertion = entry.binary || entry.source != null || !(hasXmlIllegalByte entry.settings);
+            message = ''
+              ${parent}.${format.optionName}."${name}" has `settings` holding a
+              character an XML plist cannot carry (a C0 control other than tab,
+              newline or carriage return -- e.g. the ESC 0x1B separators in
+              `NSUserKeyEquivalents`), but `binary` is false, so its DESIRED would be
+              generated as XML and the reconcile would refuse the write. Set
+              `binary = true` on this entry.
+            '';
+          }
+        ]) active
+      )
     )
     ++ lib.mapAttrsToList (name: entry: {
       assertion = !(entry.settings != { } && entry.source != null);

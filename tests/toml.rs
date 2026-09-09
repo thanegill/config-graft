@@ -321,3 +321,37 @@ fn no_prune_keeps_dropped_keys() {
     assert_eq!(d["a"].as_integer(), Some(1));
     assert_eq!(d["b"].as_integer(), Some(2));
 }
+
+#[test]
+fn an_empty_desired_prunes_managed_keys_rather_than_failing() {
+    // TOML's empty document is a valid empty table, so an empty DESIRED is how a
+    // caller unmanages everything.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.toml");
+    let desired = dir.path().join("desired.toml");
+    let base = dir.path().join("base.toml");
+
+    fs::write(&target, "managed = \"old\"\nuser = \"keep\"\n").unwrap();
+    fs::write(&base, "managed = \"old\"\n").unwrap();
+    fs::write(&desired, "   \n").unwrap();
+
+    let out = run(&[
+        "toml",
+        "--base",
+        base.to_str().unwrap(),
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "an empty DESIRED was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let written = fs::read_to_string(&target).unwrap();
+    assert!(
+        !written.contains("managed"),
+        "managed key not pruned: {written}"
+    );
+    assert!(written.contains("user"), "user key was lost: {written}");
+}

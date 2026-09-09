@@ -1,6 +1,7 @@
 //! Typed errors and the process outcome, replacing stringly-typed results and
 //! magic exit codes.
 
+use crate::format::FormatKind;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -11,14 +12,6 @@ use std::path::{Path, PathBuf};
 /// mapping) rather than a generic catch-all.
 #[derive(Debug)]
 pub enum Error {
-    /// DESIRED did not parse as JSON.
-    InvalidJson(PathBuf),
-    /// DESIRED did not parse as a plist.
-    InvalidPlist(PathBuf),
-    /// DESIRED did not parse as YAML.
-    InvalidYaml(PathBuf),
-    /// DESIRED did not parse as TOML.
-    InvalidToml(PathBuf),
     /// DESIRED parsed but its root is not a JSON object.
     NotJsonObject(PathBuf),
     /// DESIRED parsed but its root is not a plist dictionary.
@@ -42,8 +35,29 @@ pub enum Error {
     },
     /// Writing the reconciled output to stdout (`--stdout`) failed.
     StdoutWrite(std::io::Error),
+    /// A file exists at `path` but does not parse as its format, or parses as
+    /// something that is not this format's mapping type. Distinct from "absent":
+    /// an absent TARGET is legitimately reconciled as empty, but treating an
+    /// unreadable one that way would replace a file full of app-owned data with
+    /// DESIRED alone.
+    Unreadable { path: PathBuf, kind: FormatKind },
+    /// DESIRED is absent or empty, as opposed to present and unparseable.
+    DesiredAbsent { path: PathBuf, kind: FormatKind },
+    /// DESIRED exists but could not be parsed.
+    UnreadableDesired { path: PathBuf, kind: FormatKind },
+    /// TARGET parsed, but its root is not this format's mapping shape.
+    TargetNotMapping { path: PathBuf, kind: FormatKind },
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
+    /// A value at `path` holds a character XML 1.0 cannot represent, so writing
+    /// the target as XML would produce a file no conforming parser can read. The
+    /// write is refused; `--plist-binary` carries the value as-is.
+    PlistXmlUnrepresentable { path: String, character: char },
+    /// A date at `path` is so far from the epoch that flooring it overflows, so
+    /// the XML this run would write cannot hold it. Unreachable through the plist
+    /// parsers; refused rather than emitted as the fractional date an XML parser
+    /// rejects.
+    PlistDateOutOfRange { path: String },
     /// The YAML target can't be edited while preserving comments without risking
     /// corruption, so the write was refused.
     YamlUnsafe,
@@ -107,10 +121,6 @@ const TOML_UNSAFE: &str = "cannot safely edit this TOML while preserving comment
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidJson(p) => write!(f, "DESIRED is not valid JSON: {}", p.display()),
-            Error::InvalidPlist(p) => write!(f, "DESIRED is not valid plist: {}", p.display()),
-            Error::InvalidYaml(p) => write!(f, "DESIRED is not valid YAML: {}", p.display()),
-            Error::InvalidToml(p) => write!(f, "DESIRED is not valid TOML: {}", p.display()),
             Error::NotJsonObject(p) => write!(f, "DESIRED must be a JSON object: {}", p.display()),
             Error::NotPlistDictionary(p) => {
                 write!(f, "DESIRED must be a plist dictionary: {}", p.display())
@@ -124,7 +134,46 @@ impl fmt::Display for Error {
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
             Error::StdoutWrite(e) => write!(f, "writing to stdout: {e}"),
+            Error::Unreadable { path, kind } => write!(
+                f,
+                "{} exists but is not valid {}; refusing to treat it as empty, which \
+                 would replace it with DESIRED. Fix or remove the file.",
+                path.display(),
+                kind.name()
+            ),
+            Error::DesiredAbsent { path, kind } => write!(
+                f,
+                "DESIRED at {} does not exist or is empty, so there is no {} to \
+                 reconcile toward.",
+                path.display(),
+                kind.name()
+            ),
+            Error::UnreadableDesired { path, kind } => write!(
+                f,
+                "DESIRED at {} is not valid {}; nothing was written.",
+                path.display(),
+                kind.name()
+            ),
+            Error::TargetNotMapping { path, kind } => write!(
+                f,
+                "{} is valid {} but its root is not {}; refusing, because there is \
+                 nothing to merge the managed keys into.",
+                path.display(),
+                kind.name(),
+                kind.mapping_name()
+            ),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
+            Error::PlistXmlUnrepresentable { path, character } => write!(
+                f,
+                "`{path}` contains U+{:04X}, which XML 1.0 cannot represent at all, \
+                 so this run cannot write XML; pass --plist-binary to keep the value",
+                *character as u32
+            ),
+            Error::PlistDateOutOfRange { path } => write!(
+                f,
+                "the date at `{path}` falls outside the years an XML plist can \
+                 spell (0 to 9999); pass --plist-binary to write it unchanged"
+            ),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
             Error::TomlUnsafe => f.write_str(TOML_UNSAFE),
             Error::UnsupportedFileType(p) => write!(

@@ -14,7 +14,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
+use crate::warning::Warning;
 
 pub(crate) mod directory;
 pub(crate) mod json;
@@ -44,15 +46,25 @@ pub enum FormatKind {
 }
 
 impl FormatKind {
-    /// The format-specific error for DESIRED failing to parse.
-    pub fn invalid_desired(self, path: PathBuf) -> Error {
+    /// The format's name, for diagnostics that are not per-format errors.
+    pub fn name(self) -> &'static str {
         match self {
-            FormatKind::Json => Error::InvalidJson(path),
-            FormatKind::Plist => Error::InvalidPlist(path),
-            FormatKind::Yaml => Error::InvalidYaml(path),
-            FormatKind::Toml => Error::InvalidToml(path),
-            // DESIRED "doesn't parse as a directory" == it isn't one.
-            FormatKind::Directory => Error::NotDirectory(path),
+            FormatKind::Json => "JSON",
+            FormatKind::Plist => "plist",
+            FormatKind::Yaml => "YAML",
+            FormatKind::Toml => "TOML",
+            FormatKind::Directory => "a directory",
+        }
+    }
+
+    /// What this format calls its root mapping, for diagnostics.
+    pub fn mapping_name(self) -> &'static str {
+        match self {
+            FormatKind::Json => "an object",
+            FormatKind::Plist => "a dictionary",
+            FormatKind::Yaml => "a mapping",
+            FormatKind::Toml => "a table",
+            FormatKind::Directory => "a directory",
         }
     }
 
@@ -82,6 +94,29 @@ pub trait Format: ValueCodec {
     const PATH_SEP: &'static str;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
+    /// Refuse a write whose output encoding cannot carry what the run *introduces*.
+    /// A value `target` already holds is passed through, or refusing it would fail
+    /// every run against a file the app itself wrote. `current` is needed too: a
+    /// value counts as already there only in the encoding being written.
+    fn refuse_on_write(
+        _result: &Node<Self::Leaf>,
+        _target: &Node<Self::Leaf>,
+        _current: &[u8],
+        _opts: WriteOpts,
+    ) -> Result<Vec<Warning<Self::Leaf>>, Error> {
+        Ok(Vec::new())
+    }
+    /// Reduce a freshly parsed node to the precision this run's output encoding
+    /// can actually hold. Applied to **every** input (TARGET, DESIRED, BASE), so
+    /// the prune comparison, `--diff` and the change check all see the values that
+    /// will land on disk rather than three different precisions. `None` means
+    /// nothing needed changing, so the caller keeps the node it already has.
+    fn normalize_for_run(
+        _node: &Node<Self::Leaf>,
+        _opts: WriteOpts,
+    ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
+        Ok(None)
+    }
     /// Serialize `node` to bytes. `current` is the target's existing on-disk bytes
     /// (used by YAML to preserve comments; ignored by JSON/plist). Output is bytes
     /// (not text) so plist can write binary. See [`WriteOpts`] for per-format prefs.
@@ -90,6 +125,32 @@ pub trait Format: ValueCodec {
         current: &[u8],
         opts: WriteOpts,
     ) -> Result<Vec<u8>, Error>;
+}
+
+/// A normalized copy of one input, produced only when there was something to
+/// change -- the caller keeps the original otherwise, so a format that normalizes
+/// nothing costs no allocation and the default folds away.
+pub struct Normalization<L: Leaf> {
+    pub node: Node<L>,
+    pub rewritten: Vec<Normalized<L>>,
+}
+
+/// One array element that [`Format::normalize_for_run`] rewrote: `original` is what
+/// the file held, `value` what the run will use. Two elements that shared a `value`
+/// but not an `original` can no longer both survive, since array membership is a
+/// set -- but whether that actually loses anything depends on the array strategy and
+/// on whether the array is managed at all, which only the run knows. So
+/// normalization reports what it rewrote and
+/// [`crate::backend::Backend::run`] decides. `because` completes the refusal message
+/// with the format's way out.
+pub struct Normalized<L: Leaf> {
+    pub path: KeyPath,
+    pub original: Node<L>,
+    pub value: Node<L>,
+    /// Why the value could not be carried as it stood, completing both the
+    /// warning ("... was read as X because <because>") and, when the conflation
+    /// costs something, the refusal.
+    pub because: &'static str,
 }
 
 /// Output preferences threaded to [`Format::serialize`]. Each field is honored by
@@ -107,7 +168,7 @@ pub struct WriteOpts {
 /// Each format declares its own leaf type (`Leaf`), so a JSON node can't hold a
 /// plist `Date` and the encoders are total (no `unreachable!()`). `Value<'a>` is a
 /// GAT so saphyr's borrowed `Yaml<'a>` fits the same trait as the owning
-/// `serde_json::Value`/`plist::Value`.
+/// `json_syntax::Value`/`plist::Value`.
 pub trait ValueCodec {
     type Leaf: Leaf;
     type Value<'a>;
@@ -125,30 +186,47 @@ pub enum Indent {
     Tab,
 }
 
-impl Indent {
-    /// The indentation unit as bytes, for the JSON pretty-printer.
-    pub fn to_bytes(self) -> Vec<u8> {
-        match self {
-            Indent::Spaces(n) => vec![b' '; n],
-            Indent::Tab => b"\t".to_vec(),
-        }
-    }
-}
-
 /// Parse a `--indent` value: a non-negative number of spaces, or `tab`. Used as a
 /// clap value parser, so an invalid value is a usage error (exit 2).
 pub fn parse_indent(spec: &str) -> Result<Indent, String> {
     if spec == "tab" {
         return Ok(Indent::Tab);
     }
-    spec.parse()
-        .map(Indent::Spaces)
-        .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))
+    let spaces: usize = spec
+        .parse()
+        .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))?;
+    // The JSON writer takes a `u8`, and silently emitting a different shape than
+    // the one asked for is worse than refusing the width.
+    if spaces > usize::from(u8::MAX) {
+        return Err(format!("indent must be at most {}, got {spaces}", u8::MAX));
+    }
+    Ok(Indent::Spaces(spaces))
 }
 
-/// Read and parse `path` with format `F`. Returns `None` if the file is missing or
-/// does not parse as that format. Keeps file I/O out of the [`Format`] trait.
-pub fn read_file<F: Format>(path: &Path) -> Option<Node<F::Leaf>> {
-    let bytes = std::fs::read(path).ok()?;
-    F::parse(&bytes)
+/// Read and parse `path` with format `F`. `Ok(None)` means the file is not there
+/// (or is empty, which is how a caller stages a first apply); an `Err` means it is
+/// there and could not be understood. Keeping those apart matters: the run treats
+/// an absent TARGET as `{}`, which is right for a first apply and destructive for a
+/// file that merely failed to parse.
+pub fn read_file<F: Format>(path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::Read {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    match F::parse(&bytes) {
+        Some(node) => Ok(Some(node)),
+        // Checked only after parsing fails, so a format whose empty document is
+        // meaningful (TOML's empty table) still parses it.
+        None if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
+        None => Err(Error::Unreadable {
+            path: path.to_path_buf(),
+            kind: F::KIND,
+        }),
+    }
 }

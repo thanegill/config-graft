@@ -356,20 +356,838 @@ fn merge_key_scoped_path_uses_the_plist_separator() {
     assert_eq!(read_plist(&target), doc("new"));
 }
 
+/// A date carrying a sub-second component -- what a domain snapshotted with
+/// `defaults export` (a binary plist, dates as `f64` seconds since 2001) yields.
+fn fractional_date() -> plist::Value {
+    plist::Value::Date(plist::Date::from(
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(1_000_000, 500_000_000),
+    ))
+}
+
 #[test]
-fn a_carriage_return_survives_an_xml_write() {
-    // XML 1.0 section 2.11 has a conforming parser normalize a *literal* CR to LF,
-    // so writing one changes the value. `&#13;` is exempt from that normalization.
-    // Before plist 1.10 the writer emitted the byte raw and this read back as a
-    // line feed.
+fn xml_write_emits_whole_second_dates_cfpropertylist_can_parse() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
 
-    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
-    pdict(vec![("note", plist::Value::String("line1\rline2".into()))])
+    // The app owns the date; config-graft only passes it through. A *binary*
+    // target is the real trigger -- CFPropertyList could never have produced an
+    // XML plist carrying a fraction, so only the binary side can hand us one.
+    pdict(vec![("SULastCheckTime", fractional_date()), ("a", pint(1))])
+        .to_file_binary(&target)
+        .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+
+    let written = fs::read_to_string(&target).unwrap();
+    assert!(
+        written.contains("<date>1970-01-12T13:46:40Z</date>"),
+        "expected a whole-second date, got:\n{written}"
+    );
+    // Reshaping a value config-graft only passes through is not done silently.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(
+            "`SULastCheckTime` in TARGET: <date 1970-01-12T13:46:40.5Z> \
+                      was read as <date 1970-01-12T13:46:40Z>"
+        ),
+        "stderr was: {err}"
+    );
+    assert!(err.contains("--plist-binary"), "stderr was: {err}");
+
+    // Re-applying is a no-op: the truncated date is already what we would write.
+    let before = fs::read(&target).unwrap();
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+/// Write a binary plist carrying a sub-second date, as `defaults export` does.
+fn write_fractional_binary(path: &std::path::Path, extra: Vec<(&str, plist::Value)>) {
+    let mut pairs = vec![("k", fractional_date())];
+    pairs.extend(extra);
+    pdict(pairs).to_file_binary(path).unwrap();
+}
+
+#[test]
+fn a_managed_date_key_is_prunable_after_an_xml_write() {
+    // Flooring must not desync TARGET from BASE: pruning only fires when the live
+    // value still equals BASE's, so a date floored on write but fractional in BASE
+    // would strand the key in the user's file forever.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let base = dir.path().join("base.plist");
+
+    write_fractional_binary(&desired, vec![("a", pint(1))]);
+    write_fractional_binary(&base, vec![("a", pint(1))]);
+    pdict(vec![]).to_file_xml(&target).unwrap();
+
+    // First apply lands the managed date.
+    assert!(
+        run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(read_plist(&target)
+        .as_dictionary()
+        .unwrap()
+        .contains_key("k"));
+
+    // Drop `k` from DESIRED; with BASE still holding it, it must be pruned.
+    pdict(vec![("a", pint(1))]).to_file_xml(&desired).unwrap();
+    let out = run(&[
+        "plist",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let after = read_plist(&target);
+    assert!(
+        !after.as_dictionary().unwrap().contains_key("k"),
+        "managed date key should be pruned, got: {after:?}"
+    );
+}
+
+#[test]
+fn diff_and_check_agree_on_a_fractional_desired_date() {
+    // `--diff` reads the reconciled nodes and `--check` compares bytes; if only
+    // the byte path floors, --diff reports a change forever that --check refuses
+    // to make, and a "loop until clean" caller never terminates.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    write_fractional_binary(&desired, vec![]);
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    assert!(
+        run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    // Settled: --check reports nothing pending ...
+    let out = run(&[
+        "plist",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+
+    // ... so --diff must not claim one either.
+    let out = run(&[
+        "plist",
+        "--stdout",
+        "--diff",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let diff = String::from_utf8_lossy(&out.stdout);
+    let changes: Vec<&str> = diff.lines().filter(|l| l.starts_with('~')).collect();
+    assert!(
+        changes.is_empty(),
+        "--check saw no change but --diff reported: {changes:?}"
+    );
+}
+
+#[test]
+fn plist_binary_write_keeps_sub_second_dates() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![("SULastCheckTime", fractional_date()), ("a", pint(1))])
+        .to_file_xml(&target)
+        .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert_eq!(
+        read_plist(&target),
+        pdict(vec![("SULastCheckTime", fractional_date()), ("a", pint(2))])
+    );
+    // Nothing was rewritten, so nothing to warn about.
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+#[test]
+fn diff_shows_the_floor_it_is_about_to_write() {
+    // The other direction of the same trap: `--check` compares bytes against the
+    // file on disk, so a fractional date it will floor counts as a pending change.
+    // `--diff` must show that change rather than the empty diff it would print by
+    // comparing two already-floored nodes.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    // The managed key already matches, so the date is the only pending change.
+    pdict(vec![("k", fractional_date()), ("a", pint(1))])
+        .to_file_xml(&target)
+        .unwrap();
+    pdict(vec![("a", pint(1))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&[
+        "plist",
+        "--stdout",
+        "--diff",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let diff = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        diff.contains("~ k: <date 1970-01-12T13:46:40.5Z> => <date 1970-01-12T13:46:40Z>"),
+        "--diff hid the floor it is about to write:\n{diff}"
+    );
+}
+
+/// A date `nanos` past `secs` after the epoch.
+fn instant(secs: u64, nanos: u32) -> plist::Value {
+    plist::Value::Date(plist::Date::from(
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(secs, nanos),
+    ))
+}
+
+#[test]
+fn flooring_that_collapses_two_instants_warns_and_writes() {
+    // Flooring happens before array membership, and membership is a set, so two
+    // instants that differed only below the second become one element. Say so --
+    // the same normalization is what keeps TARGET comparable to BASE, so refusing
+    // would strand the run instead.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    let checks = plist::Value::Array(vec![instant(1_000_000, 0), instant(1_000_000, 500_000_000)]);
+    pdict(vec![("checks", checks)])
+        .to_file_binary(&target)
+        .unwrap();
+    pdict(vec![("checks", plist::Value::Array(vec![instant(0, 0)]))])
+        .to_file_xml(&desired)
+        .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("array `checks` held 2 values that normalizing made identical"),
+        "stderr was: {err}"
+    );
+    assert!(err.contains("--plist-binary"), "stderr was: {err}");
+
+    // One of the two instants is gone; the DESIRED element is the other survivor.
+    let plist::Value::Dictionary(d) = read_plist(&target) else {
+        panic!("expected a dictionary");
+    };
+    let plist::Value::Array(kept) = d.get("checks").unwrap().clone() else {
+        panic!("expected an array");
+    };
+    assert_eq!(kept.len(), 2, "got: {kept:?}");
+}
+
+#[test]
+fn a_value_xml_cannot_represent_is_refused_not_mangled() {
+    // macOS's own parser tolerates a raw ESC in XML, so emitting one would produce
+    // a file that works here and is invalid to every conforming parser. Refuse.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    let esc_key = "\u{1b}Window\u{1b}New Window";
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    pdict(vec![(
+        "NSUserKeyEquivalents",
+        pdict(vec![(esc_key, plist::Value::String("@~n".into()))]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert!(err.contains("--plist-binary"), "got: {err}");
+    // The message names the key, with the control byte escaped rather than echoed.
+    assert!(
+        err.contains(r"NSUserKeyEquivalents:\u{1b}Window\u{1b}New Window"),
+        "got: {err}"
+    );
+    assert!(
+        !err.as_bytes().contains(&27u8),
+        "raw ESC reached the terminal"
+    );
+    assert_eq!(fs::read(&target).unwrap(), before);
+
+    // The same run as binary is fine -- that is what the flag is for.
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+}
+
+#[test]
+fn an_unmanaged_array_is_never_refused_for_a_floor_collapse() {
+    // The array is absent from DESIRED, so the reconcile copies it through
+    // untouched and both instants survive. Refusing here would fail every
+    // activation over app data the user does not own and cannot edit out.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![
+        (
+            "RecentChecks",
+            plist::Value::Array(vec![instant(1_000_000, 0), instant(1_000_000, 500_000_000)]),
+        ),
+        ("managed", pint(1)),
+    ])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![("managed", pint(2))])
+        .to_file_xml(&desired)
+        .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success(), "refused an array nothing would drop");
+
+    let plist::Value::Dictionary(d) = read_plist(&target) else {
+        panic!("expected a dictionary");
+    };
+    let plist::Value::Array(checks) = d.get("RecentChecks").unwrap().clone() else {
+        panic!("expected an array");
+    };
+    // Both survive -- floored to the same second, but an unmanaged array keeps
+    // its duplicates.
+    assert_eq!(checks.len(), 2, "got: {checks:?}");
+}
+
+#[test]
+fn a_collapse_across_target_and_desired_warns() {
+    // Neither array repeats a value on its own, so the loss only appears once
+    // membership unions them: TARGET's whole second and DESIRED's fractional one
+    // floor together and the merge keeps a single element.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![(
+        "checks",
+        plist::Value::Array(vec![instant(1_000_000, 0)]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![(
+        "checks",
+        plist::Value::Array(vec![instant(1_000_000, 500_000_000)]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("array `checks` held 2 values that normalizing made identical"),
+        "stderr was: {err}"
+    );
+}
+
+#[test]
+fn normalization_does_not_warn_where_nothing_is_dropped() {
+    // The three shapes the check cannot judge, and so must stay quiet about: a
+    // scalar date on both sides, a date inside an array of dicts (unreachable by
+    // key path), and a managed array the user removed from DESIRED.
+    let dir = tempfile::tempdir().unwrap();
+    let quiet = |name: &str, target_value: plist::Value, desired: plist::Value| {
+        let target = dir.path().join(format!("{name}-t.plist"));
+        let desired_path = dir.path().join(format!("{name}-d.plist"));
+        pdict(vec![(name, target_value), ("a", pint(1))])
+            .to_file_binary(&target)
+            .unwrap();
+        desired.to_file_binary(&desired_path).unwrap();
+        let out = run(&[
+            "plist",
+            target.to_str().unwrap(),
+            desired_path.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{name} failed the run");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !err.contains("normalizing made identical"),
+            "{name} warned about a collapse that did not happen:\n{err}"
+        );
+    };
+
+    // A scalar key both sides floor to the same instant: DESIRED simply wins.
+    quiet(
+        "d",
+        instant(1_000_000, 300_000_000),
+        pdict(vec![("d", instant(1_000_000, 700_000_000))]),
+    );
+    // Dates inside an array of dicts, with the array unmanaged.
+    quiet(
+        "k",
+        plist::Value::Array(vec![
+            pdict(vec![("d", instant(1_000_000, 300_000_000))]),
+            pdict(vec![("d", instant(1_000_000, 700_000_000))]),
+        ]),
+        pdict(vec![("a", pint(2))]),
+    );
+}
+
+#[test]
+fn a_diagnostic_about_a_nested_value_does_not_echo_a_control_byte() {
+    // The key is escaped for its own message, but the path also has to be escaped
+    // on the way down, or anything reported *under* a control-bearing key emits the
+    // raw byte and the reader's terminal interprets it.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    pdict(vec![(
+        &format!("{esc}K")[..],
+        pdict(vec![("keep", plist::Value::String("x".into()))]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![(
+        &format!("{esc}K")[..],
+        pdict(vec![(
+            "sub",
+            plist::Value::String(format!("bad{}value", char::from(2u8))),
+        )]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = out.stderr;
+    assert!(
+        !err.contains(&27u8),
+        "a raw ESC reached stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
+    assert!(
+        !err.contains(&2u8),
+        "a raw 0x02 reached stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
+/// An XML plist target whose body is `body`, written verbatim so a raw control
+/// byte survives -- `plist`'s own writer escapes or refuses some of these.
+fn xml_target(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n<dict>\n{body}</dict>\n</plist>\n"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_byte_is_passed_through_only_while_the_file_still_carries_it() {
+    // "Already there" is judged by position -- a value still where the file had it
+    // is one this run did not put there -- but licensed by value, so relocating it
+    // introduces nothing. When the target's own copy is pruned the byte becomes
+    // this run's alone, and that is refused.
+    let dir = tempfile::tempdir().unwrap();
+    let esc = char::from(27u8);
+    let body = format!(
+        "\t<key>a</key>\n\t<string>{esc}X</string>\n\t<key>keep</key>\n\t<integer>1</integer>\n"
+    );
+
+    let base = dir.path().join("base.plist");
+    pdict(vec![("a", plist::Value::String(format!("{esc}X")))])
+        .to_file_binary(&base)
+        .unwrap();
+
+    // The original survives: relocating the same text is not introducing it.
+    let moved = dir.path().join("moved.plist");
+    pdict(vec![("c", plist::Value::String(format!("{esc}X")))])
+        .to_file_binary(&moved)
+        .unwrap();
+    let target = xml_target(dir.path(), "keep.plist", &body);
+    let out = run(&["plist", target.to_str().unwrap(), moved.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "relocation was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // BASE prunes `a`, so nothing carries over and the byte is newly ours.
+    let target = xml_target(dir.path(), "pruned.plist", &body);
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&[
+        "plist",
+        "--base",
+        base.to_str().unwrap(),
+        target.to_str().unwrap(),
+        moved.to_str().unwrap(),
+    ]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+#[test]
+fn a_key_that_renders_like_a_nested_path_does_not_license_a_byte() {
+    // Positions are compared as key paths, not as their rendered form: a key called
+    // `a:b` must not be mistaken for the nested path `a` -> `b`.
+    let dir = tempfile::tempdir().unwrap();
+    let esc = char::from(27u8);
+    let target = xml_target(
+        dir.path(),
+        "config.plist",
+        &format!("\t<key>a</key>\n\t<dict>\n\t\t<key>b</key>\n\t\t<string>{esc}X</string>\n\t</dict>\n\t<key>keep</key>\n\t<integer>1</integer>\n"),
+    );
+    let base = dir.path().join("base.plist");
+    pdict(vec![(
+        "a",
+        pdict(vec![("b", plist::Value::String(format!("{esc}X")))]),
+    )])
+    .to_file_binary(&base)
+    .unwrap();
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a:b", plist::Value::String(format!("{esc}X")))])
         .to_file_binary(&desired)
         .unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&[
+        "plist",
+        "--base",
+        base.to_str().unwrap(),
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+#[test]
+fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
+    // The reported path escapes at render time only; escaping the segments would
+    // make `get_path` miss the array and silently drop this warning.
+    let dir = tempfile::tempdir().unwrap();
+    let key = format!("a{}b", char::from(127u8));
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![(
+        &key[..],
+        plist::Value::Array(vec![
+            instant(1_000_000, 200_000_000),
+            instant(1_000_000, 700_000_000),
+        ]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![(
+        &key[..],
+        plist::Value::Array(vec![instant(1_000_000, 0)]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains("that normalizing made identical"),
+        "the collapse diagnostic was lost: {err}"
+    );
+    assert!(err.contains(r"a\u{7f}b"), "path not escaped: {err}");
+    assert!(!out.stderr.contains(&127u8), "raw byte reached stderr");
+}
+
+#[test]
+fn a_date_outside_the_years_xml_can_spell_is_refused_not_a_panic() {
+    // `plist`'s RFC 3339 formatter panics outside years 0..=9999, and 1.10 clamps
+    // only the future end on read, so a pre-year-0 date reaches it.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let far_past =
+        std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(100_000_000_000);
+    pdict(vec![
+        ("when", plist::Value::Date(plist::Date::from(far_past))),
+        ("a", pint(1)),
+    ])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![("a", pint(2))])
+        .to_file_binary(&desired)
+        .unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("0 to 9999"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+
+    // Binary can hold it, so the run must succeed -- and rendering it for `--diff`
+    // must not abort either. DESIRED replaces the date itself, so the diff has to
+    // print the old value: rendering is where the formatter panics.
+    let replaces = dir.path().join("replaces.plist");
+    pdict(vec![("when", plist::Value::String("replaced".into()))])
+        .to_file_binary(&replaces)
+        .unwrap();
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        "--diff",
+        target.to_str().unwrap(),
+        replaces.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "binary run aborted: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_duplicate_is_reported_only_when_the_file_really_held_one() {
+    // Normalization can make elements equal that the file distinguished, so the
+    // duplicate report must subtract the equalities it introduced -- but not the
+    // repeats the file genuinely held. The three shapes differ only in the array.
+    let dir = tempfile::tempdir().unwrap();
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![(
+        "l",
+        plist::Value::Array(vec![instant(1_000_000, 0)]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let reports = |name: &str, elements: Vec<plist::Value>| {
+        let target = dir.path().join(format!("{name}.plist"));
+        pdict(vec![("l", plist::Value::Array(elements))])
+            .to_file_binary(&target)
+            .unwrap();
+        let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter(|l| l.contains("times; array membership"))
+            .count()
+    };
+
+    // Two different instants floored together: the file held no duplicate.
+    assert_eq!(
+        reports(
+            "distinct",
+            vec![
+                instant(1_000_000, 500_000_000),
+                instant(1_000_000, 200_000_000)
+            ]
+        ),
+        0
+    );
+    // One instant twice: a real duplicate, still worth saying.
+    assert_eq!(
+        reports(
+            "repeated",
+            vec![
+                instant(1_000_000, 500_000_000),
+                instant(1_000_000, 500_000_000)
+            ]
+        ),
+        1
+    );
+    // One already whole, one floored onto it: again two different instants.
+    assert_eq!(
+        reports(
+            "untouched",
+            vec![instant(1_000_000, 0), instant(1_000_000, 500_000_000)]
+        ),
+        0
+    );
+}
+
+#[test]
+fn a_binary_target_is_refused_rather_than_rewritten_as_xml_with_the_byte() {
+    // Rewriting a binary plist as XML emits every byte anew, so nothing in it is
+    // "already written". The common shape: Preferences are binary and a
+    // `managedPlist` file entry defaults to `binary = false`.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    pdict(vec![(
+        "NSUserKeyEquivalents",
+        pdict(vec![(
+            &format!("{esc}Window")[..],
+            plist::Value::String("@~n".into()),
+        )]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+    assert!(before.starts_with(b"bplist00"));
+
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+}
+
+#[test]
+fn a_byte_xml_cannot_carry_that_is_passed_through_is_reported() {
+    // Passing a byte through writes XML a conforming parser rejects -- a deliberate
+    // trade, since refusing broke every activation, but not a silent one.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \t<key>a</key>\n\t<string>{esc}x</string>\n\
+         \t<key>b</key>\n\t<integer>1</integer>\n</dict>\n</plist>\n"
+    );
+    fs::write(&target, &xml).unwrap();
+    pdict(vec![("b", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("U+001B"), "the pass-through was silent: {err}");
+    assert!(err.contains("warning"), "got: {err}");
+
+    // Moving the same value to another key is not introducing it either.
+    let moved = dir.path().join("moved.plist");
+    fs::write(&target, &xml).unwrap();
+    pdict(vec![("c", plist::Value::String(format!("{esc}x")))])
+        .to_file_binary(&moved)
+        .unwrap();
+    let out = run(&["plist", target.to_str().unwrap(), moved.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "relocating a value the file already holds was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_value_already_on_disk_is_not_refused_when_the_run_introduces_nothing() {
+    // macOS writes raw C0 controls into XML plists, and config-graft only passes
+    // them through, so a run that introduces nothing must not fail on them.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \t<key>NSUserKeyEquivalents</key>\n\t<dict>\n\
+         \t\t<key>{esc}Window</key>\n\t\t<string>@~n</string>\n\t</dict>\n\
+         \t<key>managed</key>\n\t<string>yes</string>\n</dict>\n</plist>\n"
+    );
+    std::fs::write(&target, &xml).unwrap();
+    pdict(vec![("managed", plist::Value::String("yes".into()))])
+        .to_file_xml(&desired)
+        .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "a pass-through run was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        std::fs::read(&target).unwrap().contains(&27u8),
+        "the ESC the app owns was dropped"
+    );
+
+    // `--check` must be able to report on the same file.
+    let checked = run(&[
+        "plist",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(checked.status.success());
+}
+
+#[test]
+fn a_value_the_run_introduces_is_still_refused_and_names_the_key() {
+    // Still refused when newly written, and the key is named with the byte escaped.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    pdict(vec![(
+        "NSUserKeyEquivalents",
+        pdict(vec![(
+            &format!("{esc}New")[..],
+            plist::Value::String("@~x".into()),
+        )]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert!(
+        err.contains(r"\u{1b}New"),
+        "the key should be named with the byte escaped, got: {err}"
+    );
+    assert!(
+        !err.as_bytes().contains(&27u8),
+        "the raw control byte must not reach the terminal"
+    );
+}
+
+#[test]
+fn a_carriage_return_survives_an_xml_run_as_a_character_reference() {
+    // XML 1.0 section 2.11 has a conforming parser normalize a *literal* CR to LF,
+    // so the writer emits `&#13;` instead -- a character reference is exempt from
+    // that normalization and reads back unchanged.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    pdict(vec![(
+        "cr\rkey",
+        plist::Value::String("line1\rline2".into()),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
 
     let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(
@@ -378,18 +1196,42 @@ fn a_carriage_return_survives_an_xml_write() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let written = fs::read(&target).unwrap();
+    let bytes = std::fs::read(&target).unwrap();
     assert!(
-        !written.contains(&b'\r'),
-        "a raw CR was written:\n{}",
-        String::from_utf8_lossy(&written)
+        !bytes.contains(&b'\r'),
+        "wrote a literal CR:\n{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        bytes.windows(5).filter(|w| w == b"&#13;").count(),
+        2,
+        "expected the key and the string to each carry one:\n{}",
+        String::from_utf8_lossy(&bytes)
     );
 
+    let expected = plist::Value::String("line1\rline2".into());
     let plist::Value::Dictionary(d) = read_plist(&target) else {
         panic!("expected a dictionary");
     };
-    assert_eq!(
-        d.get("note").unwrap().clone(),
-        plist::Value::String("line1\rline2".into())
-    );
+    assert_eq!(d.get("cr\rkey").unwrap().clone(), expected);
+
+    // The escape is a serialization detail, so re-applying is still a no-op.
+    let again = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(again.status.success());
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+
+    // Binary carries it unchanged, as it always did.
+    let binary_target = dir.path().join("binary.plist");
+    pdict(vec![]).to_file_xml(&binary_target).unwrap();
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        binary_target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let plist::Value::Dictionary(d) = read_plist(&binary_target) else {
+        panic!("expected a dictionary");
+    };
+    assert_eq!(d.get("cr\rkey").unwrap().clone(), expected);
 }

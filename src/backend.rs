@@ -8,6 +8,7 @@
 //! *not* implement the byte-oriented `Format` trait (a tree has no single byte
 //! stream), so it lives here beside the formats rather than among them.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::marker::PhantomData;
@@ -15,10 +16,137 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
-use crate::format::{read_file, Format, FormatKind, Indent, WriteOpts};
-use crate::reconcile::{reconcile, MergeKeys, Options};
+use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
+use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
+use crate::warning::{Source, Warning};
 use crate::RunArgs;
+
+/// Output preferences for this run. Built in one place so the read-time
+/// normalization and the write see the same settings.
+fn write_opts(args: &RunArgs) -> WriteOpts {
+    WriteOpts {
+        indent: args.indent.unwrap_or(Indent::Spaces(2)),
+        plist_binary: args.plist_binary,
+    }
+}
+
+/// Per `(array path, resulting value)`: the distinct originals normalization
+/// rewrote into it, and how many records it wrote. The two differ when the same
+/// original repeats, which is what separates a manufactured repeat from a real one.
+type Equalities<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (HashSet<&'a Node<L>>, usize)>;
+
+/// The originals rewritten into each `(array path, resulting value)`, and why.
+type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
+
+/// Report arrays where normalization conflated values an input distinguished and
+/// the reconcile then kept fewer copies than there were distinct originals.
+///
+/// Normalizing can make two array elements equal (an XML plist run floors dates, so
+/// two instants under a second apart become one value), and array membership is a
+/// set, so only one survives. This is diagnostic, not fatal: the run reports what it
+/// conflated and writes anyway, because the same normalization is what keeps TARGET
+/// comparable to BASE.
+///
+/// Only paths that name an array on both sides can be judged. `KeyPath` addresses
+/// map keys, so a date inside an array of dicts is recorded under the array's key
+/// and is unreachable here; a path the result no longer holds was pruned, which is
+/// a removal rather than a collapse. Both are skipped -- see issue #37.
+fn lossy_collapses<L: Leaf>(
+    target_rewritten: &[Normalized<L>],
+    desired_rewritten: &[Normalized<L>],
+    target: &Node<L>,
+    desired: &Node<L>,
+    result: &Node<L>,
+    arrays: ArrayStrategy,
+) -> Vec<Warning<L>> {
+    // `concat` keeps duplicates and `replace` discards TARGET's array by request,
+    // so neither can lose anything this way.
+    if !matches!(arrays, ArrayStrategy::Merge | ArrayStrategy::Set) {
+        return Vec::new();
+    }
+    let mut rewritten: Conflations<'_, L> = HashMap::new();
+    for n in target_rewritten.iter().chain(desired_rewritten.iter()) {
+        let entry = rewritten.entry((&n.path, &n.value)).or_default();
+        entry.0.push(&n.original);
+        // From a record that produced *this* value, not one merely sharing the path.
+        entry.1 = n.because;
+    }
+    // Collected as plain fields so the sort key is total without matching on a
+    // variant the list cannot hold.
+    let mut reported: Vec<(KeyPath, usize, usize, &'static str)> = Vec::new();
+    for ((path, value), (originals, because)) in &rewritten {
+        let array = |node: &Node<L>| match node.get_path(path) {
+            Some(Node::Array(a)) => Some(a.iter().filter(|e| e == value).count()),
+            _ => None,
+        };
+        let Some(kept) = array(result) else { continue };
+        let before = array(target).unwrap_or(0) + array(desired).unwrap_or(0);
+        if before == 0 {
+            continue;
+        }
+        // What the inputs distinguished before normalization: the originals it
+        // rewrote, plus the value itself when an element already held it untouched
+        // -- that element is a distinct input value the collapse also cost.
+        let mut distinct: HashSet<&Node<L>> = originals.iter().copied().collect();
+        if before > originals.len() {
+            distinct.insert(value);
+        }
+        if distinct.len() < 2 || kept >= distinct.len() {
+            continue;
+        }
+        reported.push(((*path).clone(), distinct.len(), kept, because));
+    }
+    // A `HashMap` iterates in an arbitrary order, and two collapses can share a
+    // path, so order on the whole record.
+    reported.sort();
+    reported
+        .into_iter()
+        .map(|(path, distinct, kept, because)| Warning::ArrayCollapsed {
+            path,
+            distinct,
+            kept,
+            because,
+        })
+        .collect()
+}
+
+/// The diagnostics for values normalization rewrote in one input. Built here rather
+/// than in the codec, which has no idea which of the three inputs it is looking at
+/// -- and so that BASE's, which nobody needs, are never built at all.
+fn normalization_warnings<L: Leaf>(rewritten: &[Normalized<L>], source: Source) -> Vec<Warning<L>> {
+    // A domain snapshotted with `defaults export` stores every date as an `f64`, so
+    // one line each runs to hundreds and buries every other diagnostic.
+    const SHOWN: usize = 5;
+    let mut warnings: Vec<Warning<L>> = rewritten
+        .iter()
+        .take(SHOWN)
+        .map(|n| Warning::ValueNormalized {
+            path: n.path.clone(),
+            source,
+            from: n.original.compact(),
+            to: n.value.compact(),
+            because: n.because,
+        })
+        .collect();
+    if let Some(rest) = rewritten.len().checked_sub(SHOWN).filter(|n| *n > 0) {
+        warnings.push(Warning::MoreValuesNormalized {
+            path: rewritten[SHOWN].path.clone(),
+            source,
+            more: rest,
+            because: rewritten[SHOWN].because,
+        });
+    }
+    warnings
+}
+
+/// Print run diagnostics to stderr. The one place a warning becomes text, so
+/// every source of them looks the same to a reader.
+pub(crate) fn emit<L: Leaf>(warnings: &[Warning<L>], sep: &str) {
+    for w in warnings {
+        eprintln!("config-graft: warning: {}", w.render(sep));
+    }
+}
 
 /// A reconciled result prepared for the output phase: its serialized bytes (byte
 /// formats only; `None` for a tree) and whether applying it would change on-disk
@@ -44,14 +172,33 @@ pub(crate) trait Backend {
     fn merge_keys(_args: &RunArgs) -> MergeKeys {
         MergeKeys::default()
     }
-    /// Error for a DESIRED that is absent/unreadable.
-    fn error_invalid_desired(path: PathBuf) -> Error;
+    /// Error for a DESIRED that is absent or empty, as opposed to unparseable.
+    fn error_desired_absent(path: PathBuf) -> Error;
     /// Error for a DESIRED whose root is not this backend's mapping shape.
     fn error_desired_not_mapping(path: PathBuf) -> Error;
+    /// Error for a TARGET that parsed but whose root is not this backend's mapping
+    /// shape -- a JSON array at the root, say. Distinct from an absent TARGET,
+    /// which is legitimately empty.
+    fn error_target_not_mapping(path: PathBuf) -> Error;
 
     /// Read a path into a `Node`. `Ok(None)` means absent/coercible-to-empty; an
     /// `Err` is a hard failure (e.g. a non-directory target for the tree backend).
     fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<Self::Leaf>>, Error>;
+
+    /// Reduce a freshly read input to the precision this run's output encoding can
+    /// hold. [`Backend::run`] calls it on each of TARGET, DESIRED and BASE, so all
+    /// three agree with what lands on disk -- prune compares TARGET against BASE,
+    /// `--diff` compares TARGET against the result, and change detection compares
+    /// bytes; normalizing only one of them desyncs the other two. Refuses when the
+    /// output encoding cannot carry a value at all, and reports any array whose
+    /// elements it made equal so [`Backend::run`] can decide whether that actually
+    /// costs anything. Default: nothing to adjust.
+    fn normalize_for_run(
+        _args: &RunArgs,
+        _node: &Node<Self::Leaf>,
+    ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
+        Ok(None)
+    }
 
     /// Prepare the reconciled `result` for the output phase: its serialized bytes
     /// (byte formats only -- `None` for a tree, which has no single byte stream) and
@@ -81,17 +228,43 @@ pub(crate) trait Backend {
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
     /// `ByteBackend::<Json>::run(args)` / `Directory::run(args)`.
     fn run(args: &RunArgs) -> Result<Outcome, Error> {
-        let desired = Self::read(args, &args.desired)?
-            .ok_or_else(|| Self::error_invalid_desired(args.desired.clone()))?;
+        // The unreadable-TARGET wording is about not mistaking it for empty, which
+        // says nothing about DESIRED.
+        let mut desired = Self::read(args, &args.desired)
+            .map_err(|e| match e {
+                Error::Unreadable { path, kind } => Error::UnreadableDesired { path, kind },
+                other => other,
+            })?
+            .ok_or_else(|| Self::error_desired_absent(args.desired.clone()))?;
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
+        let desired_risks = match Self::normalize_for_run(args, &desired)? {
+            Some(normalized) => {
+                desired = normalized.node;
+                normalized.rewritten
+            }
+            None => Vec::new(),
+        };
 
-        // Missing/unparseable/non-map TARGET is treated as empty (a hard read error,
-        // e.g. a non-directory tree target, still propagates).
-        let target = Self::read(args, &args.target)?
-            .filter(Node::is_map)
-            .unwrap_or_else(Node::empty_map);
+        // Only an *absent* TARGET is empty. Treating an unreadable or non-mapping
+        // one as empty would write DESIRED over a file of keys the app owns.
+        let mut target = match Self::read(args, &args.target)? {
+            Some(node) if node.is_map() => node,
+            Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
+            None => Node::empty_map(),
+        };
+        // `--diff` compares against the node as read, or it shows nothing and
+        // disagrees with the `--check` that compares against the bytes on disk.
+        let mut target_on_disk = None;
+        let target_risks = match Self::normalize_for_run(args, &target)? {
+            Some(normalized) => {
+                let as_read = std::mem::replace(&mut target, normalized.node);
+                target_on_disk = args.diff.then_some(as_read);
+                normalized.rewritten
+            }
+            None => Vec::new(),
+        };
 
         // Empty/missing/unreadable BASE disables pruning (first run).
         let base_path = args
@@ -99,39 +272,101 @@ pub(crate) trait Backend {
             .as_deref()
             .or(args.base.as_deref())
             .filter(|p| !p.is_empty());
-        let base = base_path
+        let mut base = base_path
             .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
             .filter(Node::is_map);
+        // BASE must be normalized too, or a floored TARGET never equals it and a
+        // managed key can never be pruned. BASE is never written, so a failure here
+        // leaves it as read rather than failing the run.
+        if let Some(base) = base.as_mut() {
+            if let Ok(Some(normalized)) = Self::normalize_for_run(args, base) {
+                *base = normalized.node;
+            }
+        }
 
         let opts = Options {
             prune: !args.no_prune,
             arrays: args.array_strategy,
             merge_keys: Self::merge_keys(args),
         };
-        let (mut result, conflicts) = reconcile(&target, &desired, base.as_ref(), &opts);
-        // A `merge` array where TARGET and DESIRED reorder the same elements
-        // contradictorily is resolved deterministically (TARGET order preferred);
-        // warn so the reorder isn't applied silently. Diagnostics only -- the exit
-        // code is unaffected. Byte formats only: a tree has no arrays, so
-        // `conflicts` is empty.
-        for c in &conflicts {
-            let elements: Vec<String> = c.elements.iter().map(Node::compact).collect();
-            eprintln!(
-                "config-graft: warning: array `{}` had a contradictory reorder of [{}] \
-                 between TARGET and DESIRED; resolved deterministically (TARGET order preferred)",
-                c.path.render(Self::COMPONENT_SEPARATOR),
-                elements.join(", ")
-            );
+        let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
+        // The engine sees normalized inputs, so two values it made equal look like
+        // one identity the file held twice -- which the file never did.
+        // `n` distinct originals collapsing onto one value introduce `n - 1`
+        // equalities that were not in the file; occurrences beyond that are repeats
+        // the file genuinely held, and those are still worth reporting.
+        // The engine sees normalized inputs, so equalities normalization introduced
+        // reach it as repeats the file "held". Matched on the node, not a rendering:
+        // a rendering that changes would silently start reporting duplicates the
+        // file never had.
+        fn equalities<L: Leaf>(risks: &[Normalized<L>]) -> Equalities<'_, L> {
+            let mut origins: Equalities<'_, L> = HashMap::new();
+            for n in risks {
+                let entry = origins.entry((&n.path, &n.value)).or_default();
+                entry.0.insert(&n.original);
+                entry.1 += 1;
+            }
+            origins
         }
+        let by_source = [
+            (Source::Target, equalities(&target_risks)),
+            (Source::Desired, equalities(&desired_risks)),
+        ];
+        warnings.retain_mut(|w| match w {
+            Warning::DuplicateCollapsed {
+                path,
+                source,
+                matched,
+                held,
+                kept,
+                ..
+            } => {
+                let made = by_source
+                    .iter()
+                    .find(|(s, _)| s == source)
+                    .and_then(|(_, o)| o.get(&(&*path, &*matched)))
+                    .map_or(0, |(distinct, records)| {
+                        // An occurrence the records do not account for was already
+                        // equal to this value before normalization touched anything.
+                        let untouched = *held > *records;
+                        distinct.len() - usize::from(!untouched)
+                    });
+                *held = held.saturating_sub(made);
+                // `value_duplicates` reports a loss, so there has to be one: after
+                // the subtraction the repeat must still outnumber what survived.
+                *held >= 2 && *held > *kept
+            }
+            _ => true,
+        });
+        // Diagnostics only: none of these change the exit code.
+        warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
+        warnings.extend(normalization_warnings(&target_risks, Source::Target));
+        emit(&warnings, Self::COMPONENT_SEPARATOR);
+        emit(
+            &lossy_collapses(
+                &target_risks,
+                &desired_risks,
+                &target,
+                &desired,
+                &result,
+                opts.arrays,
+            ),
+            Self::COMPONENT_SEPARATOR,
+        );
+
         if args.sort_keys {
             result = result.sort_keys();
         }
 
-        let Prepared { output, changed } = Self::prepare(args, &target, &result)?;
-
+        // Before `prepare`, which serializes and can refuse: `--diff` is a preview,
+        // so it should still show what the run would do to a target the writer then
+        // turns out to be unable to represent.
         if args.diff {
-            print!("{}", target.diff(&result, Self::COMPONENT_SEPARATOR));
+            let before = target_on_disk.as_ref().unwrap_or(&target);
+            print!("{}", before.diff(&result, Self::COMPONENT_SEPARATOR));
         }
+
+        let Prepared { output, changed } = Self::prepare(args, &target, &result)?;
 
         if args.check {
             return Ok(if changed {
@@ -176,33 +411,48 @@ impl<F: Format> Backend for ByteBackend<F> {
         crate::parse_merge_keys(&args.merge_key, F::PATH_SEP)
     }
 
-    fn error_invalid_desired(path: PathBuf) -> Error {
-        F::KIND.invalid_desired(path)
+    fn normalize_for_run(
+        args: &RunArgs,
+        node: &Node<F::Leaf>,
+    ) -> Result<Option<Normalization<F::Leaf>>, Error> {
+        F::normalize_for_run(node, write_opts(args))
+    }
+
+    fn error_desired_absent(path: PathBuf) -> Error {
+        Error::DesiredAbsent {
+            path,
+            kind: F::KIND,
+        }
     }
 
     fn error_desired_not_mapping(path: PathBuf) -> Error {
         F::KIND.desired_not_mapping(path)
     }
 
+    fn error_target_not_mapping(path: PathBuf) -> Error {
+        Error::TargetNotMapping {
+            path,
+            kind: F::KIND,
+        }
+    }
+
     fn read(_args: &RunArgs, path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
-        Ok(read_file::<F>(path))
+        read_file::<F>(path)
     }
 
     fn prepare(
         args: &RunArgs,
-        _target: &Node<F::Leaf>,
+        target: &Node<F::Leaf>,
         result: &Node<F::Leaf>,
     ) -> Result<Prepared, Error> {
-        // Read the current on-disk text *once*: YAML/TOML use it as the basis for
-        // comment-preserving edits, and change detection compares against it (JSON/
-        // plist ignore it when serializing). A single read keeps the serialized
-        // output and the "changed?" verdict consistent against one snapshot.
+        // Read once: two reads could serialize from a template the target no longer
+        // matches, making the output and the "changed?" verdict disagree.
         let current = fs::read(&args.target).unwrap_or_default();
-        let write_opts = WriteOpts {
-            indent: args.indent.unwrap_or(Indent::Spaces(2)),
-            plist_binary: args.plist_binary,
-        };
-        let output = F::serialize(result, &current, write_opts)?;
+        emit(
+            &F::refuse_on_write(result, target, &current, write_opts(args))?,
+            F::PATH_SEP,
+        );
+        let output = F::serialize(result, &current, write_opts(args))?;
         Ok(Prepared {
             changed: output != current,
             output: Some(output),
@@ -231,10 +481,7 @@ impl Backend for Directory {
     type Leaf = FsLeaf;
     const COMPONENT_SEPARATOR: &'static str = "/";
 
-    fn error_invalid_desired(path: PathBuf) -> Error {
-        // Only reached when the read returned `None` (absent); a DESIRED that
-        // exists but is not a directory errors out of `read_tree` with a distinct
-        // `NotDirectory`.
+    fn error_desired_absent(path: PathBuf) -> Error {
         Error::MissingDesiredDirectory(path)
     }
 
@@ -242,7 +489,14 @@ impl Backend for Directory {
         FormatKind::Directory.desired_not_mapping(path)
     }
 
+    // A tree's root is always a map and `read_tree` already refuses a non-directory,
+    // so this is unreachable; it exists to keep the trait total.
+    fn error_target_not_mapping(path: PathBuf) -> Error {
+        Error::NotDirectory(path)
+    }
+
     fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<FsLeaf>>, Error> {
+        // A tree is walked, not parsed, so nothing can be rewritten on the way in.
         directory::read_tree(path, args.manage_root, args.dir_policy())
     }
 
