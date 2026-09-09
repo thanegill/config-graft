@@ -1114,3 +1114,28 @@ fn an_unparseable_desired_is_reported_as_desired() {
         "TARGET wording leaked onto the DESIRED path: {err}"
     );
 }
+
+#[test]
+fn a_duplicate_warning_needs_something_to_have_been_dropped() {
+    // `set` starts from TARGET and keeps its duplicates, so a repeat can survive
+    // intact. Warning then announces a loss and its own tail reports none.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"l":["b","b"]}"#).unwrap();
+    fs::write(&desired, r#"{"l":["b","b"]}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        "--array-strategy",
+        "set",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("array membership is a set"),
+        "warned about a loss that did not happen: {err}"
+    );
+}

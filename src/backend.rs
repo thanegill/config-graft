@@ -31,6 +31,11 @@ fn write_opts(args: &RunArgs) -> WriteOpts {
     }
 }
 
+/// Per `(array path, resulting value)`: the distinct originals normalization
+/// rewrote into it, and how many records it wrote. The two differ when the same
+/// original repeats, which is what separates a manufactured repeat from a real one.
+type Equalities<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (HashSet<&'a Node<L>>, usize)>;
+
 /// The originals rewritten into each `(array path, resulting value)`, and why.
 type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
 
@@ -110,8 +115,12 @@ fn lossy_collapses<L: Leaf>(
 /// than in the codec, which has no idea which of the three inputs it is looking at
 /// -- and so that BASE's, which nobody needs, are never built at all.
 fn normalization_warnings<L: Leaf>(rewritten: &[Normalized<L>], source: Source) -> Vec<Warning<L>> {
-    rewritten
+    // A domain snapshotted with `defaults export` stores every date as an `f64`, so
+    // one line each runs to hundreds and buries every other diagnostic.
+    const SHOWN: usize = 5;
+    let mut warnings: Vec<Warning<L>> = rewritten
         .iter()
+        .take(SHOWN)
         .map(|n| Warning::ValueNormalized {
             path: n.path.clone(),
             source,
@@ -119,7 +128,16 @@ fn normalization_warnings<L: Leaf>(rewritten: &[Normalized<L>], source: Source) 
             to: n.value.compact(),
             because: n.because,
         })
-        .collect()
+        .collect();
+    if let Some(rest) = rewritten.len().checked_sub(SHOWN).filter(|n| *n > 0) {
+        warnings.push(Warning::MoreValuesNormalized {
+            path: rewritten[SHOWN].path.clone(),
+            source,
+            more: rest,
+            because: rewritten[SHOWN].because,
+        });
+    }
+    warnings
 }
 
 /// Print run diagnostics to stderr. The one place a warning becomes text, so
@@ -212,13 +230,12 @@ pub(crate) trait Backend {
     fn run(args: &RunArgs) -> Result<Outcome, Error> {
         // The unreadable-TARGET wording is about not mistaking it for empty, which
         // says nothing about DESIRED.
-        let desired_input = Self::read(args, &args.desired)
+        let mut desired = Self::read(args, &args.desired)
             .map_err(|e| match e {
                 Error::Unreadable { path, kind } => Error::UnreadableDesired { path, kind },
                 other => other,
             })?
             .ok_or_else(|| Self::error_desired_absent(args.desired.clone()))?;
-        let mut desired = desired_input;
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
@@ -278,56 +295,45 @@ pub(crate) trait Backend {
         // `n` distinct originals collapsing onto one value introduce `n - 1`
         // equalities that were not in the file; occurrences beyond that are repeats
         // the file genuinely held, and those are still worth reporting.
-        // How many equalities normalization introduced at each (path, value), per
-        // input -- `DuplicateCollapsed` counts occurrences within one side, so the
-        // two sides must not share a bucket. `n` distinct originals collapsing onto
-        // one value introduce `n - 1` equalities, or `n` when an occurrence already
-        // held that value untouched, since that one was equal to none of them
-        // before. The rest of the repeats are ones the file genuinely held.
-        let equalities = |risks: &[Normalized<Self::Leaf>], node: &Node<Self::Leaf>| {
-            // Distinct originals decide how many equalities a collapse introduces;
-            // the record count decides whether an occurrence was left untouched,
-            // and two identical originals produce two records but one distinct.
-            let mut origins: HashMap<(&KeyPath, String), (HashSet<String>, usize)> = HashMap::new();
+        // The engine sees normalized inputs, so equalities normalization introduced
+        // reach it as repeats the file "held". Matched on the node, not a rendering:
+        // a rendering that changes would silently start reporting duplicates the
+        // file never had.
+        fn equalities<L: Leaf>(risks: &[Normalized<L>]) -> Equalities<'_, L> {
+            let mut origins: Equalities<'_, L> = HashMap::new();
             for n in risks {
-                let entry = origins.entry((&n.path, n.value.compact())).or_default();
-                entry.0.insert(n.original.compact());
+                let entry = origins.entry((&n.path, &n.value)).or_default();
+                entry.0.insert(&n.original);
                 entry.1 += 1;
             }
             origins
-                .into_iter()
-                .map(|((path, value), (distinct, records))| {
-                    let occurrences = match node.get_path(path) {
-                        Some(Node::Array(a)) => a.iter().filter(|e| e.compact() == value).count(),
-                        _ => 0,
-                    };
-                    let untouched = occurrences > records;
-                    let made = distinct.len() - usize::from(!untouched);
-                    ((path.clone(), value), made)
-                })
-                .collect::<HashMap<_, _>>()
-        };
-        let made_in = [
-            (Source::Target, equalities(&target_risks, &target)),
-            (Source::Desired, equalities(&desired_risks, &desired)),
+        }
+        let by_source = [
+            (Source::Target, equalities(&target_risks)),
+            (Source::Desired, equalities(&desired_risks)),
         ];
         warnings.retain_mut(|w| match w {
             Warning::DuplicateCollapsed {
                 path,
                 source,
-                identity,
+                matched,
                 held,
                 kept,
+                ..
             } => {
-                let made = made_in
+                let made = by_source
                     .iter()
                     .find(|(s, _)| s == source)
-                    .and_then(|(_, m)| m.get(&(path.clone(), identity.clone())))
-                    .copied()
-                    .unwrap_or(0);
+                    .and_then(|(_, o)| o.get(&(&*path, &*matched)))
+                    .map_or(0, |(distinct, records)| {
+                        // An occurrence the records do not account for was already
+                        // equal to this value before normalization touched anything.
+                        let untouched = *held > *records;
+                        distinct.len() - usize::from(!untouched)
+                    });
                 *held = held.saturating_sub(made);
-                // Re-establish what `value_duplicates` already required: a repeat is
-                // only worth reporting if something was actually dropped.
+                // `value_duplicates` reports a loss, so there has to be one: after
+                // the subtraction the repeat must still outnumber what survived.
                 *held >= 2 && *held > *kept
             }
             _ => true,

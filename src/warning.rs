@@ -43,9 +43,22 @@ pub enum Warning<L: Leaf> {
         /// What repeated: an element's compact value, or a `[field=value]`
         /// selector when the array is matched by merge key.
         identity: String,
+        /// The node `identity` denotes -- the element itself, or the key field's
+        /// value under a merge key. Carried so a caller can match this warning
+        /// against a normalization record structurally rather than by rendering.
+        matched: Node<L>,
         /// How many times it appeared in that input, and how many survived.
         held: usize,
         kept: usize,
+    },
+    /// The tail of a run of `ValueNormalized`s at one path, summarised rather than
+    /// printed one by one -- a `defaults export` domain stores every date as an
+    /// `f64`, so listing each would bury every other diagnostic.
+    MoreValuesNormalized {
+        path: KeyPath,
+        source: Source,
+        more: usize,
+        because: &'static str,
     },
     /// A value the run's output encoding cannot spell, replaced as soon as it was
     /// read with one that it can -- so the reconcile, `--diff` and the write all
@@ -81,6 +94,7 @@ impl<L: Leaf> Warning<L> {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
             | Warning::ValueNormalized { path, .. }
+            | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. } => path,
         }
@@ -93,6 +107,7 @@ impl<L: Leaf> Warning<L> {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
             | Warning::ValueNormalized { path, .. }
+            | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. } => path,
         }
@@ -145,6 +160,16 @@ impl<L: Leaf> Warning<L> {
                 "array `{at}` held {distinct} values that normalizing made \
                  identical, and membership is a set, so only {kept} survived; \
                  {because}"
+            ),
+            Warning::MoreValuesNormalized {
+                source,
+                more,
+                because,
+                ..
+            } => format!(
+                "{more} further values in {} were read the same way because \
+                 {because}",
+                source.label()
             ),
             Warning::ValueNormalized {
                 source,

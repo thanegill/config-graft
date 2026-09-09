@@ -193,7 +193,17 @@ impl Format for Plist {
         if opts.plist_binary {
             return Ok(None);
         }
-        if !scan_dates(node, &mut KeyPath::new())? {
+        let needs_floor = scan_dates(node).map_err(|mut segments| {
+            segments.reverse();
+            let mut path = KeyPath::new();
+            for segment in segments {
+                path.push(segment);
+            }
+            Error::PlistDateOutOfRange {
+                path: path.render(Plist::PATH_SEP),
+            }
+        })?;
+        if !needs_floor {
             return Ok(None);
         }
         let mut normalized = node.clone();
@@ -373,7 +383,7 @@ fn carried_over(target: &Represented, result: &Represented) -> Carried {
 /// file already held, since passing it through still writes a file only macOS can
 /// read.
 ///
-/// `already` must be empty unless the target is itself XML -- rewriting a binary
+/// `carried` must be empty unless the target is itself XML -- rewriting a binary
 /// plist as XML writes every byte anew, so nothing in it counts as already
 /// written, and dropping that gate reopens issue #33.
 fn check_xml_representable(
@@ -436,9 +446,12 @@ fn spell_date(date: plist::Date) -> String {
     if is_spellable_in_xml(date) {
         return date.to_xml_format();
     }
+    // The whole duration, not `as_secs`: two instants in the same second must not
+    // render alike, or `--diff` prints a change with byte-identical sides.
+    let spell = |d: Duration, side| format!("{}.{:09}s {side} 1970", d.as_secs(), d.subsec_nanos());
     match SystemTime::from(date).duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(since) => format!("{}s after 1970", since.as_secs()),
-        Err(before) => format!("{}s before 1970", before.duration().as_secs()),
+        Ok(since) => spell(since, "after"),
+        Err(before) => spell(before.duration(), "before"),
     }
 }
 
@@ -465,26 +478,32 @@ fn is_spellable_in_xml(date: plist::Date) -> bool {
 /// One read-only pass over the dates: refuse any the XML writer cannot spell, and
 /// report whether a floor is needed. The range check has to come first, so it is
 /// done here rather than in a second traversal.
-fn scan_dates(node: &Node<PlistLeaf>, path: &mut KeyPath) -> Result<bool, Error> {
+///
+/// The path is built only on the error branch, unwinding -- this runs over all three
+/// inputs on every run, and cloning a key per level to describe a failure that
+/// almost never happens is the wrong trade.
+fn scan_dates(node: &Node<PlistLeaf>) -> Result<bool, Vec<String>> {
     let mut needs_floor = false;
     match node {
         Node::Map(m) => {
             for (key, value) in m {
-                path.push(key.clone());
-                needs_floor |= scan_dates(value, path)?;
-                path.pop();
+                match scan_dates(value) {
+                    Ok(found) => needs_floor |= found,
+                    Err(mut below) => {
+                        below.push(key.clone());
+                        return Err(below);
+                    }
+                }
             }
         }
         Node::Array(a) => {
             for element in a {
-                needs_floor |= scan_dates(element, path)?;
+                needs_floor |= scan_dates(element)?;
             }
         }
         Node::Leaf(PlistLeaf::Date(date)) => {
             if !is_spellable_in_xml(*date) {
-                return Err(Error::PlistDateOutOfRange {
-                    path: path.render(Plist::PATH_SEP),
-                });
+                return Err(Vec::new());
             }
             needs_floor = floor_date(*date) != Some(*date);
         }

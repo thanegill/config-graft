@@ -213,6 +213,7 @@ fn value_duplicates<L: Leaf>(seq: &[Node<L>], out: &[Node<L>], source: Source) -
             path: KeyPath::new(),
             source,
             identity: element.compact(),
+            matched: element.clone(),
             held: held[element],
             kept,
         });
@@ -245,6 +246,7 @@ fn key_duplicates<L: Leaf>(
             path: KeyPath::new(),
             source,
             identity: format!("[{field}={}]", render_value(value)),
+            matched: (*value).clone(),
             held: held[ident],
             kept: out
                 .iter()

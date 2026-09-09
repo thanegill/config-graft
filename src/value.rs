@@ -32,8 +32,25 @@ pub fn render_f64(f: f64) -> String {
         Some((mantissa, exponent)) if !exponent.starts_with('-') => {
             format!("{mantissa}e+{exponent}")
         }
+        // The one range the two disagree on: JSON writes decimal down to 1e-5,
+        // Rust switches to an exponent below 1e-4.
+        Some((mantissa, "-5")) => decimal_at_e_minus_5(mantissa),
         _ => rendered,
     }
+}
+
+/// `mantissa` scaled by 1e-5, written out in full. Only reachable for a shortest
+/// rendering whose exponent is exactly -5, so the point always lands left of the
+/// digits and no rounding is involved.
+fn decimal_at_e_minus_5(mantissa: &str) -> String {
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let integer_len = mantissa.find('.').unwrap_or(mantissa.len());
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let zeros = 5 - integer_len;
+    format!("{sign}0.{}{digits}", "0".repeat(zeros))
 }
 
 /// A format's atomic leaf value. The engine treats leaves opaquely -- it only
@@ -149,6 +166,53 @@ impl<L: Leaf> Node<L> {
         match self {
             Node::Map(m) => Some(m),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_f64;
+
+    #[test]
+    fn matches_serde_json_byte_for_byte() {
+        // `--diff` output is asserted by the integration tests, and this is where
+        // it comes from. serde_json writes decimal down to 1e-5 where Rust's
+        // `{:?}` switches to an exponent below 1e-4, so that range needs its own
+        // spelling.
+        for v in [
+            1e-6_f64,
+            5e-6,
+            9.9e-6,
+            1e-5,
+            1.5e-5,
+            9e-5,
+            9.99e-5,
+            1e-4,
+            0.1,
+            1.5,
+            0.0,
+            -0.0,
+            1e15,
+            1e16,
+            1e17,
+            1.234e20,
+            1e300,
+            -1e-5,
+            -1.5e-5,
+            -0.1,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+        ] {
+            assert_eq!(
+                render_f64(v),
+                serde_json::to_string(&v).unwrap(),
+                "mismatch for {v:e}"
+            );
+        }
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(render_f64(v), "null");
         }
     }
 }

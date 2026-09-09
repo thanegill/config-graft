@@ -192,9 +192,15 @@ pub fn parse_indent(spec: &str) -> Result<Indent, String> {
     if spec == "tab" {
         return Ok(Indent::Tab);
     }
-    spec.parse()
-        .map(Indent::Spaces)
-        .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))
+    let spaces: usize = spec
+        .parse()
+        .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))?;
+    // The JSON writer takes a `u8`, and silently emitting a different shape than
+    // the one asked for is worse than refusing the width.
+    if spaces > usize::from(u8::MAX) {
+        return Err(format!("indent must be at most {}, got {spaces}", u8::MAX));
+    }
+    Ok(Indent::Spaces(spaces))
 }
 
 /// Read and parse `path` with format `F`. `Ok(None)` means the file is not there
