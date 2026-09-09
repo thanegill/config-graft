@@ -94,18 +94,6 @@ pub trait Format: ValueCodec {
     const PATH_SEP: &'static str;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
-    /// Scalars this format's *parser* rewrote before config-graft saw them, so a
-    /// rewrite no `--diff` can show is still not silent.
-    fn rewritten_on_read(_bytes: &[u8]) -> Vec<Rewritten> {
-        Vec::new()
-    }
-
-    /// Refuse input the parser would accept but silently misread. On raw bytes,
-    /// because a `Node` no longer shows the difference.
-    fn refuse_on_read(_path: &Path, _bytes: &[u8]) -> Result<(), Error> {
-        Ok(())
-    }
-
     /// Refuse a write whose output encoding cannot carry what the run *introduces*.
     /// A value `target` already holds is passed through, or refusing it would fail
     /// every run against a file the app itself wrote. `current` is needed too: a
@@ -137,15 +125,6 @@ pub trait Format: ValueCodec {
         current: &[u8],
         opts: WriteOpts,
     ) -> Result<Vec<u8>, Error>;
-}
-
-/// A scalar the parser stored differently from how the file spells it.
-pub struct Rewritten {
-    /// Empty inside an array, which `KeyPath` cannot address (issue #37);
-    /// reported as no path rather than a wrong one.
-    pub path: KeyPath,
-    pub source: String,
-    pub stored: String,
 }
 
 /// A normalized copy of one input, produced only when there was something to
@@ -189,7 +168,7 @@ pub struct WriteOpts {
 /// Each format declares its own leaf type (`Leaf`), so a JSON node can't hold a
 /// plist `Date` and the encoders are total (no `unreachable!()`). `Value<'a>` is a
 /// GAT so saphyr's borrowed `Yaml<'a>` fits the same trait as the owning
-/// `serde_json::Value`/`plist::Value`.
+/// `json_syntax::Value`/`plist::Value`.
 pub trait ValueCodec {
     type Leaf: Leaf;
     type Value<'a>;
@@ -205,16 +184,6 @@ pub trait ValueCodec {
 pub enum Indent {
     Spaces(usize),
     Tab,
-}
-
-impl Indent {
-    /// The indentation unit as bytes, for the JSON pretty-printer.
-    pub fn to_bytes(self) -> Vec<u8> {
-        match self {
-            Indent::Spaces(n) => vec![b' '; n],
-            Indent::Tab => b"\t".to_vec(),
-        }
-    }
 }
 
 /// Parse a `--indent` value: a non-negative number of spaces, or `tab`. Used as a
@@ -244,12 +213,8 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error
             })
         }
     };
-    F::refuse_on_read(path, &bytes)?;
     match F::parse(&bytes) {
-        Some(node) => Ok(Some(Input {
-            node,
-            rewritten: F::rewritten_on_read(&bytes),
-        })),
+        Some(node) => Ok(Some(Input { node })),
         // Checked only after parsing fails, so a format whose empty document is
         // meaningful (TOML's empty table) still parses it.
         None if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
@@ -260,19 +225,14 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error
     }
 }
 
-/// One of a run's inputs as it was read: the parsed value, plus anything the
-/// parser rewrote on the way in.
+/// One of a run's inputs as it was read.
 pub struct Input<L: Leaf> {
     pub node: Node<L>,
-    pub rewritten: Vec<Rewritten>,
 }
 
 impl<L: Leaf> Input<L> {
     /// An input nothing rewrote -- what a reader that does its own parsing returns.
     pub fn clean(node: Node<L>) -> Input<L> {
-        Input {
-            node,
-            rewritten: Vec::new(),
-        }
+        Input { node }
     }
 }

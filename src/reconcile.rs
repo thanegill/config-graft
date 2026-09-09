@@ -69,11 +69,6 @@ impl KeyPath {
         }
         out
     }
-
-    /// Whether this is the root path (no segments).
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 impl std::ops::Deref for KeyPath {
@@ -340,17 +335,20 @@ mod tests {
     use super::*;
     use crate::format::json::JsonLeaf;
     use crate::format::{Json, ValueCodec};
+    use json_syntax::{Parse, Print};
     use serde_json::{json, Value};
 
-    /// JSON value → `Node` (the JSON codec), so the tests can keep expressing
-    /// inputs and expectations as readable `json!(...)` literals.
+    /// JSON value → `Node`, so the tests can keep expressing inputs and
+    /// expectations as readable `json!(...)` literals. Routed through the codec's
+    /// own value type by text, which is also what the engine sees at runtime.
     fn n(v: Value) -> Node<JsonLeaf> {
-        Json::decode(&v).unwrap()
+        let text = v.to_string();
+        Json::decode(&json_syntax::Value::parse_str(&text).unwrap().0).unwrap()
     }
 
     /// `Node` → JSON value, for comparing results against `json!(...)`.
     fn j(node: &Node<JsonLeaf>) -> Value {
-        Json::encode(node)
+        serde_json::from_str(&Json::encode(node).compact_print().to_string()).unwrap()
     }
 
     fn reconciled(t: Value, d: Value, b: Option<Value>, prune: bool) -> Value {
