@@ -19,3 +19,5 @@ xattr = "1"
 [dev-dependencies]
 # Only the reconcile tests, for their `json!(...)` fixtures.
 serde_json = { version = "1", features = ["preserve_order"] }
+# Only `number`'s differential test, as an arbitrary-precision oracle.
+bigdecimal = "0.4"

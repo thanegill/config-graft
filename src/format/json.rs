@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 
 use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts};
 use crate::error::Error;
+use crate::number::{number_value, NumberValue};
 use crate::value::{quote, Leaf, Node};
 
 /// JSON codec.
@@ -84,155 +85,6 @@ impl Hash for JsonLeaf {
 
 /// Stands in for the discriminant of a number, which may be any of three variants.
 const NUMBER_DISCRIMINANT: &str = "json-number";
-
-/// A JSON number's identity: what decides whether two of them are the same value,
-/// however each was spelled. Borrows the literal, so comparing costs no allocation
-/// -- `Node` equality and hashing sit inside the array engine's membership scans.
-///
-/// `Integer` is the common case and covers every spelling that denotes a whole
-/// number small enough to hold, so `10`, `10.0` and `1e1` share one identity across
-/// the `Int`/`Uint`/`Number` variants. Anything else keeps its digits as slices of
-/// the literal, normalized so `0.10`, `0.1` and `1e-1` agree.
-enum NumberValue<'a> {
-    Integer(i128),
-    /// Sign, the significant digits split across the literal's integer and
-    /// fraction parts (leading and trailing zeros already trimmed), and the decimal
-    /// exponent of the last digit.
-    Decimal {
-        negative: bool,
-        integer: &'a str,
-        fraction: &'a str,
-        exponent: i64,
-    },
-}
-
-impl NumberValue<'_> {
-    /// The significant digits in order, however the literal split them.
-    fn digits(&self) -> impl Iterator<Item = u8> + '_ {
-        let (integer, fraction) = match self {
-            NumberValue::Decimal {
-                integer, fraction, ..
-            } => (*integer, *fraction),
-            NumberValue::Integer(_) => ("", ""),
-        };
-        integer.bytes().chain(fraction.bytes())
-    }
-}
-
-impl PartialEq for NumberValue<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (NumberValue::Integer(a), NumberValue::Integer(b)) => a == b,
-            (
-                NumberValue::Decimal {
-                    negative: a,
-                    exponent: x,
-                    ..
-                },
-                NumberValue::Decimal {
-                    negative: b,
-                    exponent: y,
-                    ..
-                },
-            ) => a == b && x == y && self.digits().eq(other.digits()),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for NumberValue<'_> {}
-
-impl Hash for NumberValue<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            NumberValue::Integer(value) => value.hash(state),
-            NumberValue::Decimal {
-                negative, exponent, ..
-            } => {
-                negative.hash(state);
-                exponent.hash(state);
-                // Length-prefixed, so two different digit sequences cannot hash the
-                // same by running together.
-                self.digits().count().hash(state);
-                for digit in self.digits() {
-                    digit.hash(state);
-                }
-            }
-        }
-    }
-}
-
-/// The identity of a number literal, or `None` when its exponent is too large for
-/// an `i64` to describe -- no normalization can compare that meaningfully, so
-/// callers fall back to comparing the literals themselves.
-fn number_value(literal: &str) -> Option<NumberValue<'_>> {
-    let (negative, rest) = match literal.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, literal),
-    };
-    let (mantissa, exponent) = match rest.find(['e', 'E']) {
-        Some(i) => (&rest[..i], rest[i + 1..].parse::<i64>().ok()?),
-        None => (rest, 0),
-    };
-    let (mut integer, mut fraction) = match mantissa.find('.') {
-        Some(i) => (&mantissa[..i], &mantissa[i + 1..]),
-        None => (mantissa, ""),
-    };
-
-    // Anchor the exponent at the last digit, then trim the zeros that carry no
-    // information: trailing ones raise the exponent, leading ones are simply not
-    // significant.
-    let mut exponent = exponent.checked_sub(fraction.len() as i64)?;
-    while let Some(trimmed) = fraction.strip_suffix('0') {
-        fraction = trimmed;
-        exponent = exponent.checked_add(1)?;
-    }
-    if fraction.is_empty() {
-        while let Some(trimmed) = integer.strip_suffix('0') {
-            integer = trimmed;
-            exponent = exponent.checked_add(1)?;
-        }
-    }
-    integer = integer.trim_start_matches('0');
-    if integer.is_empty() {
-        fraction = fraction.trim_start_matches('0');
-    }
-
-    if integer.is_empty() && fraction.is_empty() {
-        // Every spelling of zero is one number, `-0` included (`-0.0 == 0.0`).
-        return Some(NumberValue::Integer(0));
-    }
-    // A whole number that fits an `i128` gets the integer identity, so it can equal
-    // an `Int`/`Uint` spelled the ordinary way. The digits are integer and fraction
-    // together: after the trims above the value is `digits * 10^exponent` however
-    // the literal split them, so `0.5e1` is as whole a 5 as `5` is.
-    if exponent >= 0 {
-        if let Some(value) = whole(negative, integer, fraction, exponent) {
-            return Some(NumberValue::Integer(value));
-        }
-    }
-    Some(NumberValue::Decimal {
-        negative,
-        integer,
-        fraction,
-        exponent,
-    })
-}
-
-/// `digits * 10^exponent` as an `i128`, or `None` if it does not fit.
-fn whole(negative: bool, integer: &str, fraction: &str, exponent: i64) -> Option<i128> {
-    let mut value: i128 = 0;
-    for digit in integer.bytes().chain(fraction.bytes()) {
-        value = value
-            .checked_mul(10)?
-            .checked_add(i128::from(digit - b'0'))?;
-    }
-    for _ in 0..exponent {
-        value = value.checked_mul(10)?;
-    }
-    Some(if negative { -value } else { value })
-}
 
 /// The identity of any JSON number leaf, so the three variants compare as one kind.
 /// `None` means "compare the literals instead" (an unrepresentable exponent).
@@ -458,24 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn numbers_compare_by_value_not_by_spelling() {
-        for (a, b) in [
-            ("0.10", "0.1"),
-            ("1e-1", "0.1"),
-            ("1.230", "1.23"),
-            ("-0.0", "0.0"),
-            ("1E2", "1e2"),
-        ] {
-            assert_eq!(leaf(a), leaf(b), "{a} and {b} are the same number");
-            assert_eq!(
-                hash_of(&leaf(a)),
-                hash_of(&leaf(b)),
-                "{a} and {b} must hash alike"
-            );
-        }
-    }
-
-    #[test]
     fn a_number_is_one_value_across_the_three_variants() {
         // `10` decodes as Int, the rest as Number literals; all denote one number,
         // so an app rewriting a managed `10` as `10.0` is not read as a hand-edit.
@@ -489,12 +323,6 @@ mod tests {
         }
         // ... and a non-integer still is not one.
         assert_ne!(leaf("10"), leaf("10.5"));
-    }
-
-    #[test]
-    fn numbers_that_differ_beyond_f64_are_not_equal() {
-        // The whole point: an f64 would collapse these two into one value.
-        assert_ne!(leaf("1.2345678901234567890123"), leaf("1.2345678901234567"));
     }
 
     #[test]

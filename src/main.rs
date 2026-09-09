@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand};
 mod backend;
 mod error;
 mod format;
+mod number;
 mod reconcile;
 mod value;
 mod warning;
