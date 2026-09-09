@@ -159,6 +159,17 @@ impl Format for Plist {
         Plist::decode(&value)
     }
 
+    fn refuse_on_write(
+        result: &Node<PlistLeaf>,
+        target: &Node<PlistLeaf>,
+        opts: WriteOpts,
+    ) -> Result<(), Error> {
+        if opts.plist_binary {
+            return Ok(());
+        }
+        refuse_xml_unrepresentable(result, Some(target), &mut KeyPath::new())
+    }
+
     fn normalize_for_run(
         node: &mut Node<PlistLeaf>,
         opts: WriteOpts,
@@ -183,7 +194,6 @@ impl Format for Plist {
                 .to_writer_binary(&mut buf)
                 .map_err(Error::PlistSerialize)?;
         } else {
-            refuse_xml_unrepresentable(node, &mut KeyPath::new())?;
             value
                 .to_writer_xml(&mut buf)
                 .map_err(Error::PlistSerialize)?;
@@ -262,31 +272,73 @@ fn xml_unrepresentable(text: &str) -> Option<char> {
 }
 
 
+/// Render `key` with anything unprintable escaped, so naming it in a diagnostic
+/// cannot emit a control byte into the reader's terminal.
+fn escape_key(key: &str) -> String {
+    key.chars()
+        .flat_map(|c| {
+            if c < '\u{20}' || c == '\u{7f}' {
+                format!("\\u{{{:x}}}", c as u32).chars().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 /// Refuse a write whose XML no conforming parser could read. macOS's own parser
 /// happens to tolerate these bytes, so emitting them would produce a file that
 /// works here and is invalid everywhere else -- `--plist-binary` carries them
-/// properly. Keys are reported as `<key>` under their map so the message never
-/// echoes a control byte.
-fn refuse_xml_unrepresentable(node: &Node<PlistLeaf>, path: &mut KeyPath) -> Result<(), Error> {
+/// properly.
+///
+/// Only what this run *introduces* is checked, against `target` (what the file
+/// already holds). A value already on disk is passed straight through by the
+/// reconcile, so refusing it would fail every run touching a file macOS itself
+/// wrote -- including a run that changes nothing at all.
+fn refuse_xml_unrepresentable(
+    node: &Node<PlistLeaf>,
+    target: Option<&Node<PlistLeaf>>,
+    path: &mut KeyPath,
+) -> Result<(), Error> {
+    // Anything the file already holds unchanged is not this run's to reject.
+    if target == Some(node) {
+        return Ok(());
+    }
     let refuse = |path: &KeyPath, character: char| Error::PlistXmlUnrepresentable {
         path: path.render(Plist::PATH_SEP),
         character,
     };
     match node {
         Node::Map(m) => {
+            let existing = match target {
+                Some(Node::Map(t)) => Some(t),
+                _ => None,
+            };
             for (key, value) in m {
-                if let Some(character) = xml_unrepresentable(key) {
-                    path.push("<key>".to_string());
-                    return Err(refuse(path, character));
+                let was_there = existing.and_then(|t| t.get(key));
+                if was_there.is_none() {
+                    if let Some(character) = xml_unrepresentable(key) {
+                        path.push(escape_key(key));
+                        return Err(refuse(path, character));
+                    }
                 }
                 path.push(key.clone());
-                refuse_xml_unrepresentable(value, path)?;
+                refuse_xml_unrepresentable(value, was_there, path)?;
                 path.pop();
             }
         }
         Node::Array(a) => {
+            let existing = match target {
+                Some(Node::Array(t)) => Some(t),
+                _ => None,
+            };
             for element in a {
-                refuse_xml_unrepresentable(element, path)?;
+                // Membership, not position: an element the file already had is
+                // untouched even if the reconcile moved it.
+                if existing.is_some_and(|t| t.contains(element)) {
+                    continue;
+                }
+                refuse_xml_unrepresentable(element, None, path)?;
             }
         }
         Node::Leaf(PlistLeaf::String(text)) => {

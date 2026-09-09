@@ -395,7 +395,7 @@ impl<F: Format> Backend for ByteBackend<F> {
 
     fn prepare(
         args: &RunArgs,
-        _target: &Node<F::Leaf>,
+        target: &Node<F::Leaf>,
         result: &Node<F::Leaf>,
     ) -> Result<Prepared, Error> {
         // Read the current on-disk text *once*: YAML/TOML use it as the basis for
@@ -403,6 +403,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         // plist ignore it when serializing). A single read keeps the serialized
         // output and the "changed?" verdict consistent against one snapshot.
         let current = fs::read(&args.target).unwrap_or_default();
+        F::refuse_on_write(result, target, write_opts(args))?;
         let output = F::serialize(result, &current, write_opts(args))?;
         Ok(Prepared {
             changed: output != current,

@@ -104,6 +104,18 @@ pub trait Format: ValueCodec {
     fn rewritten_on_read(_bytes: &[u8]) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Refuse a write whose output encoding cannot carry something the run is
+    /// *introducing*. `target` is what the file already holds, so a value it already
+    /// had is passed through untouched rather than refused -- otherwise a file the
+    /// app itself wrote would fail every run that touches the file at all, including
+    /// ones that change nothing. Default: nothing to refuse.
+    fn refuse_on_write(
+        _result: &Node<Self::Leaf>,
+        _target: &Node<Self::Leaf>,
+        _opts: WriteOpts,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
     /// Reduce a freshly parsed node to the precision this run's output encoding
     /// can actually hold. Applied to **every** input (TARGET, DESIRED, BASE), so
     /// the prune comparison, `--diff` and the change check all see the values

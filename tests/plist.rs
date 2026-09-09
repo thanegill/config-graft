@@ -617,8 +617,15 @@ fn a_value_xml_cannot_represent_is_refused_not_mangled() {
     let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("U+001B"), "got: {err}");
     assert!(err.contains("--plist-binary"), "got: {err}");
-    // The message locates the key without echoing the control byte.
-    assert!(err.contains("NSUserKeyEquivalents:<key>"), "got: {err}");
+    // The message names the key, with the control byte escaped rather than echoed.
+    assert!(
+        err.contains(r"NSUserKeyEquivalents:\u{1b}Window\u{1b}New Window"),
+        "got: {err}"
+    );
+    assert!(
+        !err.as_bytes().contains(&27u8),
+        "raw ESC reached the terminal"
+    );
     assert_eq!(fs::read(&target).unwrap(), before);
 
     // The same run as binary is fine -- that is what the flag is for.
@@ -738,6 +745,81 @@ fn normalization_does_not_warn_where_nothing_is_dropped() {
             pdict(vec![("d", instant(1_000_000, 700_000_000))]),
         ]),
         pdict(vec![("a", pint(2))]),
+    );
+}
+
+#[test]
+fn a_value_already_on_disk_is_not_refused_when_the_run_introduces_nothing() {
+    // macOS writes raw C0 controls into XML plists, and config-graft only passes
+    // them through, so a run that introduces nothing must not fail on them.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \t<key>NSUserKeyEquivalents</key>\n\t<dict>\n\
+         \t\t<key>{esc}Window</key>\n\t\t<string>@~n</string>\n\t</dict>\n\
+         \t<key>managed</key>\n\t<string>yes</string>\n</dict>\n</plist>\n"
+    );
+    std::fs::write(&target, &xml).unwrap();
+    pdict(vec![("managed", plist::Value::String("yes".into()))])
+        .to_file_xml(&desired)
+        .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "a pass-through run was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        std::fs::read(&target).unwrap().contains(&27u8),
+        "the ESC the app owns was dropped"
+    );
+
+    // `--check` must be able to report on the same file.
+    let checked = run(&[
+        "plist",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(checked.status.success());
+}
+
+#[test]
+fn a_value_the_run_introduces_is_still_refused_and_names_the_key() {
+    // Still refused when newly written, and the key is named with the byte escaped.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    pdict(vec![(
+        "NSUserKeyEquivalents",
+        pdict(vec![(
+            &format!("{esc}New")[..],
+            plist::Value::String("@~x".into()),
+        )]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert!(
+        err.contains(r"\u{1b}New"),
+        "the key should be named with the byte escaped, got: {err}"
+    );
+    assert!(
+        !err.as_bytes().contains(&27u8),
+        "the raw control byte must not reach the terminal"
     );
 }
 
