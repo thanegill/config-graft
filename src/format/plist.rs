@@ -168,18 +168,21 @@ impl Format for Plist {
         if opts.plist_binary {
             return Ok(Vec::new());
         }
-        // A value is only "already there" if it is still there *in what this run
-        // writes*: the target's copy may itself be pruned, leaving the byte in the
-        // file only because we just wrote it. So both sides are collected and a
-        // value passes only if it survives on both.
-        let mut already = Represented::default();
-        let mut surviving = Represented::default();
+        // Passing a value through is only honest while the occurrence the file
+        // already had is one this run still writes at the same place. The target's
+        // own copy may be pruned, which would leave the byte in the file only
+        // because we just wrote it -- and only when the target is already XML, since
+        // rewriting a binary plist emits every byte anew.
+        let mut carried = Carried::default();
         if is_xml_plist(current) {
-            collect_represented(target, &mut already);
-            collect_represented(result, &mut surviving);
+            let mut in_target = Represented::default();
+            let mut in_result = Represented::default();
+            collect_represented(target, &mut KeyPath::new(), &mut in_target);
+            collect_represented(result, &mut KeyPath::new(), &mut in_result);
+            carried = carried_over(&in_target, &in_result);
         }
         let mut kept = Vec::new();
-        check_xml_representable(result, &already, &surviving, &mut KeyPath::new(), &mut kept)?;
+        check_xml_representable(result, &carried, &mut KeyPath::new(), &mut kept)?;
         Ok(kept)
     }
 
@@ -187,7 +190,11 @@ impl Format for Plist {
         node: &Node<PlistLeaf>,
         opts: WriteOpts,
     ) -> Result<Option<Normalization<PlistLeaf>>, Error> {
-        if opts.plist_binary || !holds_a_fractional_date(node) {
+        if opts.plist_binary {
+            return Ok(None);
+        }
+        refuse_unspellable_dates(node, &mut KeyPath::new())?;
+        if !holds_a_fractional_date(node) {
             return Ok(None);
         }
         let mut normalized = node.clone();
@@ -248,9 +255,7 @@ fn floor_dates_to_whole_seconds(
     match node {
         Node::Map(m) => {
             for (key, value) in m.iter_mut() {
-                // Escaped, or a warning about a date under a control-bearing key
-                // prints the raw byte.
-                path.push(escape_key(key));
+                path.push(key.clone());
                 floor_dates_to_whole_seconds(value, path, rewritten)?;
                 path.pop();
             }
@@ -306,44 +311,64 @@ fn is_xml_plist(bytes: &[u8]) -> bool {
     text.starts_with(b"<?xml") || text.starts_with(b"<!DOCTYPE") || text.starts_with(b"<plist")
 }
 
-/// Escape the unprintable, so naming a key cannot emit a control byte.
-fn escape_key(key: &str) -> String {
-    key.chars()
-        .flat_map(|c| {
-            if c < '\u{20}' || c == '\u{7f}' {
-                format!("\\u{{{:x}}}", c as u32).chars().collect::<Vec<_>>()
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
-}
-
-/// The strings and the dictionary keys of `node`, kept apart: a byte the file
-/// holds as a key says nothing about writing it as a value.
+/// Where each unrepresentable string and dictionary key of a document sits, keys
+/// and values kept apart: a byte the file holds as a key says nothing about writing
+/// it as a value. Paired with the path so pre-existence can be judged by *position*
+/// -- a value still at the place the file had it is one this run is not responsible
+/// for, while the same text somewhere new is.
 #[derive(Default)]
-struct Represented<'a> {
-    keys: std::collections::HashSet<&'a str>,
-    values: std::collections::HashSet<&'a str>,
+struct Represented {
+    keys: std::collections::HashSet<(String, String)>,
+    values: std::collections::HashSet<(String, String)>,
 }
 
-fn collect_represented<'a>(node: &'a Node<PlistLeaf>, into: &mut Represented<'a>) {
+fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Represented) {
     match node {
         Node::Map(m) => {
             for (key, value) in m {
-                into.keys.insert(key);
-                collect_represented(value, into);
+                path.push(key.clone());
+                if xml_unrepresentable(key).is_some() {
+                    into.keys
+                        .insert((path.render(Plist::PATH_SEP), key.clone()));
+                }
+                collect_represented(value, path, into);
+                path.pop();
             }
         }
         Node::Array(a) => {
             for element in a {
-                collect_represented(element, into);
+                collect_represented(element, path, into);
             }
         }
-        Node::Leaf(PlistLeaf::String(text)) => {
-            into.values.insert(text);
+        Node::Leaf(PlistLeaf::String(text)) if xml_unrepresentable(text).is_some() => {
+            into.values
+                .insert((path.render(Plist::PATH_SEP), text.clone()));
         }
         Node::Leaf(_) => {}
+    }
+}
+
+/// The texts that are in the output for a reason other than this run.
+///
+/// Position decides *pre-existence* -- a text still at the place the file had it is
+/// one the run did not put there -- but licensing is by text: once such an
+/// occurrence survives, the byte is in the file regardless, so moving a value to
+/// another key introduces nothing. When the target's own copy is pruned instead,
+/// nothing carries over and the byte becomes this run's alone.
+#[derive(Default)]
+struct Carried {
+    keys: std::collections::HashSet<String>,
+    values: std::collections::HashSet<String>,
+}
+
+fn carried_over(target: &Represented, result: &Represented) -> Carried {
+    let texts = |a: &std::collections::HashSet<(String, String)>,
+                 b: &std::collections::HashSet<(String, String)>| {
+        a.intersection(b).map(|(_, text)| text.clone()).collect()
+    };
+    Carried {
+        keys: texts(&target.keys, &result.keys),
+        values: texts(&target.values, &result.values),
     }
 }
 
@@ -356,8 +381,7 @@ fn collect_represented<'a>(node: &'a Node<PlistLeaf>, into: &mut Represented<'a>
 /// written, and dropping that gate reopens issue #33.
 fn check_xml_representable(
     node: &Node<PlistLeaf>,
-    already: &Represented<'_>,
-    surviving: &Represented<'_>,
+    carried: &Carried,
     path: &mut KeyPath,
     kept: &mut Vec<Warning<PlistLeaf>>,
 ) -> Result<(), Error> {
@@ -369,14 +393,12 @@ fn check_xml_representable(
         let Some(character) = xml_unrepresentable(text) else {
             return Ok(());
         };
-        let (had, keeps) = if as_key {
-            (&already.keys, &surviving.keys)
+        let side = if as_key {
+            &carried.keys
         } else {
-            (&already.values, &surviving.values)
+            &carried.values
         };
-        // Passing it through is only honest while the occurrence the file already
-        // had is still one this run writes; otherwise the byte is ours alone.
-        if had.contains(text) && keeps.contains(text) {
+        if side.contains(text) {
             kept.push(Warning::NonConformingByteKept {
                 path: path.clone(),
                 character,
@@ -392,22 +414,63 @@ fn check_xml_representable(
     match node {
         Node::Map(m) => {
             for (key, value) in m {
-                // Escaped on the way down too, or a diagnostic about anything
-                // nested under this key prints the raw byte.
-                path.push(escape_key(key));
-                if xml_unrepresentable(key).is_some() {
-                    judge(key, true, path, kept)?;
-                }
-                check_xml_representable(value, already, surviving, path, kept)?;
+                path.push(key.clone());
+                judge(key, true, path, kept)?;
+                check_xml_representable(value, carried, path, kept)?;
                 path.pop();
             }
         }
         Node::Array(a) => {
             for element in a {
-                check_xml_representable(element, already, surviving, path, kept)?;
+                check_xml_representable(element, carried, path, kept)?;
             }
         }
         Node::Leaf(PlistLeaf::String(text)) => judge(text, false, path, kept)?,
+        Node::Leaf(_) => {}
+    }
+    Ok(())
+}
+
+/// Whether `date` can be spelled in the RFC 3339 form an XML plist uses. The
+/// `plist` crate **panics** rather than erroring outside years 0..=9999 -- in its
+/// writer and in `to_xml_format`, which `Leaf::render` reaches -- so a run that
+/// only passes such a value through would abort instead of refusing.
+fn is_spellable_in_xml(date: plist::Date) -> bool {
+    // Seconds from the Unix epoch to the start of year 0 and of year 10000.
+    const YEAR_0: i128 = -62_167_219_200;
+    const YEAR_10000: i128 = 253_402_300_800;
+    let seconds = match SystemTime::from(date).duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since) => i128::from(since.as_secs()),
+        // `as_secs` truncates toward zero, so a fraction before the epoch is one
+        // second further back than it reports.
+        Err(before) => {
+            let d = before.duration();
+            -(i128::from(d.as_secs()) + i128::from(d.subsec_nanos() != 0))
+        }
+    };
+    (YEAR_0..YEAR_10000).contains(&seconds)
+}
+
+/// Refuse a date the XML writer cannot spell, before anything tries to render it.
+fn refuse_unspellable_dates(node: &Node<PlistLeaf>, path: &mut KeyPath) -> Result<(), Error> {
+    match node {
+        Node::Map(m) => {
+            for (key, value) in m {
+                path.push(key.clone());
+                refuse_unspellable_dates(value, path)?;
+                path.pop();
+            }
+        }
+        Node::Array(a) => {
+            for element in a {
+                refuse_unspellable_dates(element, path)?;
+            }
+        }
+        Node::Leaf(PlistLeaf::Date(date)) if !is_spellable_in_xml(*date) => {
+            return Err(Error::PlistDateOutOfRange {
+                path: path.render(Plist::PATH_SEP),
+            })
+        }
         Node::Leaf(_) => {}
     }
     Ok(())

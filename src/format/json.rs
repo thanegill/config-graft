@@ -311,6 +311,11 @@ impl ValueCodec for Json {
 /// the common case compares without going through the literal; everything else
 /// keeps the source spelling.
 fn number_leaf(literal: &str) -> JsonLeaf {
+    // `-0` parses as `0` and would be written back without its sign -- the one
+    // respelling the lexical codec would otherwise still introduce.
+    if literal.starts_with('-') && literal[1..].bytes().all(|b| b == b'0') {
+        return JsonLeaf::Number(literal.to_string());
+    }
     if let Ok(i) = literal.parse::<i64>() {
         JsonLeaf::Int(i)
     } else if let Ok(u) = literal.parse::<u64>() {
@@ -320,16 +325,6 @@ fn number_leaf(literal: &str) -> JsonLeaf {
     }
 }
 
-/// Number literals in `bytes` that the parser stores differently from how they are
-/// written, as `(source, stored)` pairs in first-occurrence order.
-///
-/// serde_json normalizes an exponent while scanning -- `1e1` becomes `1e+1`, `1E2`
-/// becomes `1e+2` -- so by the time a `Number` exists its `as_str()` is already the
-/// rewritten form and nothing downstream can tell. The value is unchanged, but the
-/// bytes on disk are not, so it is reported rather than done quietly.
-///
-/// This walks the raw bytes because it has to happen before the parse. Strings are
-/// skipped so a number-shaped substring inside one is not mistaken for a literal.
 impl Format for Json {
     const KIND: FormatKind = FormatKind::Json;
     const PATH_SEP: &'static str = ".";
@@ -352,8 +347,8 @@ impl Format for Json {
         };
         // The default inlines a short array or object onto one line, which would
         // make the output shape depend on content rather than on `--indent`.
-        print.array_limit = Some(json_syntax::print::Limit::Always);
-        print.object_limit = Some(json_syntax::print::Limit::Always);
+        print.array_limit = Some(json_syntax::print::Limit::Item(0));
+        print.object_limit = Some(json_syntax::print::Limit::Item(0));
         let mut out = Json::encode(node).print_with(print).to_string();
         out.push('\n');
         Ok(out.into_bytes())

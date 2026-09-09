@@ -202,7 +202,7 @@ pub fn parse_indent(spec: &str) -> Result<Indent, String> {
 /// there and could not be understood. Keeping those apart matters: the run treats
 /// an absent TARGET as `{}`, which is right for a first apply and destructive for a
 /// file that merely failed to parse.
-pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error> {
+pub fn read_file<F: Format>(path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -214,7 +214,7 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error
         }
     };
     match F::parse(&bytes) {
-        Some(node) => Ok(Some(Input { node })),
+        Some(node) => Ok(Some(node)),
         // Checked only after parsing fails, so a format whose empty document is
         // meaningful (TOML's empty table) still parses it.
         None if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
@@ -222,17 +222,5 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error
             path: path.to_path_buf(),
             kind: F::KIND,
         }),
-    }
-}
-
-/// One of a run's inputs as it was read.
-pub struct Input<L: Leaf> {
-    pub node: Node<L>,
-}
-
-impl<L: Leaf> Input<L> {
-    /// An input nothing rewrote -- what a reader that does its own parsing returns.
-    pub fn clean(node: Node<L>) -> Input<L> {
-        Input { node }
     }
 }

@@ -171,9 +171,8 @@ impl fmt::Display for Error {
             ),
             Error::PlistDateOutOfRange { path } => write!(
                 f,
-                "the date at `{path}` is too far from the epoch to floor to a whole \
-                 second, which an XML plist requires; pass --plist-binary to write it \
-                 unchanged"
+                "the date at `{path}` falls outside the years an XML plist can \
+                 spell (0 to 9999); pass --plist-binary to write it unchanged"
             ),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
             Error::TomlUnsafe => f.write_str(TOML_UNSAFE),

@@ -25,6 +25,25 @@ pub type NodeList<L> = Vec<Node<L>>;
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct KeyPath(Vec<String>);
 
+/// Escape anything unprintable, so rendering a path cannot emit a control byte into
+/// the reader's terminal. Only *rendering* escapes: a segment stays the real key, or
+/// a path built for display could no longer be looked up.
+pub(crate) fn escape_unprintable(segment: &str) -> String {
+    if !segment.chars().any(|c| c < '\u{20}' || c == '\u{7f}') {
+        return segment.to_string();
+    }
+    segment
+        .chars()
+        .map(|c| {
+            if c < '\u{20}' || c == '\u{7f}' {
+                format!("\\u{{{:x}}}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 impl KeyPath {
     /// An empty path (the document root).
     pub(crate) fn new() -> KeyPath {
@@ -65,7 +84,7 @@ impl KeyPath {
             if i > 0 && !seg.starts_with('[') {
                 out.push_str(sep);
             }
-            out.push_str(seg);
+            out.push_str(&escape_unprintable(seg));
         }
         out
     }

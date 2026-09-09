@@ -12,11 +12,6 @@ use std::hash::{Hash, Hasher};
 
 use indexmap::IndexMap;
 
-/// A format's atomic leaf value. The engine treats leaves opaquely -- it only
-/// needs `Clone` + `Eq` + `Hash` (and `Debug` for diagnostics/tests) -- plus a
-/// compact rendering for `--diff`. `Eq`/`Hash` let array set-union and the GTS
-/// internals dedup via `HashSet` instead of quadratic linear scans; every impl
-/// must keep `Hash` consistent with `Eq` (equal values hash equal).
 /// JSON-escape and quote a string, for `--diff` and `Leaf::render`.
 pub fn quote(s: &str) -> String {
     json_syntax::Value::String(s.into())
@@ -41,6 +36,11 @@ pub fn render_f64(f: f64) -> String {
     }
 }
 
+/// A format's atomic leaf value. The engine treats leaves opaquely -- it only
+/// needs `Clone` + `Eq` + `Hash` (and `Debug` for diagnostics/tests) -- plus a
+/// compact rendering for `--diff`. `Eq`/`Hash` let array set-union and the GTS
+/// internals dedup via `HashSet` instead of quadratic linear scans; every impl
+/// must keep `Hash` consistent with `Eq` (equal values hash equal).
 pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug {
     /// Compact single-line rendering for `--diff`.
     fn render(&self) -> String;

@@ -15,7 +15,7 @@ mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, Toml, Yaml};
-use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
+use reconcile::{escape_unprintable, ArrayStrategy, KeyPath, MergeKeys};
 use value::quote;
 use value::{Leaf, Node};
 
@@ -441,7 +441,7 @@ impl<L: Leaf> Node<L> {
                 if seg.is_empty() {
                     quote(seg)
                 } else {
-                    seg.clone()
+                    escape_unprintable(seg)
                 }
             })
             .collect::<Vec<_>>()

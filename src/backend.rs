@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
-use crate::format::{
-    read_file, Format, FormatKind, Indent, Input, Normalization, Normalized, WriteOpts,
-};
+use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
@@ -167,7 +165,7 @@ pub(crate) trait Backend {
 
     /// Read a path into a `Node`. `Ok(None)` means absent/coercible-to-empty; an
     /// `Err` is a hard failure (e.g. a non-directory target for the tree backend).
-    fn read(args: &RunArgs, path: &Path) -> Result<Option<Input<Self::Leaf>>, Error>;
+    fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<Self::Leaf>>, Error>;
 
     /// Reduce a freshly read input to the precision this run's output encoding can
     /// hold. [`Backend::run`] calls it on each of TARGET, DESIRED and BASE, so all
@@ -220,7 +218,7 @@ pub(crate) trait Backend {
                 other => other,
             })?
             .ok_or_else(|| Self::error_desired_absent(args.desired.clone()))?;
-        let mut desired = desired_input.node;
+        let mut desired = desired_input;
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
@@ -234,9 +232,8 @@ pub(crate) trait Backend {
 
         // Only an *absent* TARGET is empty. Treating an unreadable or non-mapping
         // one as empty would write DESIRED over a file of keys the app owns.
-        let target_input = Self::read(args, &args.target)?;
-        let mut target = match target_input {
-            Some(input) if input.node.is_map() => input.node,
+        let mut target = match Self::read(args, &args.target)? {
+            Some(node) if node.is_map() => node,
             Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
             None => Node::empty_map(),
         };
@@ -260,7 +257,6 @@ pub(crate) trait Backend {
             .filter(|p| !p.is_empty());
         let mut base = base_path
             .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
-            .map(|input| input.node)
             .filter(Node::is_map);
         // BASE must be normalized too, or a floored TARGET never equals it and a
         // managed key can never be pruned. BASE is never written, so a failure here
@@ -279,14 +275,31 @@ pub(crate) trait Backend {
         let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
         // The engine sees normalized inputs, so two values it made equal look like
         // one identity the file held twice -- which the file never did.
-        let conflated: HashSet<(&KeyPath, String)> = target_risks
-            .iter()
-            .chain(desired_risks.iter())
-            .map(|n| (&n.path, n.value.compact()))
-            .collect();
-        warnings.retain(|w| match w {
-            Warning::DuplicateCollapsed { path, identity, .. } => {
-                !conflated.contains(&(path, identity.clone()))
+        // `n` distinct originals collapsing onto one value introduce `n - 1`
+        // equalities that were not in the file; occurrences beyond that are repeats
+        // the file genuinely held, and those are still worth reporting.
+        let mut origins: HashMap<(&KeyPath, String), HashSet<String>> = HashMap::new();
+        for n in target_risks.iter().chain(desired_risks.iter()) {
+            origins
+                .entry((&n.path, n.value.compact()))
+                .or_default()
+                .insert(n.original.compact());
+        }
+        warnings.retain_mut(|w| match w {
+            Warning::DuplicateCollapsed {
+                path,
+                identity,
+                held,
+                ..
+            } => {
+                // Subtract the repeats normalization made, not the whole report: the
+                // file may also hold a genuine duplicate, which is still worth
+                // saying even when a floor lands on the same value.
+                let made = origins
+                    .get(&(&*path, identity.clone()))
+                    .map_or(0, |o| o.len().saturating_sub(1));
+                *held = held.saturating_sub(made);
+                *held >= 2
             }
             _ => true,
         });
@@ -388,7 +401,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         }
     }
 
-    fn read(_args: &RunArgs, path: &Path) -> Result<Option<Input<F::Leaf>>, Error> {
+    fn read(_args: &RunArgs, path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
         read_file::<F>(path)
     }
 
@@ -447,9 +460,9 @@ impl Backend for Directory {
         Error::NotDirectory(path)
     }
 
-    fn read(args: &RunArgs, path: &Path) -> Result<Option<Input<FsLeaf>>, Error> {
+    fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<FsLeaf>>, Error> {
         // A tree is walked, not parsed, so nothing can be rewritten on the way in.
-        Ok(directory::read_tree(path, args.manage_root, args.dir_policy())?.map(Input::clean))
+        directory::read_tree(path, args.manage_root, args.dir_policy())
     }
 
     fn prepare(
