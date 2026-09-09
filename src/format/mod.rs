@@ -97,12 +97,16 @@ pub trait Format: ValueCodec {
     const NORMALIZES: bool = false;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
-    /// Scalars this format's *parser* rewrote before config-graft saw them, as
-    /// `(source, stored)` pairs. Reported so a rewrite the engine cannot see -- and
-    /// therefore cannot put in a `--diff` -- is still not silent. Default: parsing
-    /// preserves what it reads.
-    fn rewritten_on_read(_bytes: &[u8]) -> Vec<(String, String)> {
+    /// Scalars this format's *parser* rewrote before config-graft saw them, so a
+    /// rewrite no `--diff` can show is still not silent.
+    fn rewritten_on_read(_bytes: &[u8]) -> Vec<Rewritten> {
         Vec::new()
+    }
+
+    /// Refuse input the parser would accept but silently misread. On raw bytes,
+    /// because a `Node` no longer shows the difference.
+    fn refuse_on_read(_path: &Path, _bytes: &[u8]) -> Result<(), Error> {
+        Ok(())
     }
     /// Refuse a write whose output encoding cannot carry something the run is
     /// *introducing*. `target` is what the file already holds, so a value it already
@@ -135,6 +139,15 @@ pub trait Format: ValueCodec {
         current: &[u8],
         opts: WriteOpts,
     ) -> Result<Vec<u8>, Error>;
+}
+
+/// A scalar the parser stored differently from how the file spells it.
+pub struct Rewritten {
+    /// Empty inside an array, which `KeyPath` cannot address (issue #37);
+    /// reported as no path rather than a wrong one.
+    pub path: KeyPath,
+    pub source: String,
+    pub stored: String,
 }
 
 /// One array element that [`Format::normalize_for_run`] rewrote: `original` is what
@@ -230,6 +243,7 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
+    F::refuse_on_read(path, &bytes)?;
     match F::parse(&bytes) {
         Some(node) => Ok(Some(Input {
             node,
@@ -246,7 +260,7 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error
 /// parser rewrote on the way in.
 pub struct Input<L: Leaf> {
     pub node: Node<L>,
-    pub rewritten: Vec<(String, String)>,
+    pub rewritten: Vec<Rewritten>,
 }
 
 impl<L: Leaf> Input<L> {

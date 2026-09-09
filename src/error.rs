@@ -51,6 +51,9 @@ pub enum Error {
     Unreadable { path: PathBuf, kind: FormatKind },
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
+    /// A JSON input uses serde_json's sentinel as an object key, which the parser
+    /// would turn into a bare number.
+    JsonReservedKey { path: PathBuf, key: &'static str },
     /// A value at `path` holds a character XML 1.0 cannot represent, so writing
     /// the target as XML would produce a file no conforming parser can read. The
     /// write is refused; `--plist-binary` carries the value as-is.
@@ -146,6 +149,13 @@ impl fmt::Display for Error {
                  would replace it with DESIRED. Fix or remove the file.",
                 path.display(),
                 kind.name()
+            ),
+            Error::JsonReservedKey { path, key } => write!(
+                f,
+                "{} uses `{key}` as an object key, which this build reads as a \
+                 number rather than an object; refusing rather than rewriting the \
+                 value. Rename the key.",
+                path.display()
             ),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
             Error::PlistXmlUnrepresentable { path, character } => write!(

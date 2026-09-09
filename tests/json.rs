@@ -943,24 +943,63 @@ fn a_target_that_parses_to_a_non_object_is_refused() {
 }
 
 #[test]
-fn the_serde_json_number_token_key_does_not_replace_the_file() {
+fn the_serde_json_number_token_key_is_refused_at_any_depth() {
     // `arbitrary_precision` makes serde_json resolve an object whose first key is
-    // its private number token into a bare number, so this parses to a non-object
-    // and would otherwise take the empty path.
+    // its private number token into a bare number, at every depth. After the parse
+    // that is invisible, so it is refused on the raw bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let desired = dir.path().join("desired.json");
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
+
+    let refused = |name: &str, contents: &str| {
+        let target = dir.path().join(name);
+        fs::write(&target, contents).unwrap();
+        let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+        assert!(
+            err.contains("$serde_json::private::Number"),
+            "{name}: got: {err}"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), contents, "{name}");
+    };
+
+    refused(
+        "root.json",
+        r#"{"$serde_json::private::Number":"1","other":true}"#,
+    );
+    refused(
+        "nested.json",
+        r#"{"keep":{"$serde_json::private::Number":"1"},"a":1}"#,
+    );
+    // Unparseable rather than merely misread, but still not "fix or remove the file".
+    refused(
+        "nonnumeric.json",
+        r#"{"keep":{"$serde_json::private::Number":"hello"}}"#,
+    );
+    // Keys are compared decoded, so an escaped spelling cannot slip past.
+    refused(
+        "escaped.json",
+        r#"{"keep":{"\u0024serde_json::private::Number":"1"},"a":1}"#,
+    );
+}
+
+#[test]
+fn the_number_token_as_a_value_is_an_ordinary_string() {
+    // Only a *key* triggers the routing; as a value it is ordinary data.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
-    fs::write(
-        &target,
-        r#"{"$serde_json::private::Number":"1","other":true}"#,
-    )
-    .unwrap();
-    fs::write(&desired, r#"{"a":1}"#).unwrap();
+    fs::write(&target, r#"{"note":"$serde_json::private::Number","a":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":2}"#).unwrap();
 
-    let before = fs::read(&target).unwrap();
-    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(err.contains("refusing to treat it as empty"), "got: {err}");
-    assert_eq!(fs::read(&target).unwrap(), before);
+    assert!(
+        run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(written["note"], "$serde_json::private::Number");
+    assert_eq!(written["a"], 2);
 }
 
 #[test]

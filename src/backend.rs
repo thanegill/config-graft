@@ -31,8 +31,8 @@ fn write_opts(args: &RunArgs) -> WriteOpts {
     }
 }
 
-/// The originals normalization rewrote into each `(array path, resulting value)`.
-type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), Vec<&'a Node<L>>>;
+/// The originals rewritten into each `(array path, resulting value)`, and why.
+type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
 
 /// Report arrays where normalization conflated values an input distinguished and
 /// the reconcile then kept fewer copies than there were distinct originals.
@@ -54,8 +54,7 @@ fn lossy_collapses<L: Leaf>(
     desired: &Node<L>,
     result: &Node<L>,
     arrays: ArrayStrategy,
-    separator: &str,
-) -> Vec<String> {
+) -> Vec<Warning<L>> {
     // `concat` keeps duplicates and `replace` discards TARGET's array by request,
     // so neither can lose anything this way.
     if !matches!(arrays, ArrayStrategy::Merge | ArrayStrategy::Set) {
@@ -63,13 +62,14 @@ fn lossy_collapses<L: Leaf>(
     }
     let mut rewritten: Conflations<'_, L> = HashMap::new();
     for n in target_rewritten.iter().chain(desired_rewritten.iter()) {
-        rewritten
-            .entry((&n.path, &n.value))
-            .or_default()
-            .push(&n.original);
+        let entry = rewritten.entry((&n.path, &n.value)).or_default();
+        entry.0.push(&n.original);
+        // From a record that produced *this* value, not merely one sharing the path,
+        // so the message cannot attribute the loss to an unrelated rewrite.
+        entry.1 = n.because;
     }
-    let mut reported: Vec<String> = Vec::new();
-    for ((path, value), originals) in &rewritten {
+    let mut reported: Vec<Warning<L>> = Vec::new();
+    for ((path, value), (originals, because)) in &rewritten {
         let array = |node: &Node<L>| match node.get_path(path) {
             Some(Node::Array(a)) => Some(a.iter().filter(|e| e == value).count()),
             _ => None,
@@ -88,21 +88,16 @@ fn lossy_collapses<L: Leaf>(
         if distinct.len() < 2 || kept >= distinct.len() {
             continue;
         }
-        reported.push(format!(
-            "array `{}` held {} values that normalizing made identical, and \
-             membership is a set, so only {kept} survived; {}",
-            path.render(separator),
-            distinct.len(),
-            target_rewritten
-                .iter()
-                .chain(desired_rewritten.iter())
-                .find(|n| &n.path == *path)
-                .map_or("", |n| n.because),
-        ));
+        reported.push(Warning::ArrayCollapsed {
+            path: (*path).clone(),
+            distinct: distinct.len(),
+            kept,
+            because,
+        });
     }
     // A `HashMap` iterates in an arbitrary order; sort so the same inputs always
     // produce the same diagnostics.
-    reported.sort();
+    reported.sort_by_key(|w| w.path().clone());
     reported
 }
 
@@ -237,17 +232,19 @@ pub(crate) trait Backend {
         // The parser can rewrite a scalar before the engine ever sees it -- a JSON
         // exponent's spelling, say. The value is unchanged, so no diff can show it,
         // but the bytes on disk will differ; say so rather than rewrite quietly.
-        for (source, stored) in target_input
+        let respellings: Vec<Warning<Self::Leaf>> = target_input
             .iter()
             .flat_map(|i| i.rewritten.iter())
-            .map(|(s, t)| (s, t))
-            .chain(desired_input.rewritten.iter().map(|(s, t)| (s, t)))
-        {
-            eprintln!(
-                "config-graft: warning: the number `{source}` is stored as `{stored}`, \
-                 so writing normalizes its spelling"
-            );
-        }
+            .map(|r| (r, Source::Target))
+            .chain(desired_input.rewritten.iter().map(|r| (r, Source::Desired)))
+            .map(|(r, source)| Warning::NumberRespelled {
+                path: r.path.clone(),
+                source,
+                from: r.source.clone(),
+                to: r.stored.clone(),
+            })
+            .collect();
+        emit(&respellings, Self::COMPONENT_SEPARATOR);
         // `--diff` reports what a write would change, and normalizing the target is
         // one of those changes, so keep the node as it was read. Without this the
         // diff compares two already-normalized sides, prints nothing, and disagrees
@@ -296,17 +293,17 @@ pub(crate) trait Backend {
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
         emit(&warnings, Self::COMPONENT_SEPARATOR);
-        for message in lossy_collapses(
-            &target_risks,
-            &desired_risks,
-            &target,
-            &desired,
-            &result,
-            opts.arrays,
+        emit(
+            &lossy_collapses(
+                &target_risks,
+                &desired_risks,
+                &target,
+                &desired,
+                &result,
+                opts.arrays,
+            ),
             Self::COMPONENT_SEPARATOR,
-        ) {
-            eprintln!("config-graft: warning: {message}");
-        }
+        );
 
         if args.sort_keys {
             result = result.sort_keys();
