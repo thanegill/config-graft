@@ -355,3 +355,41 @@ fn merge_key_scoped_path_uses_the_plist_separator() {
     // Keyed by `id` -> one merged record with the updated field, not two entries.
     assert_eq!(read_plist(&target), doc("new"));
 }
+
+#[test]
+fn a_carriage_return_survives_an_xml_write() {
+    // XML 1.0 section 2.11 has a conforming parser normalize a *literal* CR to LF,
+    // so writing one changes the value. `&#13;` is exempt from that normalization.
+    // Before plist 1.10 the writer emitted the byte raw and this read back as a
+    // line feed.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
+    pdict(vec![("note", plist::Value::String("line1\rline2".into()))])
+        .to_file_binary(&desired)
+        .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let written = fs::read(&target).unwrap();
+    assert!(
+        !written.contains(&b'\r'),
+        "a raw CR was written:\n{}",
+        String::from_utf8_lossy(&written)
+    );
+
+    let plist::Value::Dictionary(d) = read_plist(&target) else {
+        panic!("expected a dictionary");
+    };
+    assert_eq!(
+        d.get("note").unwrap().clone(),
+        plist::Value::String("line1\rline2".into())
+    );
+}
