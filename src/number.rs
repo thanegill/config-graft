@@ -7,7 +7,8 @@
 //! pruned, and a DESIRED spelled differently from TARGET reads as a change.
 //!
 //! json-syntax cannot do this for us: it stores numbers lexically and compares them
-//! lexically, so by its own `Eq` a `1` is greater than a `0.1e+80`. Comparison must
+//! lexically, so by its own derived `Ord` a `1` is greater than a `0.1e+80` (and its
+//! `Eq` makes `1` differ from `1.0`). Comparison must
 //! go through [`number_value`], never through the parser's number type.
 //!
 //! [`NumberValue`] borrows the literal and allocates nothing, because `Node`
@@ -37,17 +38,9 @@ pub(crate) enum NumberValue<'a> {
     },
 }
 
-impl NumberValue<'_> {
-    /// The significant digits in order, however the literal split them.
-    fn digits(&self) -> impl Iterator<Item = u8> + '_ {
-        let (integer, fraction) = match self {
-            NumberValue::Decimal {
-                integer, fraction, ..
-            } => (*integer, *fraction),
-            NumberValue::Integer(_) => ("", ""),
-        };
-        integer.bytes().chain(fraction.bytes())
-    }
+/// The significant digits of a decimal in order, however the literal split them.
+fn digits<'a>(integer: &'a str, fraction: &'a str) -> impl Iterator<Item = u8> + 'a {
+    integer.bytes().chain(fraction.bytes())
 }
 
 impl PartialEq for NumberValue<'_> {
@@ -57,15 +50,17 @@ impl PartialEq for NumberValue<'_> {
             (
                 NumberValue::Decimal {
                     negative: a,
+                    integer: ai,
+                    fraction: af,
                     exponent: x,
-                    ..
                 },
                 NumberValue::Decimal {
                     negative: b,
+                    integer: bi,
+                    fraction: bf,
                     exponent: y,
-                    ..
                 },
-            ) => a == b && x == y && self.digits().eq(other.digits()),
+            ) => a == b && x == y && digits(ai, af).eq(digits(bi, bf)),
             _ => false,
         }
     }
@@ -79,14 +74,17 @@ impl Hash for NumberValue<'_> {
         match self {
             NumberValue::Integer(value) => value.hash(state),
             NumberValue::Decimal {
-                negative, exponent, ..
+                negative,
+                integer,
+                fraction,
+                exponent,
             } => {
                 negative.hash(state);
                 exponent.hash(state);
                 // Length-prefixed, so two different digit sequences cannot hash the
                 // same by running together.
-                self.digits().count().hash(state);
-                for digit in self.digits() {
+                digits(integer, fraction).count().hash(state);
+                for digit in digits(integer, fraction) {
                     digit.hash(state);
                 }
             }
@@ -111,14 +109,15 @@ pub(crate) fn number_value(literal: &str) -> Option<NumberValue<'_>> {
         None => (mantissa, ""),
     };
 
-    // Anchor the exponent at the last digit, then trim the zeros that carry no
-    // information: trailing ones raise the exponent, leading ones are simply not
-    // significant.
-    let mut exponent = exponent.checked_sub(fraction.len() as i64)?;
+    // Drop the fraction's trailing zeros *before* anchoring the exponent at its
+    // last digit. Subtracting the untrimmed length first can underflow on an
+    // extreme exponent even when the trimmed result is perfectly describable, which
+    // left `1.0e-9223372036854775808` without an identity while `1e-...808` had one
+    // -- the same number comparing unequal, and a zero that did not equal zero.
     while let Some(trimmed) = fraction.strip_suffix('0') {
         fraction = trimmed;
-        exponent = exponent.checked_add(1)?;
     }
+    let mut exponent = exponent.checked_sub(fraction.len() as i64)?;
     if fraction.is_empty() {
         while let Some(trimmed) = integer.strip_suffix('0') {
             integer = trimmed;
@@ -168,29 +167,30 @@ fn whole(negative: bool, integer: &str, fraction: &str, exponent: i64) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::hash_map::DefaultHasher;
+    use bigdecimal::BigDecimal;
+    use std::hash::DefaultHasher;
+    use std::str::FromStr;
 
-    fn hash_of(literal: &str) -> Option<u64> {
-        number_value(literal).map(|v| {
-            let mut hasher = DefaultHasher::new();
-            v.hash(&mut hasher);
-            hasher.finish()
-        })
+    fn identity(literal: &str) -> NumberValue<'_> {
+        number_value(literal).unwrap_or_else(|| panic!("{literal} should have an identity"))
     }
 
-    /// Equal values must hash equal, or the `HashSet` dedup behind array set-union
-    /// and the GTS internals silently keeps both.
+    fn hash_of(literal: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        identity(literal).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Both literals must *have* an identity and agree. Asserting they are `Some`
+    /// first matters: `assert_eq!(None, None)` would pass, so a regression that
+    /// merely declines more inputs would slip through every case below.
     fn assert_same(a: &str, b: &str) {
-        assert_eq!(number_value(a), number_value(b), "{a} should equal {b}");
+        assert_eq!(identity(a), identity(b), "{a} should equal {b}");
         assert_eq!(hash_of(a), hash_of(b), "{a} and {b} should hash equal");
     }
 
     fn assert_different(a: &str, b: &str) {
-        assert_ne!(
-            number_value(a),
-            number_value(b),
-            "{a} should differ from {b}"
-        );
+        assert_ne!(identity(a), identity(b), "{a} should differ from {b}");
     }
 
     #[test]
@@ -201,6 +201,7 @@ mod tests {
         assert_same("0.1", "0.10");
         assert_same("0.1", "1e-1");
         assert_same("2.5", "2.50");
+        assert_same("1.23", "1.230");
         assert_same("1", "0.1e1");
     }
 
@@ -233,14 +234,64 @@ mod tests {
         assert_different("1.2345678901234567890123", "1.2345678901234567890124");
     }
 
+    /// An extreme exponent must not cost a literal its identity just because the
+    /// fraction's trailing zeros had not been trimmed yet: the two spellings below
+    /// are the same number, and the zero is still zero.
+    #[test]
+    fn a_trimmable_fraction_does_not_underflow_the_exponent() {
+        assert_same("1e-9223372036854775808", "1.0e-9223372036854775808");
+        assert_same("0", "0.0e-9223372036854775808");
+        assert_same("1e9223372036854775807", "1.0e9223372036854775807");
+    }
+
     #[test]
     fn an_exponent_too_large_to_describe_has_no_identity() {
+        // No lossy stand-in: callers compare the literals themselves instead.
         assert!(number_value("1e999999999999999999999").is_none());
         assert!(number_value("1e-999999999999999999999").is_none());
-        // The callers fall back to comparing literals, so this must stay `None`
-        // rather than becoming some lossy stand-in.
         assert!(number_value("1e400").is_some());
     }
+
+    /// Literals whose pairs must agree with an arbitrary-precision decimal. Includes
+    /// three spellings of a whole number past `i128`, so the `Integer`/`Decimal`
+    /// handoff is cross-checked rather than only exercised on one side.
+    const CORPUS: &[&str] = &[
+        "0",
+        "-0",
+        "0.0",
+        "1",
+        "-1",
+        "10",
+        "10.0",
+        "1e1",
+        "1E1",
+        "0.1",
+        "0.10",
+        "1e-1",
+        "2.5",
+        "2.50",
+        "5",
+        "0.5e1",
+        "1000",
+        "0.001e6",
+        "120",
+        "0.12e3",
+        "100",
+        "1e2",
+        "-5",
+        "-0.5e1",
+        "123456789012345678901234567890",
+        "1.2345678901234567890123",
+        "1.2345678901234567890124",
+        "3.14159",
+        "314159e-5",
+        "1e400",
+        "-1e400",
+        "0e100",
+        "1e40",
+        "10000000000000000000000000000000000000000",
+        "100e38",
+    ];
 
     /// Cross-check the hand-written normalization against an arbitrary-precision
     /// decimal. `bigdecimal` is a dev-dependency only: it allocates per comparison
@@ -248,52 +299,16 @@ mod tests {
     /// an oracle for the tests rather than a replacement for the real thing.
     #[test]
     fn agrees_with_an_arbitrary_precision_decimal() {
-        use bigdecimal::BigDecimal;
-        use std::str::FromStr;
-
-        let literals = [
-            "0",
-            "-0",
-            "0.0",
-            "1",
-            "-1",
-            "10",
-            "10.0",
-            "1e1",
-            "1E1",
-            "0.1",
-            "0.10",
-            "1e-1",
-            "2.5",
-            "2.50",
-            "5",
-            "0.5e1",
-            "1000",
-            "0.001e6",
-            "120",
-            "0.12e3",
-            "100",
-            "1e2",
-            "-5",
-            "-0.5e1",
-            "123456789012345678901234567890",
-            "1.2345678901234567890123",
-            "1.2345678901234567890124",
-            "3.14159",
-            "314159e-5",
-            "1e400",
-            "-1e400",
-            "0e100",
-        ];
-
-        for a in literals {
-            for b in literals {
+        let mut compared = 0usize;
+        for a in CORPUS {
+            for b in CORPUS {
                 let (Some(x), Some(y)) = (number_value(a), number_value(b)) else {
-                    continue;
+                    panic!("{a} or {b} lost its identity");
                 };
                 let (Ok(bx), Ok(by)) = (BigDecimal::from_str(a), BigDecimal::from_str(b)) else {
-                    continue;
+                    panic!("the oracle cannot describe {a} or {b}");
                 };
+                compared += 1;
                 assert_eq!(
                     x == y,
                     bx == by,
@@ -306,5 +321,55 @@ mod tests {
                 }
             }
         }
+        // Guards against the whole test going vacuous if a future edit reintroduces
+        // a skip: a regression that simply declines every literal must not pass.
+        assert_eq!(compared, CORPUS.len() * CORPUS.len());
+    }
+
+    /// The same cross-check over generated literals, so coverage is not limited to
+    /// the shapes someone thought to list. Deterministic, so a failure reproduces.
+    #[test]
+    fn agrees_with_the_oracle_on_generated_literals() {
+        // xorshift64*, so the corpus is fixed without pulling in an rng crate.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let literal = |r: u64| {
+            let digits = (r % 20) + 1;
+            let mut mantissa = String::new();
+            for i in 0..digits {
+                mantissa.push(char::from(b'0' + ((r >> (i % 40)) % 10) as u8));
+            }
+            let point = (r >> 7) as usize % mantissa.len();
+            if point > 0 {
+                mantissa.insert(point, '.');
+            }
+            if r & 0x100 != 0 {
+                mantissa.insert(0, '-');
+            }
+            let exponent = (r >> 11) as i64 % 40 - 20;
+            format!("{mantissa}e{exponent}")
+        };
+
+        let mut compared = 0usize;
+        for _ in 0..2_000 {
+            let (a, b) = (literal(next()), literal(next()));
+            let (Some(x), Some(y)) = (number_value(&a), number_value(&b)) else {
+                panic!("{a} or {b} lost its identity");
+            };
+            let (Ok(bx), Ok(by)) = (BigDecimal::from_str(&a), BigDecimal::from_str(&b)) else {
+                panic!("the oracle cannot describe {a} or {b}");
+            };
+            compared += 1;
+            assert_eq!(x == y, bx == by, "disagreed on {a} vs {b}");
+            if x == y {
+                assert_eq!(hash_of(&a), hash_of(&b), "{a} == {b} but hashes differ");
+            }
+        }
+        assert_eq!(compared, 2_000);
     }
 }

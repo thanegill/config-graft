@@ -310,24 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn numbers_compare_by_value_not_by_spelling() {
-        for (a, b) in [
-            ("0.10", "0.1"),
-            ("1e-1", "0.1"),
-            ("1.230", "1.23"),
-            ("-0.0", "0.0"),
-            ("1E2", "1e2"),
-        ] {
-            assert_eq!(leaf(a), leaf(b), "{a} and {b} are the same number");
-            assert_eq!(
-                hash_of(&leaf(a)),
-                hash_of(&leaf(b)),
-                "{a} and {b} must hash alike"
-            );
-        }
-    }
-
-    #[test]
     fn a_number_is_one_value_across_the_three_variants() {
         // `10` decodes as Int, the rest as Number literals; all denote one number,
         // so an app rewriting a managed `10` as `10.0` is not read as a hand-edit.
@@ -341,12 +323,6 @@ mod tests {
         }
         // ... and a non-integer still is not one.
         assert_ne!(leaf("10"), leaf("10.5"));
-    }
-
-    #[test]
-    fn numbers_that_differ_beyond_f64_are_not_equal() {
-        // The whole point: an f64 would collapse these two into one value.
-        assert_ne!(leaf("1.2345678901234567890123"), leaf("1.2345678901234567"));
     }
 
     #[test]
