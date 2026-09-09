@@ -938,7 +938,9 @@ fn a_target_that_parses_to_a_non_object_is_refused() {
 
     let before = fs::read(&target).unwrap();
     let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(err.contains("refusing to treat it as empty"), "got: {err}");
+    // Valid JSON; the problem is the root's shape, not a syntax error.
+    assert!(err.contains("root is not an object"), "got: {err}");
+    assert!(!err.contains("not valid JSON"), "got: {err}");
     assert_eq!(fs::read(&target).unwrap(), before);
 }
 
@@ -1072,4 +1074,21 @@ fn a_spelling_the_parser_normalizes_is_reported() {
     fs::write(&target, "{\n  \"x\": 1.50,\n  \"a\": 1\n}\n").unwrap();
     let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+#[test]
+fn an_unparseable_desired_is_reported_as_desired() {
+    // The unreadable-TARGET wording says nothing about a DESIRED that fails to parse.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1}"#).unwrap();
+    fs::write(&desired, r#"{"a":"#).unwrap();
+
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("DESIRED"), "got: {err}");
+    assert!(
+        !err.contains("refusing to treat it as empty"),
+        "TARGET wording leaked onto the DESIRED path: {err}"
+    );
 }

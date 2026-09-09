@@ -68,6 +68,17 @@ impl FormatKind {
         }
     }
 
+    /// What this format calls its root mapping, for diagnostics.
+    pub fn mapping_name(self) -> &'static str {
+        match self {
+            FormatKind::Json => "an object",
+            FormatKind::Plist => "a dictionary",
+            FormatKind::Yaml => "a mapping",
+            FormatKind::Toml => "a table",
+            FormatKind::Directory => "a directory",
+        }
+    }
+
     /// The format-specific error for DESIRED's root not being this format's
     /// object/dictionary/mapping type.
     pub fn desired_not_mapping(self, path: PathBuf) -> Error {
@@ -108,6 +119,7 @@ pub trait Format: ValueCodec {
     fn refuse_on_read(_path: &Path, _bytes: &[u8]) -> Result<(), Error> {
         Ok(())
     }
+
     /// Refuse a write whose output encoding cannot carry something the run is
     /// *introducing*. `target` is what the file already holds, so a value it already
     /// had is passed through untouched rather than refused -- otherwise a file the
@@ -222,8 +234,6 @@ pub fn parse_indent(spec: &str) -> Result<Indent, String> {
         .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))
 }
 
-/// Read and parse `path` with format `F`. Returns `None` if the file is missing or
-/// does not parse as that format. Keeps file I/O out of the [`Format`] trait.
 /// Read and parse `path` with format `F`. `Ok(None)` means the file is not there
 /// (or is empty, which is how a caller stages a first apply); an `Err` means it is
 /// there and could not be understood. Keeping those apart matters: the run treats
@@ -240,15 +250,15 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Input<F::Leaf>>, Error
             })
         }
     };
-    if bytes.iter().all(u8::is_ascii_whitespace) {
-        return Ok(None);
-    }
     F::refuse_on_read(path, &bytes)?;
     match F::parse(&bytes) {
         Some(node) => Ok(Some(Input {
             node,
             rewritten: F::rewritten_on_read(&bytes),
         })),
+        // Checked only after parsing fails, so a format whose empty document is
+        // meaningful (TOML's empty table) still parses it.
+        None if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
         None => Err(Error::Unreadable {
             path: path.to_path_buf(),
             kind: F::KIND,
