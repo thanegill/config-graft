@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use indexmap::IndexMap;
 
-use super::{Format, FormatKind, Normalized, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, Normalization, Normalized, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::reconcile::KeyPath;
 use crate::value::{canonical_float_bits, Leaf, Node};
@@ -153,7 +153,6 @@ impl ValueCodec for Plist {
 impl Format for Plist {
     const KIND: FormatKind = FormatKind::Plist;
     const PATH_SEP: &'static str = ":";
-    const NORMALIZES: bool = true;
 
     fn parse(bytes: &[u8]) -> Option<Node<PlistLeaf>> {
         let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;
@@ -179,15 +178,19 @@ impl Format for Plist {
     }
 
     fn normalize_for_run(
-        node: &mut Node<PlistLeaf>,
+        node: &Node<PlistLeaf>,
         opts: WriteOpts,
-    ) -> Result<Vec<Normalized<PlistLeaf>>, Error> {
-        if opts.plist_binary {
-            return Ok(Vec::new());
+    ) -> Result<Option<Normalization<PlistLeaf>>, Error> {
+        if opts.plist_binary || !holds_a_fractional_date(node) {
+            return Ok(None);
         }
+        let mut normalized = node.clone();
         let mut rewritten = Vec::new();
-        floor_dates_to_whole_seconds(node, &mut KeyPath::new(), &mut rewritten)?;
-        Ok(rewritten)
+        floor_dates_to_whole_seconds(&mut normalized, &mut KeyPath::new(), &mut rewritten)?;
+        Ok(Some(Normalization {
+            node: normalized,
+            rewritten,
+        }))
     }
 
     fn serialize(
@@ -412,6 +415,17 @@ fn check_xml_representable(
     Ok(())
 }
 
+/// Whether any date here would change under flooring. A read-only pass, so a plist
+/// with nothing to floor is copied no more than one that needs no normalizing.
+fn holds_a_fractional_date(node: &Node<PlistLeaf>) -> bool {
+    match node {
+        Node::Map(m) => m.values().any(holds_a_fractional_date),
+        Node::Array(a) => a.iter().any(holds_a_fractional_date),
+        Node::Leaf(PlistLeaf::Date(date)) => floor_date(*date) != Some(*date),
+        Node::Leaf(_) => false,
+    }
+}
+
 // Flooring moves an instant toward the past, which for a pre-epoch date means
 // *away* from the epoch (-1.5s floors to -2s) -- so neither arm can assume the
 // result is representable just because the input was. Both go through the checked
@@ -511,7 +525,9 @@ mod tests {
             plist_binary,
         };
         let mut node = Plist::decode(value).unwrap();
-        Plist::normalize_for_run(&mut node, opts).unwrap();
+        if let Some(n) = Plist::normalize_for_run(&node, opts).unwrap() {
+            node = n.node;
+        }
         Plist::serialize(&node, &[], opts).unwrap()
     }
 

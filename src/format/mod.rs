@@ -92,9 +92,6 @@ pub trait Format: ValueCodec {
     /// Separator between key-path segments in user-facing diagnostics (`--diff`,
     /// conflict warnings).
     const PATH_SEP: &'static str;
-    /// Whether [`Format::normalize_for_run`] can change a node at all -- lets the
-    /// run skip work that would be a no-op for formats that never normalize.
-    const NORMALIZES: bool = false;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
     /// Scalars this format's *parser* rewrote before config-graft saw them, so a
@@ -123,14 +120,14 @@ pub trait Format: ValueCodec {
     }
     /// Reduce a freshly parsed node to the precision this run's output encoding
     /// can actually hold. Applied to **every** input (TARGET, DESIRED, BASE), so
-    /// the prune comparison, `--diff` and the change check all see the values
-    /// that will land on disk rather than three different precisions. Default: the
-    /// model already round-trips, so nothing to do.
+    /// the prune comparison, `--diff` and the change check all see the values that
+    /// will land on disk rather than three different precisions. `None` means
+    /// nothing needed changing, so the caller keeps the node it already has.
     fn normalize_for_run(
-        _node: &mut Node<Self::Leaf>,
+        _node: &Node<Self::Leaf>,
         _opts: WriteOpts,
-    ) -> Result<Vec<Normalized<Self::Leaf>>, Error> {
-        Ok(Vec::new())
+    ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
+        Ok(None)
     }
     /// Serialize `node` to bytes. `current` is the target's existing on-disk bytes
     /// (used by YAML to preserve comments; ignored by JSON/plist). Output is bytes
@@ -149,6 +146,14 @@ pub struct Rewritten {
     pub path: KeyPath,
     pub source: String,
     pub stored: String,
+}
+
+/// A normalized copy of one input, produced only when there was something to
+/// change -- the caller keeps the original otherwise, so a format that normalizes
+/// nothing costs no allocation and the default folds away.
+pub struct Normalization<L: Leaf> {
+    pub node: Node<L>,
+    pub rewritten: Vec<Normalized<L>>,
 }
 
 /// One array element that [`Format::normalize_for_run`] rewrote: `original` is what
