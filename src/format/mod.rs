@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::error::Error;
 use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
+use crate::warning::Warning;
 
 pub(crate) mod directory;
 pub(crate) mod json;
@@ -53,18 +54,6 @@ impl FormatKind {
             FormatKind::Yaml => "YAML",
             FormatKind::Toml => "TOML",
             FormatKind::Directory => "a directory",
-        }
-    }
-
-    /// The format-specific error for DESIRED failing to parse.
-    pub fn invalid_desired(self, path: PathBuf) -> Error {
-        match self {
-            FormatKind::Json => Error::InvalidJson(path),
-            FormatKind::Plist => Error::InvalidPlist(path),
-            FormatKind::Yaml => Error::InvalidYaml(path),
-            FormatKind::Toml => Error::InvalidToml(path),
-            // DESIRED "doesn't parse as a directory" == it isn't one.
-            FormatKind::Directory => Error::NotDirectory(path),
         }
     }
 
@@ -120,17 +109,17 @@ pub trait Format: ValueCodec {
         Ok(())
     }
 
-    /// Refuse a write whose output encoding cannot carry something the run is
-    /// *introducing*. `target` is what the file already holds, so a value it already
-    /// had is passed through untouched rather than refused -- otherwise a file the
-    /// app itself wrote would fail every run that touches the file at all, including
-    /// ones that change nothing. Default: nothing to refuse.
+    /// Refuse a write whose output encoding cannot carry what the run *introduces*.
+    /// A value `target` already holds is passed through, or refusing it would fail
+    /// every run against a file the app itself wrote. `current` is needed too: a
+    /// value counts as already there only in the encoding being written.
     fn refuse_on_write(
         _result: &Node<Self::Leaf>,
         _target: &Node<Self::Leaf>,
+        _current: &[u8],
         _opts: WriteOpts,
-    ) -> Result<(), Error> {
-        Ok(())
+    ) -> Result<Vec<Warning<Self::Leaf>>, Error> {
+        Ok(Vec::new())
     }
     /// Reduce a freshly parsed node to the precision this run's output encoding
     /// can actually hold. Applied to **every** input (TARGET, DESIRED, BASE), so

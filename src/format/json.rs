@@ -362,19 +362,16 @@ fn rewritten_literals(bytes: &[u8]) -> Vec<Rewritten> {
                 i += 1;
             }
             b'"' => {
-                let Some((text, next)) = decode_string(bytes, i) else {
+                let Some(end) = string_end(bytes, i) else {
                     return found;
                 };
-                i = next;
-                let mut after = i;
-                while after < bytes.len() && bytes[after].is_ascii_whitespace() {
-                    after += 1;
-                }
-                if bytes.get(after) == Some(&b':') {
+                // Only a key names a path; stepping over a value avoids decoding it.
+                if next_significant(bytes, end) == Some(b':') {
                     if let Some(Frame::Object(key)) = stack.last_mut() {
-                        *key = Some(text);
+                        *key = decode_string(bytes, i).map(|(text, _)| text);
                     }
                 }
+                i = end;
             }
             b'-' | b'0'..=b'9' => {
                 let start = i;
@@ -468,19 +465,53 @@ fn has_arbitrary_precision_key(bytes: &[u8]) -> bool {
             i += 1;
             continue;
         }
-        let Some((text, next)) = decode_string(bytes, i) else {
+        // Unreadable here means invalid JSON, so there is no well-formed key left
+        // to miss and the parse fails anyway.
+        let Some(end) = string_end(bytes, i) else {
             return false;
         };
-        i = next;
-        let mut after = i;
-        while after < bytes.len() && bytes[after].is_ascii_whitespace() {
-            after += 1;
-        }
-        if bytes.get(after) == Some(&b':') && text == ARBITRARY_PRECISION_TOKEN {
+        let is_key = next_significant(bytes, end) == Some(b':');
+        // Decode nothing until both cheap checks pass.
+        if is_key
+            && could_be_token(&bytes[i..end])
+            && decode_string(bytes, i).is_some_and(|(text, _)| text == ARBITRARY_PRECISION_TOKEN)
+        {
             return true;
         }
+        i = end;
     }
     false
+}
+
+/// Index past the closing quote of the string at `bytes[i]`, without decoding.
+fn string_end(bytes: &[u8], mut i: usize) -> Option<usize> {
+    i += 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some(i + 1),
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The next byte after `from` that is not whitespace.
+fn next_significant(bytes: &[u8], from: usize) -> Option<u8> {
+    bytes[from..]
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .copied()
+}
+
+/// Whether `raw` (quotes included) could spell the token; an escaped span cannot
+/// be ruled out cheaply, so it falls through to a real decode.
+fn could_be_token(raw: &[u8]) -> bool {
+    let inner = &raw[1..raw.len().saturating_sub(1)];
+    if inner.contains(&b'\\') {
+        return true;
+    }
+    inner == ARBITRARY_PRECISION_TOKEN.as_bytes()
 }
 
 impl Format for Json {

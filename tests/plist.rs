@@ -749,6 +749,82 @@ fn normalization_does_not_warn_where_nothing_is_dropped() {
 }
 
 #[test]
+fn a_binary_target_is_refused_rather_than_rewritten_as_xml_with_the_byte() {
+    // Rewriting a binary plist as XML emits every byte anew, so nothing in it is
+    // "already written". The common shape: Preferences are binary and a
+    // `managedPlist` file entry defaults to `binary = false`.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    pdict(vec![(
+        "NSUserKeyEquivalents",
+        pdict(vec![(
+            &format!("{esc}Window")[..],
+            plist::Value::String("@~n".into()),
+        )]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let before = fs::read(&target).unwrap();
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert_eq!(fs::read(&target).unwrap(), before);
+    assert!(before.starts_with(b"bplist00"));
+
+    let out = run(&[
+        "plist",
+        "--plist-binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+}
+
+#[test]
+fn a_byte_xml_cannot_carry_that_is_passed_through_is_reported() {
+    // Passing a byte through writes XML a conforming parser rejects -- a deliberate
+    // trade, since refusing broke every activation, but not a silent one.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \t<key>a</key>\n\t<string>{esc}x</string>\n\
+         \t<key>b</key>\n\t<integer>1</integer>\n</dict>\n</plist>\n"
+    );
+    fs::write(&target, &xml).unwrap();
+    pdict(vec![("b", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("U+001B"), "the pass-through was silent: {err}");
+    assert!(err.contains("warning"), "got: {err}");
+
+    // Moving the same value to another key is not introducing it either.
+    let moved = dir.path().join("moved.plist");
+    fs::write(&target, &xml).unwrap();
+    pdict(vec![("c", plist::Value::String(format!("{esc}x")))])
+        .to_file_binary(&moved)
+        .unwrap();
+    let out = run(&["plist", target.to_str().unwrap(), moved.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "relocating a value the file already holds was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn a_value_already_on_disk_is_not_refused_when_the_run_introduces_nothing() {
     // macOS writes raw C0 controls into XML plists, and config-graft only passes
     // them through, so a run that introduces nothing must not fail on them.

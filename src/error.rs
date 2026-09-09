@@ -12,14 +12,6 @@ use std::path::{Path, PathBuf};
 /// mapping) rather than a generic catch-all.
 #[derive(Debug)]
 pub enum Error {
-    /// DESIRED did not parse as JSON.
-    InvalidJson(PathBuf),
-    /// DESIRED did not parse as a plist.
-    InvalidPlist(PathBuf),
-    /// DESIRED did not parse as YAML.
-    InvalidYaml(PathBuf),
-    /// DESIRED did not parse as TOML.
-    InvalidToml(PathBuf),
     /// DESIRED parsed but its root is not a JSON object.
     NotJsonObject(PathBuf),
     /// DESIRED parsed but its root is not a plist dictionary.
@@ -49,8 +41,11 @@ pub enum Error {
     /// unreadable one that way would replace a file full of app-owned data with
     /// DESIRED alone.
     Unreadable { path: PathBuf, kind: FormatKind },
-    /// DESIRED exists but could not be parsed. Distinct from [`Error::Unreadable`],
-    /// which is about a TARGET that must not be mistaken for empty.
+    /// Names DESIRED as the input an inner error came from.
+    InDesired(Box<Error>),
+    /// DESIRED is absent or empty, as opposed to present and unparseable.
+    DesiredAbsent { path: PathBuf, kind: FormatKind },
+    /// DESIRED exists but could not be parsed.
     UnreadableDesired { path: PathBuf, kind: FormatKind },
     /// TARGET parsed, but its root is not this format's mapping shape.
     TargetNotMapping { path: PathBuf, kind: FormatKind },
@@ -131,10 +126,6 @@ const TOML_UNSAFE: &str = "cannot safely edit this TOML while preserving comment
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidJson(p) => write!(f, "DESIRED is not valid JSON: {}", p.display()),
-            Error::InvalidPlist(p) => write!(f, "DESIRED is not valid plist: {}", p.display()),
-            Error::InvalidYaml(p) => write!(f, "DESIRED is not valid YAML: {}", p.display()),
-            Error::InvalidToml(p) => write!(f, "DESIRED is not valid TOML: {}", p.display()),
             Error::NotJsonObject(p) => write!(f, "DESIRED must be a JSON object: {}", p.display()),
             Error::NotPlistDictionary(p) => {
                 write!(f, "DESIRED must be a plist dictionary: {}", p.display())
@@ -157,10 +148,19 @@ impl fmt::Display for Error {
             ),
             Error::JsonReservedKey { path, key } => write!(
                 f,
-                "{} uses `{key}` as an object key, which this build reads as a \
-                 number rather than an object; refusing rather than rewriting the \
-                 value. Rename the key.",
+                "{} uses `{key}` as an object key. That name is reserved: this \
+                 build reads an object whose *first* key is it as a bare number, and \
+                 sorting or reordering can put it first, so the object would be \
+                 rewritten as a number. Refusing rather than risk that. Rename the key.",
                 path.display()
+            ),
+            Error::InDesired(inner) => write!(f, "in DESIRED: {inner}"),
+            Error::DesiredAbsent { path, kind } => write!(
+                f,
+                "DESIRED at {} does not exist or is empty, so there is no {} to \
+                 reconcile toward.",
+                path.display(),
+                kind.name()
             ),
             Error::UnreadableDesired { path, kind } => write!(
                 f,
