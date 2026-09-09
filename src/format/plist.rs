@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use super::{Format, FormatKind, Normalization, Normalized, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::reconcile::KeyPath;
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
 use crate::warning::Warning;
 
 /// Apple plist codec.
@@ -93,8 +93,8 @@ impl Leaf for PlistLeaf {
             PlistLeaf::Bool(b) => b.to_string(),
             PlistLeaf::Int(i) => i.to_string(),
             PlistLeaf::Uint(u) => u.to_string(),
-            PlistLeaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
-            PlistLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            PlistLeaf::Float(f) => render_f64(*f),
+            PlistLeaf::String(s) => quote(s),
             PlistLeaf::Date(d) => format!("<date {}>", d.to_xml_format()),
             PlistLeaf::Data(bytes) => format!("<data {} bytes>", bytes.len()),
             PlistLeaf::Uid(u) => format!("<uid {u}>"),

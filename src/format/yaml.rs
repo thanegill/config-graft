@@ -10,7 +10,7 @@ use saphyr::LoadableYamlNode;
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
 
 /// YAML codec.
 pub struct Yaml;
@@ -66,8 +66,8 @@ impl Leaf for YamlLeaf {
             YamlLeaf::Null => "null".to_string(),
             YamlLeaf::Bool(b) => b.to_string(),
             YamlLeaf::Int(i) => i.to_string(),
-            YamlLeaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
-            YamlLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            YamlLeaf::Float(f) => render_f64(*f),
+            YamlLeaf::String(s) => quote(s),
         }
     }
 }

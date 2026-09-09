@@ -163,7 +163,6 @@ dependencies = [
  "json-syntax",
  "plist",
  "saphyr",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",

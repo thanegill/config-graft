@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 
 use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{Leaf, Node};
+use crate::value::{quote, Leaf, Node};
 
 /// JSON codec.
 pub struct Json;
@@ -260,7 +260,7 @@ impl Leaf for JsonLeaf {
             JsonLeaf::Int(i) => i.to_string(),
             JsonLeaf::Uint(u) => u.to_string(),
             JsonLeaf::Number(lit) => lit.clone(),
-            JsonLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            JsonLeaf::String(s) => quote(s),
         }
     }
 }

@@ -9,7 +9,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
 
 /// TOML codec.
 pub struct Toml;
@@ -66,8 +66,8 @@ impl Leaf for TomlLeaf {
         match self {
             TomlLeaf::Bool(b) => b.to_string(),
             TomlLeaf::Int(i) => i.to_string(),
-            TomlLeaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
-            TomlLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            TomlLeaf::Float(f) => render_f64(*f),
+            TomlLeaf::String(s) => quote(s),
             // No JSON spelling -- a readable token, mirroring plist's `<date ...>`.
             TomlLeaf::Datetime(d) => format!("<datetime {d}>"),
         }
