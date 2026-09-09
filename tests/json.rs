@@ -864,13 +864,11 @@ fn an_out_of_range_exponent_does_not_destroy_the_target() {
 
     let written = fs::read_to_string(&target).unwrap();
     assert!(written.contains("mine"), "clobbered an app key:\n{written}");
-    // Compared as a value: serde_json normalizes the exponent's sign (`1e400` ->
-    // `1e+400`), so pinning the spelling would test serde_json, not config-graft.
-    let written_value: serde_json::Value = serde_json::from_str(&written).unwrap();
-    let expected: serde_json::Value = serde_json::from_str(r#"{"huge":1e400}"#).unwrap();
-    assert_eq!(
-        written_value["huge"], expected["huge"],
-        "lost the value:\n{written}"
+    // Byte-for-byte: the literal is carried through as the file spelled it, so the
+    // assertion can name it rather than compare parsed values.
+    assert!(
+        written.contains("\"huge\": 1e400"),
+        "lost the literal:\n{written}"
     );
 
     // And it stays put on a re-apply.
@@ -945,42 +943,49 @@ fn a_target_that_parses_to_a_non_object_is_refused() {
 }
 
 #[test]
-fn the_serde_json_number_token_key_is_refused_at_any_depth() {
-    // `arbitrary_precision` makes serde_json resolve an object whose first key is
-    // its private number token into a bare number, at every depth. After the parse
-    // that is invisible, so it is refused on the raw bytes.
+fn the_serde_json_number_token_key_is_ordinary_data() {
+    // Under serde_json's `arbitrary_precision`, an object whose first key was this
+    // decoded to a bare number at every depth, and the rewrite was invisible after
+    // the parse. The JSON codec no longer goes through serde_json, so the name
+    // carries no meaning and needs no guard.
     let dir = tempfile::tempdir().unwrap();
     let desired = dir.path().join("desired.json");
     fs::write(&desired, r#"{"a":2}"#).unwrap();
 
-    let refused = |name: &str, contents: &str| {
+    let kept = |name: &str, contents: &str| {
         let target = dir.path().join(name);
         fs::write(&target, contents).unwrap();
-        let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+        let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
         assert!(
-            err.contains("$serde_json::private::Number"),
-            "{name}: got: {err}"
+            out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(fs::read_to_string(&target).unwrap(), contents, "{name}");
+        let written = fs::read_to_string(&target).unwrap();
+        assert!(
+            written.contains("$serde_json::private::Number"),
+            "{name}: the app-owned object was rewritten:\n{written}"
+        );
+        written
     };
 
-    refused(
+    kept(
         "root.json",
         r#"{"$serde_json::private::Number":"1","other":true}"#,
     );
-    refused(
+    let nested = kept(
         "nested.json",
         r#"{"keep":{"$serde_json::private::Number":"1"},"a":1}"#,
     );
-    // Unparseable rather than merely misread, but still not "fix or remove the file".
-    refused(
+    // Still an object, not the bare number it used to collapse to.
+    assert!(
+        nested.contains("\"keep\": {"),
+        "collapsed to a number:\n{nested}"
+    );
+    // A payload that is not a number at all was previously unparseable.
+    kept(
         "nonnumeric.json",
         r#"{"keep":{"$serde_json::private::Number":"hello"}}"#,
-    );
-    // Keys are compared decoded, so an escaped spelling cannot slip past.
-    refused(
-        "escaped.json",
-        r#"{"keep":{"\u0024serde_json::private::Number":"1"},"a":1}"#,
     );
 }
 
@@ -1053,27 +1058,44 @@ fn a_number_spelled_differently_in_desired_does_not_rewrite_the_target() {
 }
 
 #[test]
-fn a_spelling_the_parser_normalizes_is_reported() {
-    // serde_json rewrites an exponent while scanning, so the engine never sees the
-    // source spelling and no diff can show it. Say so instead of writing quietly.
+fn a_number_reaches_the_writer_spelled_as_the_file_spelled_it() {
+    // serde_json rewrote an exponent while scanning (`1e1` -> `1e+1`), so the
+    // engine never saw the source spelling and the run could only report it.
+    // `json-syntax` keeps the literal, so there is nothing to report.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
-    fs::write(&target, "{\n  \"x\": 1e1,\n  \"a\": 1\n}\n").unwrap();
+    fs::write(
+        &target,
+        "{\n  \"x\": 1e1,\n  \"y\": 1E2,\n  \"z\": 2.50,\n  \"a\": 1\n}\n",
+    )
+    .unwrap();
     fs::write(&desired, r#"{"a":1}"#).unwrap();
 
     let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("the number `1e1` is stored as `1e+1`"),
-        "stderr was: {err}"
+        String::from_utf8_lossy(&out.stderr).is_empty(),
+        "nothing was rewritten, so nothing should be reported: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
-    // A file whose numbers survive as written says nothing.
-    fs::write(&target, "{\n  \"x\": 1.50,\n  \"a\": 1\n}\n").unwrap();
-    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let written = fs::read_to_string(&target).unwrap();
+    for literal in ["1e1", "1E2", "2.50"] {
+        assert!(
+            written.contains(literal),
+            "{literal} was respelled:\n{written}"
+        );
+    }
+
+    // And an untouched file is still a no-op, not a rewrite.
+    let out = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "re-apply was not a no-op");
 }
 
 #[test]

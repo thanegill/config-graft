@@ -7,7 +7,8 @@ license = "MIT"
 
 [dependencies]
 serde = "1"
-serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+json-syntax = "0.12"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 indexmap = "2"

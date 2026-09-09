@@ -1,14 +1,12 @@
 //! JSON codec, leaf type, and I/O.
 
 use indexmap::IndexMap;
-use serde::Serialize;
+use json_syntax::{Parse, Print};
 
 use std::hash::{Hash, Hasher};
-use std::path::Path;
 
-use super::{Format, FormatKind, Rewritten, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
 
 /// JSON codec.
@@ -269,45 +267,54 @@ impl Leaf for JsonLeaf {
 
 impl ValueCodec for Json {
     type Leaf = JsonLeaf;
-    type Value<'a> = serde_json::Value;
+    type Value<'a> = json_syntax::Value;
 
-    fn decode(value: &serde_json::Value) -> Option<Node<JsonLeaf>> {
-        use serde_json::Value;
+    fn decode(value: &json_syntax::Value) -> Option<Node<JsonLeaf>> {
+        use json_syntax::Value;
         Some(match value {
-            Value::Object(m) => {
-                let mut map = IndexMap::with_capacity(m.len());
-                for (k, v) in m {
-                    map.insert(k.clone(), Json::decode(v)?);
+            Value::Object(o) => {
+                let mut map = IndexMap::with_capacity(o.len());
+                for entry in o.iter() {
+                    // A duplicate key keeps the last occurrence, as every JSON
+                    // reader config-graft can be pointed at does.
+                    map.insert(entry.key.to_string(), Json::decode(&entry.value)?);
                 }
                 Node::Map(map)
             }
             Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect::<Option<_>>()?),
             Value::Null => Node::Leaf(JsonLeaf::Null),
-            Value::Bool(b) => Node::Leaf(JsonLeaf::Bool(*b)),
-            Value::String(s) => Node::Leaf(JsonLeaf::String(s.clone())),
-            Value::Number(num) => Node::Leaf(if let Some(i) = num.as_i64() {
-                JsonLeaf::Int(i)
-            } else if let Some(u) = num.as_u64() {
-                JsonLeaf::Uint(u)
-            } else {
-                JsonLeaf::Number(num.as_str().to_string())
-            }),
+            Value::Boolean(b) => Node::Leaf(JsonLeaf::Bool(*b)),
+            Value::String(s) => Node::Leaf(JsonLeaf::String(s.to_string())),
+            Value::Number(n) => Node::Leaf(number_leaf(n.as_str())),
         })
     }
 
-    fn encode(node: &Node<JsonLeaf>) -> serde_json::Value {
-        use serde_json::Value;
+    fn encode(node: &Node<JsonLeaf>) -> json_syntax::Value {
+        use json_syntax::Value;
         match node {
             Node::Map(m) => {
-                let mut obj = serde_json::Map::with_capacity(m.len());
+                let mut obj = json_syntax::Object::new();
                 for (k, v) in m {
-                    obj.insert(k.clone(), Json::encode(v));
+                    obj.push(k.as_str().into(), Json::encode(v));
                 }
                 Value::Object(obj)
             }
             Node::Array(a) => Value::Array(a.iter().map(Json::encode).collect()),
             Node::Leaf(l) => leaf_to_json(l),
         }
+    }
+}
+
+/// A number literal as a leaf. The exact 64-bit integers get their own variants so
+/// the common case compares without going through the literal; everything else
+/// keeps the source spelling.
+fn number_leaf(literal: &str) -> JsonLeaf {
+    if let Ok(i) = literal.parse::<i64>() {
+        JsonLeaf::Int(i)
+    } else if let Ok(u) = literal.parse::<u64>() {
+        JsonLeaf::Uint(u)
+    } else {
+        JsonLeaf::Number(literal.to_string())
     }
 }
 
@@ -321,219 +328,13 @@ impl ValueCodec for Json {
 ///
 /// This walks the raw bytes because it has to happen before the parse. Strings are
 /// skipped so a number-shaped substring inside one is not mistaken for a literal.
-/// One level of JSON nesting, tracked so a rewritten literal can be named.
-enum Frame {
-    Object(Option<String>),
-    Array,
-}
-
-/// The enclosing keys, or the root path once any array encloses the value:
-/// `KeyPath` addresses map keys, so an array's key would name the wrong thing
-/// (issue #37).
-fn literal_path(stack: &[Frame]) -> KeyPath {
-    let mut path = KeyPath::new();
-    for frame in stack {
-        match frame {
-            Frame::Array => return KeyPath::new(),
-            Frame::Object(Some(key)) => path.push(key.clone()),
-            Frame::Object(None) => return KeyPath::new(),
-        }
-    }
-    path
-}
-
-fn rewritten_literals(bytes: &[u8]) -> Vec<Rewritten> {
-    let mut found = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut stack: Vec<Frame> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => {
-                stack.push(Frame::Object(None));
-                i += 1;
-            }
-            b'[' => {
-                stack.push(Frame::Array);
-                i += 1;
-            }
-            b'}' | b']' => {
-                stack.pop();
-                i += 1;
-            }
-            b'"' => {
-                let Some(end) = string_end(bytes, i) else {
-                    return found;
-                };
-                // Only a key names a path; stepping over a value avoids decoding it.
-                if next_significant(bytes, end) == Some(b':') {
-                    if let Some(Frame::Object(key)) = stack.last_mut() {
-                        *key = decode_string(bytes, i).map(|(text, _)| text);
-                    }
-                }
-                i = end;
-            }
-            b'-' | b'0'..=b'9' => {
-                let start = i;
-                i += usize::from(bytes[i] == b'-');
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if i < bytes.len() && bytes[i] == b'.' {
-                    i += 1;
-                    while i < bytes.len() && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                }
-                if i < bytes.len() && (bytes[i] | 0x20) == b'e' {
-                    i += 1;
-                    i += usize::from(i < bytes.len() && matches!(bytes[i], b'+' | b'-'));
-                    while i < bytes.len() && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                }
-                let Ok(source) = std::str::from_utf8(&bytes[start..i]) else {
-                    continue;
-                };
-                if let Ok(number) = source.parse::<serde_json::Number>() {
-                    if number.as_str() != source && seen.insert(source.to_string()) {
-                        found.push(Rewritten {
-                            path: literal_path(&stack),
-                            source: source.to_string(),
-                            stored: number.as_str().to_string(),
-                        });
-                    }
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    found
-}
-
-/// serde_json's arbitrary-precision sentinel: an object whose *first* key is this
-/// decodes to a bare number instead of a map, at every nesting depth.
-const ARBITRARY_PRECISION_TOKEN: &str = "$serde_json::private::Number";
-
-/// Decode the string at `bytes[i]` and the index past its closing quote.
-fn decode_string(bytes: &[u8], mut i: usize) -> Option<(String, usize)> {
-    i += 1;
-    let mut out = String::new();
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return Some((out, i + 1)),
-            b'\\' => {
-                let escape = *bytes.get(i + 1)?;
-                i += 2;
-                match escape {
-                    b'"' => out.push('"'),
-                    b'\\' => out.push('\\'),
-                    b'/' => out.push('/'),
-                    b'b' => out.push('\u{8}'),
-                    b'f' => out.push('\u{c}'),
-                    b'n' => out.push('\n'),
-                    b'r' => out.push('\r'),
-                    b't' => out.push('\t'),
-                    b'u' => {
-                        let hex = bytes.get(i..i + 4)?;
-                        let code = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
-                        i += 4;
-                        out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
-                    }
-                    _ => return None,
-                }
-            }
-            _ => {
-                let start = i;
-                while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\\' {
-                    i += 1;
-                }
-                out.push_str(std::str::from_utf8(bytes.get(start..i)?).ok()?);
-            }
-        }
-    }
-    None
-}
-
-/// Whether any object *key* in `bytes` is the sentinel. Checked here because after
-/// the parse the misreading is indistinguishable from a real number. Keys are
-/// compared decoded, so an escaped spelling is caught too.
-fn has_arbitrary_precision_key(bytes: &[u8]) -> bool {
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'"' {
-            i += 1;
-            continue;
-        }
-        // Unreadable here means invalid JSON, so there is no well-formed key left
-        // to miss and the parse fails anyway.
-        let Some(end) = string_end(bytes, i) else {
-            return false;
-        };
-        let is_key = next_significant(bytes, end) == Some(b':');
-        // Decode nothing until both cheap checks pass.
-        if is_key
-            && could_be_token(&bytes[i..end])
-            && decode_string(bytes, i).is_some_and(|(text, _)| text == ARBITRARY_PRECISION_TOKEN)
-        {
-            return true;
-        }
-        i = end;
-    }
-    false
-}
-
-/// Index past the closing quote of the string at `bytes[i]`, without decoding.
-fn string_end(bytes: &[u8], mut i: usize) -> Option<usize> {
-    i += 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return Some(i + 1),
-            b'\\' => i += 2,
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-/// The next byte after `from` that is not whitespace.
-fn next_significant(bytes: &[u8], from: usize) -> Option<u8> {
-    bytes[from..]
-        .iter()
-        .find(|b| !b.is_ascii_whitespace())
-        .copied()
-}
-
-/// Whether `raw` (quotes included) could spell the token; an escaped span cannot
-/// be ruled out cheaply, so it falls through to a real decode.
-fn could_be_token(raw: &[u8]) -> bool {
-    let inner = &raw[1..raw.len().saturating_sub(1)];
-    if inner.contains(&b'\\') {
-        return true;
-    }
-    inner == ARBITRARY_PRECISION_TOKEN.as_bytes()
-}
-
 impl Format for Json {
     const KIND: FormatKind = FormatKind::Json;
     const PATH_SEP: &'static str = ".";
 
-    fn rewritten_on_read(bytes: &[u8]) -> Vec<Rewritten> {
-        rewritten_literals(bytes)
-    }
-
-    fn refuse_on_read(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-        if has_arbitrary_precision_key(bytes) {
-            return Err(Error::JsonReservedKey {
-                path: path.to_path_buf(),
-                key: ARBITRARY_PRECISION_TOKEN,
-            });
-        }
-        Ok(())
-    }
-
     fn parse(bytes: &[u8]) -> Option<Node<JsonLeaf>> {
-        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let text = std::str::from_utf8(bytes).ok()?;
+        let (value, _) = json_syntax::Value::parse_str(text).ok()?;
         Json::decode(&value)
     }
 
@@ -542,32 +343,35 @@ impl Format for Json {
         _current: &[u8],
         opts: WriteOpts,
     ) -> Result<Vec<u8>, Error> {
-        let value = Json::encode(node);
-        let bytes = opts.indent.to_bytes();
-        let mut buf = Vec::new();
-        let formatter = serde_json::ser::PrettyFormatter::with_indent(&bytes);
-        let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
-        value.serialize(&mut ser).expect("serializing JSON");
-        buf.push(b'\n');
-        Ok(buf)
+        let mut print = json_syntax::print::Options::pretty();
+        print.indent = match opts.indent {
+            Indent::Spaces(n) => json_syntax::print::Indent::Spaces(n as u8),
+            Indent::Tab => json_syntax::print::Indent::Tabs(1),
+        };
+        // The default inlines a short array or object onto one line, which would
+        // make the output shape depend on content rather than on `--indent`.
+        print.array_limit = Some(json_syntax::print::Limit::Always);
+        print.object_limit = Some(json_syntax::print::Limit::Always);
+        let mut out = Json::encode(node).print_with(print).to_string();
+        out.push('\n');
+        Ok(out.into_bytes())
     }
 }
 
-fn leaf_to_json(l: &JsonLeaf) -> serde_json::Value {
-    use serde_json::Value;
+fn leaf_to_json(l: &JsonLeaf) -> json_syntax::Value {
+    use json_syntax::{NumberBuf, Value};
+    let number = |literal: &str| {
+        Value::Number(NumberBuf::new(literal.bytes().collect()).expect("a valid number literal"))
+    };
     match l {
         JsonLeaf::Null => Value::Null,
-        JsonLeaf::Bool(b) => Value::Bool(*b),
-        JsonLeaf::Int(i) => Value::Number((*i).into()),
-        JsonLeaf::Uint(u) => Value::Number((*u).into()),
-        // Round-tripped through the parser rather than `Number::from_string_unchecked`,
-        // which serde_json marks `#[doc(hidden)]` "Not public API" and could drop in
-        // any patch release. The literal came from a successful parse, so this cannot
-        // fail; under `arbitrary_precision` it captures the same raw text.
-        JsonLeaf::Number(lit) => Value::Number(
-            serde_json::from_str(lit).expect("a literal that parsed once parses again"),
-        ),
-        JsonLeaf::String(s) => Value::String(s.clone()),
+        JsonLeaf::Bool(b) => Value::Boolean(*b),
+        JsonLeaf::Int(i) => number(&i.to_string()),
+        JsonLeaf::Uint(u) => number(&u.to_string()),
+        // Verbatim: the literal is exactly what the file spelled, which is the
+        // whole point of keeping it as text rather than an `f64`.
+        JsonLeaf::Number(lit) => number(lit),
+        JsonLeaf::String(s) => Value::String(s.as_str().into()),
     }
 }
 
@@ -575,44 +379,58 @@ fn leaf_to_json(l: &JsonLeaf) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// A JSON document as `json-syntax` hands it to the codec.
+    fn value(text: &str) -> json_syntax::Value {
+        json_syntax::Value::parse_str(text).unwrap().0
+    }
+
     #[test]
     fn round_trips_scalars_and_structure() {
-        let v = serde_json::json!({
-            "n": -3, "big": u64::MAX, "f": 1.5, "s": "hi",
-            "b": true, "nil": null, "arr": [1, "x", false],
-            "nested": {"k": {"deep": 2}}
-        });
-        let node = Json::decode(&v).unwrap();
-        assert_eq!(Json::encode(&node), v);
+        let text = r#"{"n":-3,"big":18446744073709551615,"f":1.5,"s":"hi","b":true,"nil":null,"arr":[1,"x",false],"nested":{"k":{"deep":2}}}"#;
+        let node = Json::decode(&value(text)).unwrap();
+        assert_eq!(Json::encode(&node).compact_print().to_string(), text);
     }
 
     #[test]
     fn decode_is_total() {
-        assert!(Json::decode(&serde_json::json!(null)).is_some());
-        assert!(Json::decode(&serde_json::json!([1, 2, 3])).is_some());
-        assert!(Json::decode(&serde_json::json!("scalar")).is_some());
+        assert!(Json::decode(&value("null")).is_some());
+        assert!(Json::decode(&value("[1, 2, 3]")).is_some());
+        assert!(Json::decode(&value(r#""scalar""#)).is_some());
     }
 
     #[test]
     fn distinguishes_signed_unsigned_and_non_integer() {
         assert_eq!(
-            Json::decode(&serde_json::json!(-1)),
+            Json::decode(&value("-1")),
             Some(Node::Leaf(JsonLeaf::Int(-1)))
         );
         assert_eq!(
-            Json::decode(&serde_json::json!(u64::MAX)),
+            Json::decode(&value("18446744073709551615")),
             Some(Node::Leaf(JsonLeaf::Uint(u64::MAX)))
         );
         assert_eq!(
-            Json::decode(&serde_json::json!(2.5)),
+            Json::decode(&value("2.5")),
             Some(Node::Leaf(JsonLeaf::Number("2.5".to_string())))
         );
     }
 
+    #[test]
+    fn a_number_keeps_the_spelling_the_file_used() {
+        // The reason this codec exists: every one of these is a distinct spelling
+        // that must reach the writer untouched.
+        for literal in ["1e1", "1E2", "1e+400", "2.50", "0.10", "-0.0"] {
+            let node = Json::decode(&value(literal)).unwrap();
+            assert_eq!(
+                Json::encode(&node).compact_print().to_string(),
+                literal,
+                "{literal} was respelled"
+            );
+        }
+    }
+
     /// `n` as config-graft reads it out of a JSON document.
     fn leaf(literal: &str) -> JsonLeaf {
-        let value: serde_json::Value = serde_json::from_str(literal).unwrap();
-        match Json::decode(&value) {
+        match Json::decode(&value(literal)) {
             Some(Node::Leaf(l)) => l,
             other => panic!("expected a leaf, got {other:?}"),
         }

@@ -41,8 +41,6 @@ pub enum Error {
     /// unreadable one that way would replace a file full of app-owned data with
     /// DESIRED alone.
     Unreadable { path: PathBuf, kind: FormatKind },
-    /// Names DESIRED as the input an inner error came from.
-    InDesired(Box<Error>),
     /// DESIRED is absent or empty, as opposed to present and unparseable.
     DesiredAbsent { path: PathBuf, kind: FormatKind },
     /// DESIRED exists but could not be parsed.
@@ -51,9 +49,6 @@ pub enum Error {
     TargetNotMapping { path: PathBuf, kind: FormatKind },
     /// The plist serializer failed.
     PlistSerialize(plist::Error),
-    /// A JSON input uses serde_json's sentinel as an object key, which the parser
-    /// would turn into a bare number.
-    JsonReservedKey { path: PathBuf, key: &'static str },
     /// A value at `path` holds a character XML 1.0 cannot represent, so writing
     /// the target as XML would produce a file no conforming parser can read. The
     /// write is refused; `--plist-binary` carries the value as-is.
@@ -146,15 +141,6 @@ impl fmt::Display for Error {
                 path.display(),
                 kind.name()
             ),
-            Error::JsonReservedKey { path, key } => write!(
-                f,
-                "{} uses `{key}` as an object key. That name is reserved: this \
-                 build reads an object whose *first* key is it as a bare number, and \
-                 sorting or reordering can put it first, so the object would be \
-                 rewritten as a number. Refusing rather than risk that. Rename the key.",
-                path.display()
-            ),
-            Error::InDesired(inner) => write!(f, "in DESIRED: {inner}"),
             Error::DesiredAbsent { path, kind } => write!(
                 f,
                 "DESIRED at {} does not exist or is empty, so there is no {} to \

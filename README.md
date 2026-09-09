@@ -68,7 +68,7 @@ The merge engine is format-agnostic; **JSON**, Apple **plist**, **YAML**, and **
 
 JSON notes:
 
-- Numbers keep their **source spelling**, so a high-precision decimal, an integer larger than `u64`, or an exponent past `f64`'s range round-trips rather than being shortened, turned into `1.2345e29`, or (for the exponent) making the whole file unreadable. They compare by value across every spelling — `10`, `10.0` and `1e1` are one number — so a value the app rewrote in another form still prunes, and a DESIRED spelled differently from TARGET leaves the file alone. The one spelling config-graft cannot preserve is an exponent's, which serde_json normalizes while parsing (`1e1` is stored as `1e+1`); that is reported on stderr.
+- Numbers keep their **source spelling**, so a high-precision decimal, an integer larger than `u64`, or an exponent past `f64`'s range round-trips rather than being shortened, turned into `1.2345e29`, or (for the exponent) making the whole file unreadable. They compare by value across every spelling — `10`, `10.0` and `1e1` are one number — so a value the app rewrote in another form still prunes, and a DESIRED spelled differently from TARGET leaves the file alone. Every spelling survives, including an exponent's: `1e1`, `1E2` and `2.50` reach disk exactly as the file wrote them.
 - Output is pretty-printed per `--indent`, preserving key order.
 
 Plist notes:

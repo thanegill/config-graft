@@ -220,10 +220,6 @@ pub(crate) trait Backend {
         let desired_input = Self::read(args, &args.desired)
             .map_err(|e| match e {
                 Error::Unreadable { path, kind } => Error::UnreadableDesired { path, kind },
-                // Name the input, so the message says which file it is about.
-                Error::JsonReservedKey { path, key } => {
-                    Error::InDesired(Box::new(Error::JsonReservedKey { path, key }))
-                }
                 other => other,
             })?
             .ok_or_else(|| Self::error_desired_absent(args.desired.clone()))?;
@@ -242,26 +238,11 @@ pub(crate) trait Backend {
         // Only an *absent* TARGET is empty. Treating an unreadable or non-mapping
         // one as empty would write DESIRED over a file of keys the app owns.
         let target_input = Self::read(args, &args.target)?;
-        let (mut target, target_rewritten) = match target_input {
-            Some(input) if input.node.is_map() => (input.node, input.rewritten),
+        let mut target = match target_input {
+            Some(input) if input.node.is_map() => input.node,
             Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
-            None => (Node::empty_map(), Vec::new()),
+            None => Node::empty_map(),
         };
-        // The parser can rewrite a scalar before the engine ever sees it -- a JSON
-        // exponent's spelling, say. The value is unchanged, so no diff can show it,
-        // but the bytes on disk will differ; say so rather than rewrite quietly.
-        let respellings: Vec<Warning<Self::Leaf>> = target_rewritten
-            .iter()
-            .map(|r| (r, Source::Target))
-            .chain(desired_input.rewritten.iter().map(|r| (r, Source::Desired)))
-            .map(|(r, source)| Warning::NumberRespelled {
-                path: r.path.clone(),
-                source,
-                from: r.source.clone(),
-                to: r.stored.clone(),
-            })
-            .collect();
-        emit(&respellings, Self::COMPONENT_SEPARATOR);
         // `--diff` reports what a write would change, and normalizing the target is
         // one of those changes, so it compares against the node as it was read --
         // otherwise the diff shows nothing and disagrees with `--check`, which

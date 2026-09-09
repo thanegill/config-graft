@@ -57,15 +57,6 @@ pub enum Warning<L: Leaf> {
         to: String,
         because: &'static str,
     },
-    /// The parser stored a number differently from how the file spells it: the
-    /// value is unchanged, the bytes on disk are not.
-    NumberRespelled {
-        /// Empty inside an array (issue #37); rendered as no path.
-        path: KeyPath,
-        source: Source,
-        from: String,
-        to: String,
-    },
     /// A byte the output encoding cannot carry, kept because the file already had
     /// it -- so the result loads on macOS but in no conforming parser.
     NonConformingByteKept {
@@ -90,7 +81,6 @@ impl<L: Leaf> Warning<L> {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
             | Warning::ValueNormalized { path, .. }
-            | Warning::NumberRespelled { path, .. }
             | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. } => path,
         }
@@ -103,7 +93,6 @@ impl<L: Leaf> Warning<L> {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
             | Warning::ValueNormalized { path, .. }
-            | Warning::NumberRespelled { path, .. }
             | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. } => path,
         }
@@ -139,23 +128,6 @@ impl<L: Leaf> Warning<L> {
                     n => format!("{n} are"),
                 }
             ),
-            Warning::NumberRespelled {
-                path,
-                source,
-                from,
-                to,
-            } => {
-                let where_ = if path.is_empty() {
-                    String::new()
-                } else {
-                    format!("`{at}` ")
-                };
-                format!(
-                    "{where_}in {}: the number `{from}` is stored as `{to}`, so \
-                     writing normalizes its spelling",
-                    source.label()
-                )
-            }
             Warning::NonConformingByteKept {
                 character, because, ..
             } => format!(
