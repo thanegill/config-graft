@@ -56,11 +56,6 @@ impl KeyPath {
     /// for the empty path. `sep` is format-specific. An element selector segment
     /// (`[field=value]`, in a conflict path pointing into a keyed record) attaches
     /// directly to the preceding key with no separator, e.g. `servers[name="web"]`.
-    /// Whether this is the root path (no segments).
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     pub fn render(&self, sep: &str) -> String {
         if self.0.is_empty() {
             return "<root>".to_string();
@@ -73,6 +68,11 @@ impl KeyPath {
             out.push_str(seg);
         }
         out
+    }
+
+    /// Whether this is the root path (no segments).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 

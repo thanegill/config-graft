@@ -66,8 +66,15 @@ pub enum Warning<L: Leaf> {
         from: String,
         to: String,
     },
-    /// Normalization made array elements equal that an input had distinguished.
-    /// Membership is a set, so fewer survived than there were distinct originals.
+    /// A byte the output encoding cannot carry, kept because the file already had
+    /// it -- so the result loads on macOS but in no conforming parser.
+    NonConformingByteKept {
+        path: KeyPath,
+        character: char,
+        because: &'static str,
+    },
+    /// Normalization made array elements equal that an input distinguished, and
+    /// membership is a set, so fewer survived.
     ArrayCollapsed {
         path: KeyPath,
         distinct: usize,
@@ -84,6 +91,7 @@ impl<L: Leaf> Warning<L> {
             | Warning::DuplicateCollapsed { path, .. }
             | Warning::ValueNormalized { path, .. }
             | Warning::NumberRespelled { path, .. }
+            | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. } => path,
         }
     }
@@ -96,6 +104,7 @@ impl<L: Leaf> Warning<L> {
             | Warning::DuplicateCollapsed { path, .. }
             | Warning::ValueNormalized { path, .. }
             | Warning::NumberRespelled { path, .. }
+            | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. } => path,
         }
     }
@@ -147,6 +156,14 @@ impl<L: Leaf> Warning<L> {
                     source.label()
                 )
             }
+            Warning::NonConformingByteKept {
+                character, because, ..
+            } => format!(
+                "`{at}` holds U+{:04X}, which XML 1.0 cannot represent; the file \
+                 already held it, so it is written through unchanged and the result \
+                 will not load in a conforming XML parser -- {because}",
+                *character as u32
+            ),
             Warning::ArrayCollapsed {
                 distinct,
                 kept,

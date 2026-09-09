@@ -96,7 +96,16 @@ fn lossy_collapses<L: Leaf>(
     }
     // A `HashMap` iterates in an arbitrary order; sort so the same inputs always
     // produce the same diagnostics.
-    reported.sort_by_key(|w| w.path().clone());
+    // Two collapses can share a path, so a path-only key leaves them in map order.
+    reported.sort_by_key(|w| match w {
+        Warning::ArrayCollapsed {
+            path,
+            distinct,
+            kept,
+            ..
+        } => (path.clone(), *distinct, *kept),
+        other => (other.path().clone(), 0, 0),
+    });
     reported
 }
 
@@ -148,8 +157,8 @@ pub(crate) trait Backend {
     fn merge_keys(_args: &RunArgs) -> MergeKeys {
         MergeKeys::default()
     }
-    /// Error for a DESIRED that is absent/unreadable.
-    fn error_invalid_desired(path: PathBuf) -> Error;
+    /// Error for a DESIRED that is absent or empty, as opposed to unparseable.
+    fn error_desired_absent(path: PathBuf) -> Error;
     /// Error for a DESIRED whose root is not this backend's mapping shape.
     fn error_desired_not_mapping(path: PathBuf) -> Error;
     /// Error for a TARGET that parsed but whose root is not this backend's mapping
@@ -213,9 +222,13 @@ pub(crate) trait Backend {
         let desired_input = Self::read(args, &args.desired)
             .map_err(|e| match e {
                 Error::Unreadable { path, kind } => Error::UnreadableDesired { path, kind },
+                // Name the input, so the message says which file it is about.
+                Error::JsonReservedKey { path, key } => {
+                    Error::InDesired(Box::new(Error::JsonReservedKey { path, key }))
+                }
                 other => other,
             })?
-            .ok_or_else(|| Self::error_invalid_desired(args.desired.clone()))?;
+            .ok_or_else(|| Self::error_desired_absent(args.desired.clone()))?;
         let mut desired = desired_input.node;
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
@@ -365,8 +378,11 @@ impl<F: Format> Backend for ByteBackend<F> {
         F::normalize_for_run(node, write_opts(args))
     }
 
-    fn error_invalid_desired(path: PathBuf) -> Error {
-        F::KIND.invalid_desired(path)
+    fn error_desired_absent(path: PathBuf) -> Error {
+        Error::DesiredAbsent {
+            path,
+            kind: F::KIND,
+        }
     }
 
     fn error_desired_not_mapping(path: PathBuf) -> Error {
@@ -392,7 +408,10 @@ impl<F: Format> Backend for ByteBackend<F> {
         // Read once: two reads could serialize from a template the target no longer
         // matches, making the output and the "changed?" verdict disagree.
         let current = fs::read(&args.target).unwrap_or_default();
-        F::refuse_on_write(result, target, write_opts(args))?;
+        emit(
+            &F::refuse_on_write(result, target, &current, write_opts(args))?,
+            F::PATH_SEP,
+        );
         let output = F::serialize(result, &current, write_opts(args))?;
         Ok(Prepared {
             changed: output != current,
@@ -422,10 +441,7 @@ impl Backend for Directory {
     type Leaf = FsLeaf;
     const COMPONENT_SEPARATOR: &'static str = "/";
 
-    fn error_invalid_desired(path: PathBuf) -> Error {
-        // Only reached when the read returned `None` (absent); a DESIRED that
-        // exists but is not a directory errors out of `read_tree` with a distinct
-        // `NotDirectory`.
+    fn error_desired_absent(path: PathBuf) -> Error {
         Error::MissingDesiredDirectory(path)
     }
 

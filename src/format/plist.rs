@@ -11,6 +11,7 @@ use super::{Format, FormatKind, Normalized, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::reconcile::KeyPath;
 use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::warning::Warning;
 
 /// Apple plist codec.
 pub struct Plist;
@@ -162,12 +163,19 @@ impl Format for Plist {
     fn refuse_on_write(
         result: &Node<PlistLeaf>,
         target: &Node<PlistLeaf>,
+        current: &[u8],
         opts: WriteOpts,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Warning<PlistLeaf>>, Error> {
         if opts.plist_binary {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        refuse_xml_unrepresentable(result, Some(target), &mut KeyPath::new())
+        let mut already = std::collections::HashSet::new();
+        if is_xml_plist(current) {
+            strings_and_keys(target, &mut already);
+        }
+        let mut kept = Vec::new();
+        check_xml_representable(result, &already, &mut KeyPath::new(), &mut kept)?;
+        Ok(kept)
     }
 
     fn normalize_for_run(
@@ -208,6 +216,10 @@ impl Format for Plist {
 
 /// Why an XML run cannot keep a date as it stands -- the tail of both the warning
 /// and, when the floor costs an element, the refusal.
+/// Completes both the refusal and the pass-through report.
+const XML_UNREPRESENTABLE_REMEDY: &str =
+    "pass --plist-binary (or set `binary = true`) to store it properly";
+
 const XML_DATE_RESOLUTION: &str =
     "an XML plist carries dates at one-second resolution; pass --plist-binary to \
      keep the full value";
@@ -271,9 +283,18 @@ fn xml_unrepresentable(text: &str) -> Option<char> {
     })
 }
 
+/// Whether `bytes` are an XML plist. Strict on purpose: anything unrecognized
+/// counts as not-XML, so nothing is passed through.
+fn is_xml_plist(bytes: &[u8]) -> bool {
+    let text = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    let text = match text.iter().position(|b| !b.is_ascii_whitespace()) {
+        Some(i) => &text[i..],
+        None => return false,
+    };
+    text.starts_with(b"<?xml") || text.starts_with(b"<!DOCTYPE") || text.starts_with(b"<plist")
+}
 
-/// Render `key` with anything unprintable escaped, so naming it in a diagnostic
-/// cannot emit a control byte into the reader's terminal.
+/// Escape the unprintable, so naming a key cannot emit a control byte.
 fn escape_key(key: &str) -> String {
     key.chars()
         .flat_map(|c| {
@@ -286,66 +307,77 @@ fn escape_key(key: &str) -> String {
         .collect()
 }
 
-/// Refuse a write whose XML no conforming parser could read. macOS's own parser
-/// happens to tolerate these bytes, so emitting them would produce a file that
-/// works here and is invalid everywhere else -- `--plist-binary` carries them
-/// properly.
-///
-/// Only what this run *introduces* is checked, against `target` (what the file
-/// already holds). A value already on disk is passed straight through by the
-/// reconcile, so refusing it would fail every run touching a file macOS itself
-/// wrote -- including a run that changes nothing at all.
-fn refuse_xml_unrepresentable(
-    node: &Node<PlistLeaf>,
-    target: Option<&Node<PlistLeaf>>,
-    path: &mut KeyPath,
-) -> Result<(), Error> {
-    // Anything the file already holds unchanged is not this run's to reject.
-    if target == Some(node) {
-        return Ok(());
-    }
-    let refuse = |path: &KeyPath, character: char| Error::PlistXmlUnrepresentable {
-        path: path.render(Plist::PATH_SEP),
-        character,
-    };
+/// Every string and dictionary key in `node`.
+fn strings_and_keys(node: &Node<PlistLeaf>, seen: &mut std::collections::HashSet<String>) {
     match node {
         Node::Map(m) => {
-            let existing = match target {
-                Some(Node::Map(t)) => Some(t),
-                _ => None,
-            };
             for (key, value) in m {
-                let was_there = existing.and_then(|t| t.get(key));
-                if was_there.is_none() {
-                    if let Some(character) = xml_unrepresentable(key) {
-                        path.push(escape_key(key));
-                        return Err(refuse(path, character));
-                    }
+                seen.insert(key.clone());
+                strings_and_keys(value, seen);
+            }
+        }
+        Node::Array(a) => {
+            for element in a {
+                strings_and_keys(element, seen);
+            }
+        }
+        Node::Leaf(PlistLeaf::String(text)) => {
+            seen.insert(text.clone());
+        }
+        Node::Leaf(_) => {}
+    }
+}
+
+/// Refuse a value XML cannot carry when this run introduces it; report one the
+/// file already held, since passing it through still writes a file only macOS can
+/// read.
+///
+/// `already` must be empty unless the target is itself XML -- rewriting a binary
+/// plist as XML writes every byte anew, so nothing in it counts as already
+/// written, and dropping that gate reopens issue #33.
+fn check_xml_representable(
+    node: &Node<PlistLeaf>,
+    already: &std::collections::HashSet<String>,
+    path: &mut KeyPath,
+    kept: &mut Vec<Warning<PlistLeaf>>,
+) -> Result<(), Error> {
+    let judge =
+        |text: &str, path: &KeyPath, kept: &mut Vec<Warning<PlistLeaf>>| -> Result<(), Error> {
+            let Some(character) = xml_unrepresentable(text) else {
+                return Ok(());
+            };
+            if already.contains(text) {
+                kept.push(Warning::NonConformingByteKept {
+                    path: path.clone(),
+                    character,
+                    because: XML_UNREPRESENTABLE_REMEDY,
+                });
+                return Ok(());
+            }
+            Err(Error::PlistXmlUnrepresentable {
+                path: path.render(Plist::PATH_SEP),
+                character,
+            })
+        };
+    match node {
+        Node::Map(m) => {
+            for (key, value) in m {
+                if xml_unrepresentable(key).is_some() {
+                    path.push(escape_key(key));
+                    judge(key, path, kept)?;
+                    path.pop();
                 }
                 path.push(key.clone());
-                refuse_xml_unrepresentable(value, was_there, path)?;
+                check_xml_representable(value, already, path, kept)?;
                 path.pop();
             }
         }
         Node::Array(a) => {
-            let existing = match target {
-                Some(Node::Array(t)) => Some(t),
-                _ => None,
-            };
             for element in a {
-                // Membership, not position: an element the file already had is
-                // untouched even if the reconcile moved it.
-                if existing.is_some_and(|t| t.contains(element)) {
-                    continue;
-                }
-                refuse_xml_unrepresentable(element, None, path)?;
+                check_xml_representable(element, already, path, kept)?;
             }
         }
-        Node::Leaf(PlistLeaf::String(text)) => {
-            if let Some(character) = xml_unrepresentable(text) {
-                return Err(refuse(path, character));
-            }
-        }
+        Node::Leaf(PlistLeaf::String(text)) => judge(text, path, kept)?,
         Node::Leaf(_) => {}
     }
     Ok(())
