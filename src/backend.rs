@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
-use crate::format::{read_file, Format, FormatKind, Indent, Input, Normalized, WriteOpts};
+use crate::format::{
+    read_file, Format, FormatKind, Indent, Input, Normalization, Normalized, WriteOpts,
+};
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
@@ -180,14 +182,10 @@ pub(crate) trait Backend {
     /// costs anything. Default: nothing to adjust.
     fn normalize_for_run(
         _args: &RunArgs,
-        _node: &mut Node<Self::Leaf>,
-    ) -> Result<Vec<Normalized<Self::Leaf>>, Error> {
-        Ok(Vec::new())
+        _node: &Node<Self::Leaf>,
+    ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
+        Ok(None)
     }
-
-    /// Whether [`Backend::normalize_for_run`] can change a node at all. Lets `run`
-    /// skip the `--diff` snapshot for backends that never normalize.
-    const NORMALIZES: bool = false;
 
     /// Prepare the reconciled `result` for the output phase: its serialized bytes
     /// (byte formats only -- `None` for a tree, which has no single byte stream) and
@@ -233,7 +231,13 @@ pub(crate) trait Backend {
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
-        let desired_risks = Self::normalize_for_run(args, &mut desired)?;
+        let desired_risks = match Self::normalize_for_run(args, &desired)? {
+            Some(normalized) => {
+                desired = normalized.node;
+                normalized.rewritten
+            }
+            None => Vec::new(),
+        };
 
         // Only an *absent* TARGET is empty. Treating an unreadable or non-mapping
         // one as empty would write DESIRED over a file of keys the app owns.
@@ -259,12 +263,18 @@ pub(crate) trait Backend {
             .collect();
         emit(&respellings, Self::COMPONENT_SEPARATOR);
         // `--diff` reports what a write would change, and normalizing the target is
-        // one of those changes, so keep the node as it was read. Without this the
-        // diff compares two already-normalized sides, prints nothing, and disagrees
-        // with the `--check` that compares against the bytes on disk.
-        // Only worth snapshotting when normalization can actually change the node.
-        let target_on_disk = (args.diff && Self::NORMALIZES).then(|| target.clone());
-        let target_risks = Self::normalize_for_run(args, &mut target)?;
+        // one of those changes, so it compares against the node as it was read --
+        // otherwise the diff shows nothing and disagrees with `--check`, which
+        // compares against the bytes on disk.
+        let mut target_on_disk = None;
+        let target_risks = match Self::normalize_for_run(args, &target)? {
+            Some(normalized) => {
+                let as_read = std::mem::replace(&mut target, normalized.node);
+                target_on_disk = args.diff.then_some(as_read);
+                normalized.rewritten
+            }
+            None => Vec::new(),
+        };
 
         // Empty/missing/unreadable BASE disables pruning (first run).
         let base_path = args
@@ -276,14 +286,12 @@ pub(crate) trait Backend {
             .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
             .map(|input| input.node)
             .filter(Node::is_map);
-        // Normalize a copy: a part-way failure would leave BASE unequal to a
-        // normalized TARGET, and a managed key could then never be pruned.
-        if Self::NORMALIZES {
-            if let Some(base) = base.as_mut() {
-                let mut normalized = base.clone();
-                if Self::normalize_for_run(args, &mut normalized).is_ok() {
-                    *base = normalized;
-                }
+        // BASE must be normalized too, or a floored TARGET never equals it and a
+        // managed key can never be pruned. A failure is about BASE alone, which is
+        // never written, so it leaves BASE as read rather than failing the run.
+        if let Some(base) = base.as_mut() {
+            if let Ok(Some(normalized)) = Self::normalize_for_run(args, base) {
+                *base = normalized.node;
             }
         }
 
@@ -369,12 +377,10 @@ impl<F: Format> Backend for ByteBackend<F> {
         crate::parse_merge_keys(&args.merge_key, F::PATH_SEP)
     }
 
-    const NORMALIZES: bool = F::NORMALIZES;
-
     fn normalize_for_run(
         args: &RunArgs,
-        node: &mut Node<F::Leaf>,
-    ) -> Result<Vec<Normalized<F::Leaf>>, Error> {
+        node: &Node<F::Leaf>,
+    ) -> Result<Option<Normalization<F::Leaf>>, Error> {
         F::normalize_for_run(node, write_opts(args))
     }
 
