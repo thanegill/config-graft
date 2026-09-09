@@ -57,6 +57,23 @@ pub enum Warning<L: Leaf> {
         to: String,
         because: &'static str,
     },
+    /// The parser stored a number differently from how the file spells it: the
+    /// value is unchanged, the bytes on disk are not.
+    NumberRespelled {
+        /// Empty inside an array (issue #37); rendered as no path.
+        path: KeyPath,
+        source: Source,
+        from: String,
+        to: String,
+    },
+    /// Normalization made array elements equal that an input had distinguished.
+    /// Membership is a set, so fewer survived than there were distinct originals.
+    ArrayCollapsed {
+        path: KeyPath,
+        distinct: usize,
+        kept: usize,
+        because: &'static str,
+    },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -65,7 +82,9 @@ impl<L: Leaf> Warning<L> {
         match self {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
-            | Warning::ValueNormalized { path, .. } => path,
+            | Warning::ValueNormalized { path, .. }
+            | Warning::NumberRespelled { path, .. }
+            | Warning::ArrayCollapsed { path, .. } => path,
         }
     }
 
@@ -75,7 +94,9 @@ impl<L: Leaf> Warning<L> {
         match self {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
-            | Warning::ValueNormalized { path, .. } => path,
+            | Warning::ValueNormalized { path, .. }
+            | Warning::NumberRespelled { path, .. }
+            | Warning::ArrayCollapsed { path, .. } => path,
         }
     }
 
@@ -108,6 +129,33 @@ impl<L: Leaf> Warning<L> {
                     1 => "one is".to_string(),
                     n => format!("{n} are"),
                 }
+            ),
+            Warning::NumberRespelled {
+                path,
+                source,
+                from,
+                to,
+            } => {
+                let where_ = if path.is_empty() {
+                    String::new()
+                } else {
+                    format!("`{at}` ")
+                };
+                format!(
+                    "{where_}in {}: the number `{from}` is stored as `{to}`, so \
+                     writing normalizes its spelling",
+                    source.label()
+                )
+            }
+            Warning::ArrayCollapsed {
+                distinct,
+                kept,
+                because,
+                ..
+            } => format!(
+                "array `{at}` held {distinct} values that normalizing made \
+                 identical, and membership is a set, so only {kept} survived; \
+                 {because}"
             ),
             Warning::ValueNormalized {
                 source,

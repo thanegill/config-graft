@@ -4,9 +4,11 @@ use indexmap::IndexMap;
 use serde::Serialize;
 
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
-use super::{Format, FormatKind, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, Rewritten, ValueCodec, WriteOpts};
 use crate::error::Error;
+use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
 
 /// JSON codec.
@@ -319,18 +321,60 @@ impl ValueCodec for Json {
 ///
 /// This walks the raw bytes because it has to happen before the parse. Strings are
 /// skipped so a number-shaped substring inside one is not mistaken for a literal.
-fn rewritten_literals(bytes: &[u8]) -> Vec<(String, String)> {
+/// One level of JSON nesting, tracked so a rewritten literal can be named.
+enum Frame {
+    Object(Option<String>),
+    Array,
+}
+
+/// The enclosing keys, or the root path once any array encloses the value:
+/// `KeyPath` addresses map keys, so an array's key would name the wrong thing
+/// (issue #37).
+fn literal_path(stack: &[Frame]) -> KeyPath {
+    let mut path = KeyPath::new();
+    for frame in stack {
+        match frame {
+            Frame::Array => return KeyPath::new(),
+            Frame::Object(Some(key)) => path.push(key.clone()),
+            Frame::Object(None) => return KeyPath::new(),
+        }
+    }
+    path
+}
+
+fn rewritten_literals(bytes: &[u8]) -> Vec<Rewritten> {
     let mut found = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stack: Vec<Frame> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
+            b'{' => {
+                stack.push(Frame::Object(None));
+                i += 1;
+            }
+            b'[' => {
+                stack.push(Frame::Array);
+                i += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                i += 1;
+            }
             b'"' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                let Some((text, next)) = decode_string(bytes, i) else {
+                    return found;
+                };
+                i = next;
+                let mut after = i;
+                while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+                    after += 1;
                 }
-                i += 1;
+                if bytes.get(after) == Some(&b':') {
+                    if let Some(Frame::Object(key)) = stack.last_mut() {
+                        *key = Some(text);
+                    }
+                }
             }
             b'-' | b'0'..=b'9' => {
                 let start = i;
@@ -356,7 +400,11 @@ fn rewritten_literals(bytes: &[u8]) -> Vec<(String, String)> {
                 };
                 if let Ok(number) = source.parse::<serde_json::Number>() {
                     if number.as_str() != source && seen.insert(source.to_string()) {
-                        found.push((source.to_string(), number.as_str().to_string()));
+                        found.push(Rewritten {
+                            path: literal_path(&stack),
+                            source: source.to_string(),
+                            stored: number.as_str().to_string(),
+                        });
                     }
                 }
             }
@@ -366,12 +414,91 @@ fn rewritten_literals(bytes: &[u8]) -> Vec<(String, String)> {
     found
 }
 
+/// serde_json's arbitrary-precision sentinel: an object whose *first* key is this
+/// decodes to a bare number instead of a map, at every nesting depth.
+const ARBITRARY_PRECISION_TOKEN: &str = "$serde_json::private::Number";
+
+/// Decode the string at `bytes[i]` and the index past its closing quote.
+fn decode_string(bytes: &[u8], mut i: usize) -> Option<(String, usize)> {
+    i += 1;
+    let mut out = String::new();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some((out, i + 1)),
+            b'\\' => {
+                let escape = *bytes.get(i + 1)?;
+                i += 2;
+                match escape {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'b' => out.push('\u{8}'),
+                    b'f' => out.push('\u{c}'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'u' => {
+                        let hex = bytes.get(i..i + 4)?;
+                        let code = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+                        i += 4;
+                        out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                    }
+                    _ => return None,
+                }
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\\' {
+                    i += 1;
+                }
+                out.push_str(std::str::from_utf8(bytes.get(start..i)?).ok()?);
+            }
+        }
+    }
+    None
+}
+
+/// Whether any object *key* in `bytes` is the sentinel. Checked here because after
+/// the parse the misreading is indistinguishable from a real number. Keys are
+/// compared decoded, so an escaped spelling is caught too.
+fn has_arbitrary_precision_key(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let Some((text, next)) = decode_string(bytes, i) else {
+            return false;
+        };
+        i = next;
+        let mut after = i;
+        while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+            after += 1;
+        }
+        if bytes.get(after) == Some(&b':') && text == ARBITRARY_PRECISION_TOKEN {
+            return true;
+        }
+    }
+    false
+}
+
 impl Format for Json {
     const KIND: FormatKind = FormatKind::Json;
     const PATH_SEP: &'static str = ".";
 
-    fn rewritten_on_read(bytes: &[u8]) -> Vec<(String, String)> {
+    fn rewritten_on_read(bytes: &[u8]) -> Vec<Rewritten> {
         rewritten_literals(bytes)
+    }
+
+    fn refuse_on_read(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+        if has_arbitrary_precision_key(bytes) {
+            return Err(Error::JsonReservedKey {
+                path: path.to_path_buf(),
+                key: ARBITRARY_PRECISION_TOKEN,
+            });
+        }
+        Ok(())
     }
 
     fn parse(bytes: &[u8]) -> Option<Node<JsonLeaf>> {
