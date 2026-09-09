@@ -7,6 +7,7 @@
 //! enum that mixes every format's value space. `Node` is generic over that leaf
 //! type; the per-format leaf enums and codecs live in `format`.
 
+use json_syntax::Print;
 use std::hash::{Hash, Hasher};
 
 use indexmap::IndexMap;
@@ -16,6 +17,30 @@ use indexmap::IndexMap;
 /// compact rendering for `--diff`. `Eq`/`Hash` let array set-union and the GTS
 /// internals dedup via `HashSet` instead of quadratic linear scans; every impl
 /// must keep `Hash` consistent with `Eq` (equal values hash equal).
+/// JSON-escape and quote a string, for `--diff` and `Leaf::render`.
+pub fn quote(s: &str) -> String {
+    json_syntax::Value::String(s.into())
+        .compact_print()
+        .to_string()
+}
+
+/// A float as JSON spells it. Rust's `Debug` is already the shortest
+/// round-tripping form, and differs only in leaving a positive exponent unsigned.
+/// JSON has no NaN or infinity, so those render as `null`, as every JSON writer
+/// does.
+pub fn render_f64(f: f64) -> String {
+    if !f.is_finite() {
+        return "null".to_string();
+    }
+    let rendered = format!("{f:?}");
+    match rendered.split_once('e') {
+        Some((mantissa, exponent)) if !exponent.starts_with('-') => {
+            format!("{mantissa}e+{exponent}")
+        }
+        _ => rendered,
+    }
+}
+
 pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug {
     /// Compact single-line rendering for `--diff`.
     fn render(&self) -> String;

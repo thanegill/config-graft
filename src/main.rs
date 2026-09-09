@@ -16,6 +16,7 @@ use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, Toml, Yaml};
 use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
+use value::quote;
 use value::{Leaf, Node};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
@@ -466,9 +467,4 @@ impl<L: Leaf> Node<L> {
             Node::Leaf(l) => l.render(),
         }
     }
-}
-
-/// JSON-escape and quote a string, matching `serde_json`'s rendering.
-fn quote(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_default()
 }
