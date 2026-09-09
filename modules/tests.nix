@@ -213,6 +213,18 @@ let
       });
     }
     {
+      name = "a non-character with `binary = false` is rejected";
+      expected = 1;
+      actual = builtins.length (assertionFailures {
+        entries.probe = {
+          # U+FFFF: refused by the writer like a C0 control, but `toJSON` renders
+          # it raw rather than as an escape.
+          settings.a = builtins.fromJSON ''"\uFFFF"'';
+          binary = false;
+        };
+      });
+    }
+    {
       name = "a carriage return is accepted with `binary = false`";
       expected = 0;
       actual = builtins.length (assertionFailures {

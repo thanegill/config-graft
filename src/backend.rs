@@ -69,7 +69,9 @@ fn lossy_collapses<L: Leaf>(
         // From a record that produced *this* value, not one merely sharing the path.
         entry.1 = n.because;
     }
-    let mut reported: Vec<Warning<L>> = Vec::new();
+    // Collected as plain fields so the sort key is total without matching on a
+    // variant the list cannot hold.
+    let mut reported: Vec<(KeyPath, usize, usize, &'static str)> = Vec::new();
     for ((path, value), (originals, because)) in &rewritten {
         let array = |node: &Node<L>| match node.get_path(path) {
             Some(Node::Array(a)) => Some(a.iter().filter(|e| e == value).count()),
@@ -81,7 +83,8 @@ fn lossy_collapses<L: Leaf>(
             continue;
         }
         // What the inputs distinguished before normalization: the originals it
-        // rewrote, plus the value itself when an element already held it untouched.
+        // rewrote, plus the value itself when an element already held it untouched
+        // -- that element is a distinct input value the collapse also cost.
         let mut distinct: HashSet<&Node<L>> = originals.iter().copied().collect();
         if before > originals.len() {
             distinct.insert(value);
@@ -89,26 +92,20 @@ fn lossy_collapses<L: Leaf>(
         if distinct.len() < 2 || kept >= distinct.len() {
             continue;
         }
-        reported.push(Warning::ArrayCollapsed {
-            path: (*path).clone(),
-            distinct: distinct.len(),
-            kept,
-            because,
-        });
+        reported.push(((*path).clone(), distinct.len(), kept, because));
     }
-    // A `HashMap` iterates in an arbitrary order; sort so the same inputs always
-    // produce the same diagnostics.
-    // Two collapses can share a path, so a path-only key leaves them in map order.
-    reported.sort_by_key(|w| match w {
-        Warning::ArrayCollapsed {
+    // A `HashMap` iterates in an arbitrary order, and two collapses can share a
+    // path, so order on the whole record.
+    reported.sort();
+    reported
+        .into_iter()
+        .map(|(path, distinct, kept, because)| Warning::ArrayCollapsed {
             path,
             distinct,
             kept,
-            ..
-        } => (path.clone(), *distinct, *kept),
-        other => (other.path().clone(), 0, 0),
-    });
-    reported
+            because,
+        })
+        .collect()
 }
 
 /// The diagnostics for values normalization rewrote in one input. Built here rather
@@ -243,10 +240,8 @@ pub(crate) trait Backend {
             Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
             None => Node::empty_map(),
         };
-        // `--diff` reports what a write would change, and normalizing the target is
-        // one of those changes, so it compares against the node as it was read --
-        // otherwise the diff shows nothing and disagrees with `--check`, which
-        // compares against the bytes on disk.
+        // `--diff` compares against the node as read, or it shows nothing and
+        // disagrees with the `--check` that compares against the bytes on disk.
         let mut target_on_disk = None;
         let target_risks = match Self::normalize_for_run(args, &target)? {
             Some(normalized) => {
@@ -268,8 +263,8 @@ pub(crate) trait Backend {
             .map(|input| input.node)
             .filter(Node::is_map);
         // BASE must be normalized too, or a floored TARGET never equals it and a
-        // managed key can never be pruned. A failure is about BASE alone, which is
-        // never written, so it leaves BASE as read rather than failing the run.
+        // managed key can never be pruned. BASE is never written, so a failure here
+        // leaves it as read rather than failing the run.
         if let Some(base) = base.as_mut() {
             if let Ok(Some(normalized)) = Self::normalize_for_run(args, base) {
                 *base = normalized.node;
@@ -282,10 +277,20 @@ pub(crate) trait Backend {
             merge_keys: Self::merge_keys(args),
         };
         let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
-        // Anything the reconcile did to a value beyond applying the managed edits
-        // -- a contradictory reorder resolved by tie-break, an array identity that
-        // appeared twice and could only survive once. Diagnostics only: the exit
-        // code is unaffected.
+        // The engine sees normalized inputs, so two values it made equal look like
+        // one identity the file held twice -- which the file never did.
+        let conflated: HashSet<(&KeyPath, String)> = target_risks
+            .iter()
+            .chain(desired_risks.iter())
+            .map(|n| (&n.path, n.value.compact()))
+            .collect();
+        warnings.retain(|w| match w {
+            Warning::DuplicateCollapsed { path, identity, .. } => {
+                !conflated.contains(&(path, identity.clone()))
+            }
+            _ => true,
+        });
+        // Diagnostics only: none of these change the exit code.
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
         emit(&warnings, Self::COMPONENT_SEPARATOR);

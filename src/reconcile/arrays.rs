@@ -202,12 +202,19 @@ fn value_duplicates<L: Leaf>(seq: &[Node<L>], out: &[Node<L>], source: Source) -
         if held[element] < 2 || !reported.insert(element) {
             continue;
         }
+        let kept = out.iter().filter(|kept| *kept == element).count();
+        // `out` can keep every repeat (the `set` arm starts from TARGET, duplicates
+        // and all), and a warning that announces a loss that did not happen is
+        // worse than none.
+        if kept >= held[element] {
+            continue;
+        }
         warnings.push(Warning::DuplicateCollapsed {
             path: KeyPath::new(),
             source,
             identity: element.compact(),
             held: held[element],
-            kept: out.iter().filter(|kept| *kept == element).count(),
+            kept,
         });
     }
     warnings

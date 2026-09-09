@@ -749,6 +749,46 @@ fn normalization_does_not_warn_where_nothing_is_dropped() {
 }
 
 #[test]
+fn a_diagnostic_about_a_nested_value_does_not_echo_a_control_byte() {
+    // The key is escaped for its own message, but the path also has to be escaped
+    // on the way down, or anything reported *under* a control-bearing key emits the
+    // raw byte and the reader's terminal interprets it.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    pdict(vec![(
+        &format!("{esc}K")[..],
+        pdict(vec![("keep", plist::Value::String("x".into()))]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![(
+        &format!("{esc}K")[..],
+        pdict(vec![(
+            "sub",
+            plist::Value::String(format!("bad{}value", char::from(2u8))),
+        )]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = out.stderr;
+    assert!(
+        !err.contains(&27u8),
+        "a raw ESC reached stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
+    assert!(
+        !err.contains(&2u8),
+        "a raw 0x02 reached stderr: {}",
+        String::from_utf8_lossy(&err)
+    );
+}
+
+#[test]
 fn a_binary_target_is_refused_rather_than_rewritten_as_xml_with_the_byte() {
     // Rewriting a binary plist as XML emits every byte anew, so nothing in it is
     // "already written". The common shape: Preferences are binary and a

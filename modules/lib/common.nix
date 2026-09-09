@@ -325,6 +325,11 @@ in
             "\\u00"
             "\\b"
             "\\f"
+            # The two non-characters the writer also refuses. `builtins.toJSON`
+            # emits these raw rather than as an escape, so they are matched as
+            # themselves.
+            (builtins.fromJSON ''"\uFFFE"'')
+            (builtins.fromJSON ''"\uFFFF"'')
           ];
       in
       lib.concatLists (

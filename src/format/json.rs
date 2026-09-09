@@ -204,9 +204,11 @@ fn number_value(literal: &str) -> Option<NumberValue<'_>> {
         return Some(NumberValue::Integer(0));
     }
     // A whole number that fits an `i128` gets the integer identity, so it can equal
-    // an `Int`/`Uint` spelled the ordinary way.
-    if exponent >= 0 && fraction.is_empty() {
-        if let Some(value) = whole(negative, integer, exponent) {
+    // an `Int`/`Uint` spelled the ordinary way. The digits are integer and fraction
+    // together: after the trims above the value is `digits * 10^exponent` however
+    // the literal split them, so `0.5e1` is as whole a 5 as `5` is.
+    if exponent >= 0 {
+        if let Some(value) = whole(negative, integer, fraction, exponent) {
             return Some(NumberValue::Integer(value));
         }
     }
@@ -219,9 +221,9 @@ fn number_value(literal: &str) -> Option<NumberValue<'_>> {
 }
 
 /// `digits * 10^exponent` as an `i128`, or `None` if it does not fit.
-fn whole(negative: bool, digits: &str, exponent: i64) -> Option<i128> {
+fn whole(negative: bool, integer: &str, fraction: &str, exponent: i64) -> Option<i128> {
     let mut value: i128 = 0;
-    for digit in digits.bytes() {
+    for digit in integer.bytes().chain(fraction.bytes()) {
         value = value
             .checked_mul(10)?
             .checked_add(i128::from(digit - b'0'))?;
