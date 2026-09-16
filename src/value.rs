@@ -40,6 +40,29 @@ pub fn render_f64(f: f64) -> String {
     }
 }
 
+/// Write `items` into `f` separated by `sep`, each shown as `display` maps it:
+/// what `[String]::join` does, for items that are never materialized as strings.
+/// std has no `Display`-based join, and collecting a `Vec<String>` to reach the
+/// one on slices is the allocation these renderers exist to avoid.
+///
+/// `display` returns what an item looks like rather than writing it, so every
+/// `write!` and the separator itself stay in here. An item that is not already a
+/// `Display` value -- a map entry, a name beside a digest -- becomes one with
+/// `fmt::from_fn`, which allocates nothing either.
+pub fn write_separated<T, D: std::fmt::Display>(
+    f: &mut std::fmt::Formatter<'_>,
+    items: impl IntoIterator<Item = T>,
+    sep: &str,
+    mut display: impl FnMut(T) -> D,
+) -> std::fmt::Result {
+    let mut items = items.into_iter();
+    let Some(first) = items.next() else {
+        return Ok(());
+    };
+    write!(f, "{}", display(first))?;
+    items.try_for_each(|item| write!(f, "{sep}{}", display(item)))
+}
+
 /// A format's atomic leaf value. The engine treats leaves opaquely -- it only
 /// needs `Clone` + `Eq` + `Hash` (and `Debug` for diagnostics/tests) -- plus
 /// `Display`, the compact single-line rendering `--diff` is built from.

@@ -31,7 +31,7 @@ use indexmap::IndexMap;
 use sha2::{Digest as _, Sha256};
 
 use crate::error::Error;
-use crate::value::{Leaf, Node};
+use crate::value::{write_separated, Leaf, Node};
 
 /// A file's content digest (SHA-256).
 type Digest = [u8; 32];
@@ -98,17 +98,13 @@ impl fmt::Display for FsAttrs {
             return Ok(());
         }
         f.write_str(", xattr[")?;
-        let mut sep = "";
-        for (name, value) in xattrs {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(value, &mut h);
-            write!(
-                f,
-                "{sep}{name}={:08x}",
-                std::hash::Hasher::finish(&h) as u32
-            )?;
-            sep = ", ";
-        }
+        write_separated(f, xattrs, ", ", |(name, value)| {
+            fmt::from_fn(move |f| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(value, &mut h);
+                write!(f, "{name}={:08x}", std::hash::Hasher::finish(&h) as u32)
+            })
+        })?;
         f.write_str("]")
     }
 }

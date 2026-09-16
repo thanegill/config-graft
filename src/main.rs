@@ -18,7 +18,7 @@ use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use reconcile::{escape_unprintable, ArrayStrategy, KeyPath, MergeKeys};
-use value::quote;
+use value::{quote, write_separated};
 use value::{Leaf, Node};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
@@ -471,20 +471,14 @@ impl<L: Leaf> fmt::Display for Node<L> {
         match self {
             Node::Map(m) => {
                 f.write_str("{")?;
-                let mut sep = "";
-                for (key, value) in m {
-                    write!(f, "{sep}{}:{value}", quote(key))?;
-                    sep = ",";
-                }
+                write_separated(f, m, ",", |(key, value)| {
+                    fmt::from_fn(move |f| write!(f, "{}:{value}", quote(key)))
+                })?;
                 f.write_str("}")
             }
             Node::Array(a) => {
                 f.write_str("[")?;
-                let mut sep = "";
-                for element in a {
-                    write!(f, "{sep}{element}")?;
-                    sep = ",";
-                }
+                write_separated(f, a, ",", |element| element)?;
                 f.write_str("]")
             }
             Node::Leaf(l) => write!(f, "{l}"),
