@@ -119,9 +119,9 @@ impl Leaf for JsonLeaf {
     }
 }
 
-/// How many containers a JSON document may nest. serde_json enforced 128 before
-/// the swap to json-syntax, which caps nothing.
-const MAX_DEPTH: usize = 128;
+/// How many containers a JSON document may nest -- an order of magnitude below
+/// where a run's deepest recursion runs out of stack (measured in issue #48).
+const MAX_DEPTH: usize = 512;
 
 /// Whether `text` nests no deeper than `MAX_DEPTH`, counting brackets outside
 /// strings. This has to run **before** `Value::parse_str`: json-syntax's parser is
