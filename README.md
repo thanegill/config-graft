@@ -112,6 +112,8 @@ Each byte-format entry takes `settings` (freeform data) or a pre-built `source` 
 
 `managedDirectory` is the `directory` subcommand wrapper: each entry reconciles a `source` directory *tree* into `target`, keeping app-created files and pruning files dropped from `source`. It takes `manageRoot`, `noOwner` (set it on a non-root home-manager activation — a store-built source is root-owned), and `xattrs` (`all`/`safe`/`none`) in place of `settings`.
 
+**Removing an entry prunes it too.** Each generation records a manifest of what it manages, and activation reconciles back to empty anything the previous generation managed and this one no longer declares — so emptying an entry's `settings`, or deleting the entry outright, cleans up exactly the keys or files it last grafted and leaves everything the app wrote. This works for every kind of entry on every platform, including `cfprefsdDomain` domains and `managedDirectory` trees. A prune never creates: if you deleted the target yourself before dropping the entry, it stays deleted. Because the generation that removes your *last* entry is the one that most needs this, the step is unconditional — so on NixOS and nix-darwin, importing the module puts config-graft in the system closure whether or not you declare any entries.
+
 A home-manager `flake.nix` sketch:
 
 ```nix

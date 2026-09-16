@@ -1,15 +1,67 @@
 # Format-agnostic pieces shared by the three managed-file modules. These are plain
 # functions with no per-platform dispatch: each module writes its own
 # `options`/`config` linearly and calls these for the entry submodule, the DESIRED
-# store path, the reconcile script, and the build-time assertions. Every format is
-# uniform, serialized by its `pkgs.formats.<name>` generator (`format.name` is the
-# format name, e.g. "json"; the entry's `format` option is that generator).
+# store path, the reconcile script, the generation manifest and its orphan-prune, and
+# the build-time assertions. Every format is uniform, serialized by its
+# `pkgs.formats.<name>` generator (`format.name` is the format name, e.g. "json"; the
+# entry's `format` option is that generator).
 let
   # An entry's attribute name may be a path (e.g. ".config/app/config.json"). Turn it
   # into a flat, filesystem-safe id for snapshot and DESIRED filenames: no "/" (so no
   # nested dirs or a leading "//"), and no doubled extension since the name already
   # ends in one.
   safeName = builtins.replaceStrings [ "/" ] [ "-" ];
+
+  # The attribute *policy* flags of a directory entry, separate from `--manage-root`:
+  # the policy says which attributes are reconciled at all, `--manage-root` says
+  # whether the target's own attributes are among them. A reconcile wants both; a
+  # caller with a DESIRED tree of its own making wants only the policy.
+  directoryPolicyFlags =
+    { lib, entry }:
+    lib.optional entry.noOwner "--no-owner"
+    ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}";
+
+  # The empty DESIRED of every `kind` the orphan-prune can reconcile back to empty,
+  # in one store tree named by the manifest's `kind` column so the script path-joins
+  # instead of dispatching on the format a second time.
+  #
+  # Written literally rather than through each format's `pkgs.formats` generator: an
+  # empty document is a constant, and generating it would drag every generator (for
+  # TOML, remarshal and its Python closure) into the build of a consumer who declares
+  # no entry of that format. The assertion ties the literals back to `formats.nix`, so
+  # a format added there without an empty document fails the build.
+  emptyDesired =
+    {
+      lib,
+      pkgs,
+      formats,
+    }:
+    let
+      documents = {
+        json = "{}";
+        yaml = "{}\n";
+        toml = "";
+        plist = ''
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict/>
+          </plist>
+        '';
+      };
+      undocumented = lib.subtractLists (builtins.attrNames documents) (map (f: f.name) formats);
+    in
+    assert lib.assertMsg (undocumented == [ ]) (
+      "config-graft: no empty document for format(s) ${toString undocumented}"
+    );
+    pkgs.runCommand "config-graft-empty-desired" { } (
+      "mkdir -p $out/directory\n"
+      + lib.concatStrings (
+        lib.mapAttrsToList (
+          name: text: "cp ${pkgs.writeText "config-graft-empty-${name}" text} $out/${name}\n"
+        ) documents
+      )
+    );
 in
 {
   inherit safeName;
@@ -295,15 +347,178 @@ in
     }:
     let
       flags = lib.concatStringsSep " " (
-        lib.optional entry.manageRoot "--manage-root"
-        ++ lib.optional entry.noOwner "--no-owner"
-        ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}"
+        lib.optional entry.manageRoot "--manage-root" ++ directoryPolicyFlags { inherit lib entry; }
       );
     in
     ''
       _target=${lib.escapeShellArg target}
       _i "Reconciling managed directory tree %s" "$_target"
       run ${lib.getExe entry.package} directory ${flags} "$_target" ${entry.source} "$_prev"
+    '';
+
+  # One manifest row per managed unit, the sibling of the reconcile scripts above:
+  # they say how to apply an entry *this* generation, these say what a *later* one
+  # needs to reconcile it back to empty once it is gone. The two must agree on which
+  # plist entries are domains rather than files, hence the shared branch.
+  #
+  # `kind` picks the prune (a format name, `domain`, or `directory`), `identity` is
+  # what the unit is known by across generations (its absolute target, or its
+  # cfprefsd domain), `snapshotRel` locates the BASE inside a generation, and `flags`
+  # are the write flags to carry.
+  mkPruneRow =
+    {
+      lib,
+      format,
+      entry,
+      target,
+      snapshotRel,
+    }:
+    if format.name == "plist" && entry.cfprefsdDomain != null then
+      {
+        kind = "domain";
+        identity = entry.cfprefsdDomain;
+        inherit snapshotRel;
+        flags = [ ];
+      }
+    else
+      {
+        kind = format.name;
+        identity = target;
+        inherit snapshotRel;
+        flags = lib.optional (format.name == "plist" && entry.binary) "--plist-format binary";
+      };
+
+  # The directory sibling of `mkPruneRow`. It carries the attribute *policy* but not
+  # `--manage-root`: the prune's DESIRED is an empty store directory, so managing the
+  # root would stamp that store directory's own mode and ownership onto the target
+  # instead of leaving a tree we no longer manage alone.
+  mkDirectoryPruneRow =
+    {
+      lib,
+      entry,
+      target,
+      snapshotRel,
+    }:
+    {
+      kind = "directory";
+      identity = target;
+      inherit snapshotRel;
+      flags = directoryPolicyFlags { inherit lib entry; };
+    };
+
+  # This generation's rows as manifest text, for the caller to place inside the
+  # generation beside the snapshots it points at. Tab-separated, one row per line: no
+  # field may hold a tab or a newline, which no target path reachable through
+  # `home.file` or `environment.etc` can anyway.
+  mkManifest =
+    { lib, rows }:
+    lib.concatMapStrings (
+      row: "${row.kind}\t${row.identity}\t${row.snapshotRel}\t${lib.concatStringsSep " " row.flags}\n"
+    ) rows;
+
+  # Enforce the manifest's one format rule at build time. A tab in a `target` or
+  # `cfprefsdDomain` shifts every later field of its row, so the prune reads a
+  # truncated identity and a snapshot path that is really the rest of the target; a
+  # newline splits the row in two. The row then no longer matches the membership test
+  # built from the same values, so a *still-declared* entry falls through to the prune
+  # branch. Nothing downstream can recover from that, and neither field has a
+  # legitimate use for either character.
+  mkManifestAssertions =
+    {
+      lib,
+      parent,
+      rows,
+    }:
+    lib.concatMap (
+      row:
+      map
+        (field: {
+          assertion = !(lib.hasInfix "\t" field || lib.hasInfix "\n" field);
+          message = ''
+            A `${parent}.managed*` entry reconciling `${row.kind}` has a tab or newline
+            in its target or attribute name. config-graft records what each generation
+            manages in a tab-separated manifest, so that a later generation can prune
+            the entry once you remove it; neither character can be written there.
+          '';
+        })
+        [
+          row.identity
+          row.snapshotRel
+        ]
+    ) rows;
+
+  # Reconcile back to empty every unit the previous generation managed and this one
+  # does not, against that unit's own previous snapshot as BASE -- so a removed entry
+  # prunes exactly the keys or files it last grafted and leaves everything the app or
+  # user wrote. Without it, per-entry pruning only ever fires while an entry stays
+  # declared: emptying an entry's `settings` or deleting it outright drops both its
+  # reconcile and its snapshot, freezing what it last applied.
+  #
+  # The previous generation is read as *data* (its manifest) and pruned by the code
+  # and binary of the current one, so a fix here reaches generations built before it.
+  # The caller sets `_cgRoot` to the previous generation's root beforehand, empty when
+  # there is none (the first switch), and must run this unconditionally -- the
+  # generation that removes the *last* entry is exactly the one with nothing left to
+  # key it off.
+  mkOrphanPruneScript =
+    {
+      lib,
+      pkgs,
+      formats,
+      package,
+      manifestRel,
+      rows,
+    }:
+    let
+      exe = lib.getExe package;
+      empty = emptyDesired { inherit lib pkgs formats; };
+      # Sentinel newlines on both ends so a row matches whole, never as the prefix of
+      # a longer target.
+      stillManaged = "\n" + lib.concatMapStrings (row: "${row.kind}\t${row.identity}\n") rows;
+    in
+    ''
+      if [[ -n "$_cgRoot" && -e "$_cgRoot/${manifestRel}" ]]; then
+        while IFS=$'\t' read -r _cgKind _cgId _cgSnap _cgFlags; do
+          [[ -n "$_cgKind" ]] || continue
+          case ${lib.escapeShellArg stillManaged} in
+            *$'\n'"$_cgKind"$'\t'"$_cgId"$'\n'*) continue ;;
+          esac
+          _cgBase="$_cgRoot/$_cgSnap"
+          [[ -e "$_cgBase" ]] || continue
+          # A prune never *creates*. An absent target has nothing left to prune, and
+          # reconciling one against an empty DESIRED would write it back as an empty
+          # document: to the engine a missing TARGET is a first apply, so dropping an
+          # entry after deleting its file would recreate the file (and its parent
+          # directories) holding `{}`. Every kind but `domain` is identified by a path;
+          # the domain's own existence test is in its arm.
+          [[ "$_cgKind" == domain || -e "$_cgId" ]] || continue
+          # $_cgFlags is unquoted on purpose: it is a flag *list* ("--xattrs safe"),
+          # built by this module and never user text.
+          case "$_cgKind" in
+            ${lib.concatMapStringsSep "|" (format: format.name) formats})
+              _i "Pruning removed managed %s file %s" "$_cgKind" "$_cgId"
+              run ${exe} "$_cgKind" "$_cgId" "${empty}/$_cgKind" "$_cgBase" $_cgFlags
+              ;;
+            domain)
+              # Same rule as the path kinds above: `defaults export` reports success
+              # and writes an empty plist for a domain that does not exist, so its
+              # absence has to be asked about directly.
+              /usr/bin/defaults read "$_cgId" >/dev/null 2>&1 || continue
+              _i "Pruning removed managed plist domain %s" "$_cgId"
+              _cgLive=$(mktemp)
+              /usr/bin/defaults export "$_cgId" "$_cgLive" 2>/dev/null || true
+              [[ -s "$_cgLive" ]] || /usr/bin/plutil -create xml1 "$_cgLive"
+              run ${exe} plist "$_cgLive" ${empty}/plist "$_cgBase" --plist-format binary
+              run /usr/bin/defaults import "$_cgId" "$_cgLive"
+              rm -f "$_cgLive"
+              ;;
+            directory)
+              _i "Pruning removed managed directory tree %s" "$_cgId"
+              run ${exe} directory $_cgFlags "$_cgId" ${empty}/directory "$_cgBase"
+              ;;
+          esac
+        done < "$_cgRoot/${manifestRel}"
+      fi
     '';
 
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
