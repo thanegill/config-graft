@@ -31,7 +31,8 @@ use indexmap::IndexMap;
 use sha2::{Digest as _, Sha256};
 
 use crate::error::Error;
-use crate::value::{write_separated, Leaf, Node};
+use crate::render::write_separated;
+use crate::value::{Leaf, Node};
 
 /// A file's content digest (SHA-256).
 type Digest = [u8; 32];

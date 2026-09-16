@@ -9,7 +9,8 @@ use std::hash::{Hash, Hasher};
 use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::number::NumberValue;
-use crate::value::{quote, Leaf, Node};
+use crate::render::quote;
+use crate::value::{Leaf, Node};
 
 /// JSON codec.
 pub struct Json;

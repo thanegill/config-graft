@@ -12,13 +12,14 @@ mod error;
 mod format;
 mod number;
 mod reconcile;
+mod render;
 mod value;
 mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use reconcile::{escape_unprintable, ArrayStrategy, KeyPath, MergeKeys};
-use value::{quote, write_separated};
+use render::{quote, write_separated};
 use value::{Leaf, Node};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole

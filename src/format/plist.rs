@@ -13,7 +13,8 @@ use super::{
 };
 use crate::error::Error;
 use crate::reconcile::KeyPath;
-use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
+use crate::render::{quote, render_f64};
+use crate::value::{canonical_float_bits, Leaf, Node};
 use crate::warning::Warning;
 
 /// Apple plist codec.

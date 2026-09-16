@@ -11,7 +11,8 @@ use saphyr::LoadableYamlNode;
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
+use crate::render::{quote, render_f64};
+use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// YAML codec.
 pub struct Yaml;
