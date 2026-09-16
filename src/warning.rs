@@ -60,7 +60,7 @@ pub enum Warning<L: Leaf> {
         more: usize,
         because: &'static str,
     },
-    /// A value the run's output encoding cannot spell, replaced as soon as it was
+    /// A value the run's output encoding cannot render, replaced as soon as it was
     /// read with one that it can -- so the reconcile, `--diff` and the write all
     /// agree. `because` completes the sentence "... because <because>".
     ValueNormalized {

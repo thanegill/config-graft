@@ -80,7 +80,7 @@ impl std::fmt::Debug for PlistLeaf {
             PlistLeaf::Uint(u) => write!(f, "Uint({u:?})"),
             PlistLeaf::Float(x) => write!(f, "Float({x:?})"),
             PlistLeaf::String(s) => write!(f, "String({s:?})"),
-            PlistLeaf::Date(d) => write!(f, "Date({})", spell_date(*d)),
+            PlistLeaf::Date(d) => write!(f, "Date({})", render_date(*d)),
             PlistLeaf::Data(bytes) => write!(f, "Data({} bytes)", bytes.len()),
             PlistLeaf::Uid(u) => write!(f, "Uid({u:?})"),
         }
@@ -95,7 +95,7 @@ impl Leaf for PlistLeaf {
             PlistLeaf::Uint(u) => u.to_string(),
             PlistLeaf::Float(f) => render_f64(*f),
             PlistLeaf::String(s) => quote(s),
-            PlistLeaf::Date(d) => format!("<date {}>", spell_date(*d)),
+            PlistLeaf::Date(d) => format!("<date {}>", render_date(*d)),
             PlistLeaf::Data(bytes) => format!("<data {} bytes>", bytes.len()),
             PlistLeaf::Uid(u) => format!("<uid {u}>"),
         }
@@ -440,26 +440,27 @@ fn check_xml_representable(
 
 /// A date as a diagnostic can print it. `to_xml_format` **panics** outside years
 /// 0..=9999, and rendering happens on every path -- including `--plist-binary`,
-/// which is allowed to carry such a date -- so the out-of-range spelling falls back
+/// which is allowed to carry such a date -- so the out-of-range rendering falls back
 /// to seconds from the epoch rather than aborting the run.
-fn spell_date(date: plist::Date) -> String {
-    if is_spellable_in_xml(date) {
+fn render_date(date: plist::Date) -> String {
+    if date_valid_in_xml(date) {
         return date.to_xml_format();
     }
     // The whole duration, not `as_secs`: two instants in the same second must not
     // render alike, or `--diff` prints a change with byte-identical sides.
-    let spell = |d: Duration, side| format!("{}.{:09}s {side} 1970", d.as_secs(), d.subsec_nanos());
+    let render =
+        |d: Duration, side| format!("{}.{:09}s {side} 1970", d.as_secs(), d.subsec_nanos());
     match SystemTime::from(date).duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(since) => spell(since, "after"),
-        Err(before) => spell(before.duration(), "before"),
+        Ok(since) => render(since, "after"),
+        Err(before) => render(before.duration(), "before"),
     }
 }
 
-/// Whether `date` can be spelled in the RFC 3339 form an XML plist uses. The
+/// Whether `date` is valid in the RFC 3339 form an XML plist uses. The
 /// `plist` crate **panics** rather than erroring outside years 0..=9999 -- in its
 /// writer and in `to_xml_format`, which `Leaf::render` reaches -- so a run that
 /// only passes such a value through would abort instead of refusing.
-fn is_spellable_in_xml(date: plist::Date) -> bool {
+fn date_valid_in_xml(date: plist::Date) -> bool {
     // Seconds from the Unix epoch to the start of year 0 and of year 10000.
     const YEAR_0: i128 = -62_167_219_200;
     const YEAR_10000: i128 = 253_402_300_800;
@@ -475,7 +476,7 @@ fn is_spellable_in_xml(date: plist::Date) -> bool {
     (YEAR_0..YEAR_10000).contains(&seconds)
 }
 
-/// One read-only pass over the dates: refuse any the XML writer cannot spell, and
+/// One read-only pass over the dates: refuse any the XML writer cannot render, and
 /// report whether a floor is needed. The range check has to come first, so it is
 /// done here rather than in a second traversal.
 ///
@@ -502,7 +503,7 @@ fn scan_dates(node: &Node<PlistLeaf>) -> Result<bool, Vec<String>> {
             }
         }
         Node::Leaf(PlistLeaf::Date(date)) => {
-            if !is_spellable_in_xml(*date) {
+            if !date_valid_in_xml(*date) {
                 return Err(Vec::new());
             }
             needs_floor = floor_date(*date) != Some(*date);
@@ -535,8 +536,8 @@ fn floor_date(date: plist::Date) -> Option<plist::Date> {
     floored.map(plist::Date::from)
 }
 
-fn leaf_to_plist(l: &PlistLeaf) -> plist::Value {
-    match l {
+fn leaf_to_plist(plist_leaf: &PlistLeaf) -> plist::Value {
+    match plist_leaf {
         PlistLeaf::Bool(b) => plist::Value::Boolean(*b),
         PlistLeaf::Int(i) => plist::Value::Integer((*i).into()),
         PlistLeaf::Uint(u) => plist::Value::Integer((*u).into()),

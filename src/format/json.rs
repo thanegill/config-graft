@@ -224,12 +224,12 @@ impl Format for Json {
     }
 }
 
-fn leaf_to_json(l: &JsonLeaf) -> json_syntax::Value {
+fn leaf_to_json(json_leaf: &JsonLeaf) -> json_syntax::Value {
     use json_syntax::{NumberBuf, Value};
     let number = |literal: &str| {
         Value::Number(NumberBuf::new(literal.bytes().collect()).expect("a valid number literal"))
     };
-    match l {
+    match json_leaf {
         JsonLeaf::Null => Value::Null,
         JsonLeaf::Bool(b) => Value::Boolean(*b),
         JsonLeaf::Int(i) => number(&i.to_string()),

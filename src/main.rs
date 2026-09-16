@@ -451,7 +451,7 @@ impl<L: Leaf> Node<L> {
 
     /// Render as a compact, single-line token for `--diff`. JSON-representable
     /// values match `serde_json`'s compact form; plist-only leaves get a readable
-    /// `<date ...>` / `<data N bytes>` / `<uid N>` token (they have no JSON spelling).
+    /// `<date ...>` / `<data N bytes>` / `<uid N>` token (they have no JSON rendering).
     pub(crate) fn compact(&self) -> String {
         match self {
             Node::Map(m) => {

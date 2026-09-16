@@ -171,8 +171,8 @@ fn write_canonical(node: &Node<YamlLeaf>) -> String {
     out
 }
 
-fn leaf_to_yaml(l: &YamlLeaf) -> saphyr::Yaml<'static> {
-    match l {
+fn leaf_to_yaml(yaml_leaf: &YamlLeaf) -> saphyr::Yaml<'static> {
+    match yaml_leaf {
         YamlLeaf::Null => saphyr::Yaml::Value(saphyr::Scalar::Null),
         YamlLeaf::Bool(b) => saphyr::Yaml::Value(saphyr::Scalar::Boolean(*b)),
         YamlLeaf::Int(i) => saphyr::Yaml::Value(saphyr::Scalar::Integer(*i)),

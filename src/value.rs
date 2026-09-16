@@ -19,7 +19,7 @@ pub fn quote(s: &str) -> String {
         .to_string()
 }
 
-/// A float as JSON spells it. Rust's `Debug` is already the shortest
+/// A float as JSON renders it. Rust's `Debug` is already the shortest
 /// round-tripping form, and differs only in leaving a positive exponent unsigned.
 /// JSON has no NaN or infinity, so those render as `null`, as every JSON writer
 /// does.
@@ -179,7 +179,7 @@ mod tests {
         // `--diff` output is asserted by the integration tests, and this is where
         // it comes from. serde_json writes decimal down to 1e-5 where Rust's
         // `{:?}` switches to an exponent below 1e-4, so that range needs its own
-        // spelling.
+        // rendering.
         for v in [
             1e-6_f64,
             5e-6,

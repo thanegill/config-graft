@@ -68,7 +68,7 @@ impl Leaf for TomlLeaf {
             TomlLeaf::Int(i) => i.to_string(),
             TomlLeaf::Float(f) => render_f64(*f),
             TomlLeaf::String(s) => quote(s),
-            // No JSON spelling -- a readable token, mirroring plist's `<date ...>`.
+            // No JSON rendering -- a readable token, mirroring plist's `<date ...>`.
             TomlLeaf::Datetime(d) => format!("<datetime {d}>"),
         }
     }
@@ -218,8 +218,8 @@ pub(super) fn node_to_value(node: &Node<TomlLeaf>) -> Value {
     }
 }
 
-fn leaf_to_value(l: &TomlLeaf) -> Value {
-    match l {
+fn leaf_to_value(toml_leaf: &TomlLeaf) -> Value {
+    match toml_leaf {
         TomlLeaf::Bool(b) => Value::from(*b),
         TomlLeaf::Int(i) => Value::from(*i),
         TomlLeaf::Float(f) => Value::from(*f),

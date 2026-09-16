@@ -172,7 +172,7 @@ impl fmt::Display for Error {
             Error::PlistDateOutOfRange { path } => write!(
                 f,
                 "the date at `{path}` falls outside the years an XML plist can \
-                 spell (0 to 9999); pass --plist-binary to write it unchanged"
+                 render (0 to 9999); pass --plist-binary to write it unchanged"
             ),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
             Error::TomlUnsafe => f.write_str(TOML_UNSAFE),
