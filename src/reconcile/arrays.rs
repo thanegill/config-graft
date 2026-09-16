@@ -658,3 +658,113 @@ fn order_scc(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::gts_order;
+
+    /// Run `gts_order` over space-separated element names and render its result
+    /// the same way, as `(order, conflict)`. A name's vertex index is its
+    /// position in TARGET (then any DESIRED-only name), which is how `assemble`
+    /// numbers survivors.
+    fn order(base: &str, target: &str, desired: &str) -> (String, String) {
+        let mut names: Vec<&str> = Vec::new();
+        for name in target.split_whitespace().chain(desired.split_whitespace()) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        let seq = |s: &str| -> Vec<usize> {
+            s.split_whitespace()
+                .map(|name| {
+                    names
+                        .iter()
+                        .position(|n| *n == name)
+                        .expect("every name appears in target or desired")
+                })
+                .collect()
+        };
+        let render = |vertices: &[usize]| {
+            vertices
+                .iter()
+                .map(|&v| names[v])
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let (out, conflict) = gts_order(names.len(), &seq(target), &seq(desired), &seq(base));
+        (render(&out), render(&conflict))
+    }
+
+    // TARGET pulled `c` ahead of `d`; DESIRED pulled `e` to the front and pushed
+    // `b` to the end. That drops both immediate edges into `c` -- TARGET's `b ->
+    // c` (DESIRED reversed it) and DESIRED's `d -> c` (TARGET reversed it) --
+    // leaving `c` a source the tie-break would emit first, ahead of the `a` that
+    // both branches keep before it. Step 5 re-adds `a -> c`; without it the
+    // order is `c e a b d`.
+    #[test]
+    fn ccp_connects_a_source_to_its_common_predecessor() {
+        assert_eq!(
+            order("a b d c e", "a b c d e", "e a d c b"),
+            ("e a c b d".to_string(), String::new())
+        );
+    }
+
+    // `d` is a source with two common predecessors, `a` and `b`. Step 5 takes the
+    // closest, `b`, so `d` waits for it; the farther `a` would leave `d` free to
+    // be emitted second, as `a d f b c e`.
+    #[test]
+    fn ccp_takes_the_closest_of_several_common_predecessors() {
+        assert_eq!(
+            order("a b c e d f", "a b c d e f", "a f b e d c"),
+            ("a f b d c e".to_string(), String::new())
+        );
+    }
+
+    // The re-added edge can contradict order already derived from the immediate
+    // edges: here `c -> d -> a` is settled, and both branches also keep `a`
+    // before `c`. Step 5 adds `a -> c`, closing the cycle that step 7 reports as
+    // a contradictory reorder; without it the three sort cleanly as `c d a b e`.
+    #[test]
+    fn ccp_reconnection_can_close_a_contradictory_cycle() {
+        assert_eq!(
+            order("a b d e c", "a b c d e", "d a e c b"),
+            ("a c d b e".to_string(), "a c d".to_string())
+        );
+    }
+
+    // Mirror of the predecessor case: TARGET pulled `a` ahead of `b`, DESIRED
+    // pulled `c` and `e` to the front, dropping both immediate edges out of `b`
+    // and leaving it a sink the tie-break would emit last -- behind the `d` both
+    // branches keep after it. Step 6 re-adds `b -> d`; without it the order is
+    // `a c d e b`.
+    #[test]
+    fn ccs_connects_a_sink_to_its_common_successor() {
+        assert_eq!(
+            order("b a c d e", "a b c d e", "c e b a d"),
+            ("a c e b d".to_string(), String::new())
+        );
+    }
+
+    // The same list with a trailing `f`, so the sink `b` has two common
+    // successors, `d` and `f`. Step 6 takes the closest, `d`, which pulls `b`
+    // ahead of it; the farther `f` would constrain nothing already settled and
+    // leave the order at `a c d e b f`.
+    #[test]
+    fn ccs_takes_the_closest_of_several_common_successors() {
+        assert_eq!(
+            order("b a c d e f", "a b c d e f", "c e b a d f"),
+            ("a c e b d f".to_string(), String::new())
+        );
+    }
+
+    // And the mirror of the cycle: `d -> e -> b` is settled from the immediate
+    // edges, while both branches keep `b` before `d`. Step 6's `b -> d` closes
+    // the cycle; without it the order is `a c d e b` with nothing reported.
+    #[test]
+    fn ccs_reconnection_can_close_a_contradictory_cycle() {
+        assert_eq!(
+            order("b a c e d", "a b c d e", "c e b a d"),
+            ("a c b d e".to_string(), "b d e".to_string())
+        );
+    }
+}
