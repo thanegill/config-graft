@@ -114,6 +114,8 @@ impl std::ops::Deref for ManagedPath {
 pub enum Step {
     /// A map key.
     Key(String),
+    /// A position in an array.
+    Index(usize),
     /// A keyed-array record, named by the field that identifies it and that
     /// field's rendered value. Attaches to the preceding key with no separator,
     /// as `[field=value]`.
@@ -154,11 +156,16 @@ impl DiagnosticPath {
         &self.0
     }
 
+    /// Whether `prefix` is this path or an ancestor of it.
+    pub(crate) fn starts_with(&self, prefix: &DiagnosticPath) -> bool {
+        self.0.starts_with(&prefix.0)
+    }
+
     /// This path for a `{}` hole: map keys joined by `sep` (format-specific), with
-    /// an element selector attached directly to the preceding key, e.g.
-    /// `servers[name="web"].tags`. The empty path is the document root. `sep`
-    /// belongs to whoever is printing -- the codecs and the engine build these
-    /// without knowing the format.
+    /// an index or an element selector attached directly to the preceding key, e.g.
+    /// `checks[0]:when` or `servers[name="web"].tags`. The empty path is the
+    /// document root. `sep` belongs to whoever is printing -- the codecs and the
+    /// engine build these without knowing the format.
     pub fn display<'a>(&'a self, sep: &'a str) -> DiagnosticPathDisplay<'a> {
         DiagnosticPathDisplay { path: self, sep }
     }
@@ -189,6 +196,7 @@ impl std::fmt::Display for DiagnosticPathDisplay<'_> {
                     }
                     f.write_str(&escape_unprintable(key))?;
                 }
+                Step::Index(index) => write!(f, "[{index}]")?,
                 Step::Selector { field, value } => write!(
                     f,
                     "[{}={}]",
@@ -323,6 +331,10 @@ impl<L: Leaf> Node<L> {
         for step in path.steps() {
             cur = match step {
                 Step::Key(key) => cur.as_map()?.get(key)?,
+                Step::Index(index) => match cur {
+                    Node::Array(a) => a.get(*index)?,
+                    _ => return None,
+                },
                 Step::Selector { .. } => return None,
             };
         }
@@ -348,7 +360,7 @@ mod tests {
     /// A path built the way the engine builds one: innermost first, gaining a step
     /// as the warning bubbles up out of each subtree.
     #[test]
-    fn a_selector_attaches_to_the_preceding_key() {
+    fn an_index_and_a_selector_attach_to_the_preceding_key() {
         let mut p = DiagnosticPath::new();
         p.push(Step::Key("tags".to_string()));
         p.prepend(Step::Selector {
@@ -358,6 +370,12 @@ mod tests {
         p.prepend(Step::Key("servers".to_string()));
         assert_eq!(p.render("."), "servers[name=\"web\"].tags");
         assert_eq!(p.render(":"), "servers[name=\"web\"]:tags");
+
+        let mut p = DiagnosticPath::new();
+        p.push(Step::Key("checks".to_string()));
+        p.push(Step::Index(2));
+        p.push(Step::Key("when".to_string()));
+        assert_eq!(p.render(":"), "checks[2]:when");
         // `render` is the owned form of the same writing.
         assert_eq!(format!("{}", p.display(":")), p.render(":"));
         assert_eq!(DiagnosticPath::new().render(":"), "<root>");

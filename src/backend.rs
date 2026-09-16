@@ -18,7 +18,7 @@ use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
 use crate::reconcile::{reconcile, ArrayStrategy, MergeKeys, Options};
-use crate::value::{DiagnosticPath, Leaf, Node};
+use crate::value::{DiagnosticPath, Leaf, Node, Step};
 use crate::warning::{Source, Warning};
 use crate::RunArgs;
 
@@ -31,14 +31,95 @@ fn requested_write_opts(args: &RunArgs) -> WriteOpts {
     }
 }
 
-/// Per `(array path, resulting value)`: the distinct originals normalization
-/// rewrote into it, and how many records it wrote. The two differ when the same
-/// original repeats, which is what separates a manufactured repeat from a real one.
-type Equalities<'a, L> = HashMap<(&'a DiagnosticPath, &'a Node<L>), (HashSet<&'a Node<L>>, usize)>;
+/// Per `(array path, resulting element value)`: what that array's elements held
+/// before normalization, with multiplicity -- so a repeat the file genuinely held
+/// stays distinguishable from one normalization manufactured.
+///
+/// Keyed on the *element*, not on the value normalization rewrote: membership is a
+/// set over elements, and a rewritten value can sit well inside one (a date in an
+/// array of dicts). Keyed by a [`DiagnosticPath`], so an array nested in another
+/// array is its own entry instead of sharing the outer one's -- which a managed path,
+/// stopping at the outer array, could not express.
+type ElementOrigins<'a, L> = HashMap<(DiagnosticPath, &'a Node<L>), Vec<&'a Node<L>>>;
 
-/// The originals rewritten into each `(array path, resulting value)`, and why.
-type Conflations<'a, L> =
-    HashMap<(&'a DiagnosticPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
+/// One of the run's inputs, as the run will use it and as it was read.
+struct NormalizedInput<'a, L: Leaf> {
+    source: Source,
+    /// The input after normalization -- what the reconcile and the write see.
+    node: &'a Node<L>,
+    origins: ElementOrigins<'a, L>,
+    rewritten: &'a [Normalized<L>],
+}
+
+impl<'a, L: Leaf> NormalizedInput<'a, L> {
+    /// Pair an input as read with the same input normalized. `as_read` is `None`
+    /// when normalization changed nothing, which leaves every array untouched.
+    fn new(
+        source: Source,
+        as_read: Option<&'a Node<L>>,
+        node: &'a Node<L>,
+        rewritten: &'a [Normalized<L>],
+    ) -> NormalizedInput<'a, L> {
+        let mut origins = HashMap::new();
+        if let Some(as_read) = as_read {
+            collect_origins(as_read, node, &mut DiagnosticPath::new(), &mut origins);
+        }
+        NormalizedInput {
+            source,
+            node,
+            origins,
+            rewritten,
+        }
+    }
+
+    /// What the elements of the array at `path` held before normalization made
+    /// them `value`; `None` when normalization left that array alone. Scanned
+    /// rather than hashed: the map holds one entry per element of the few arrays
+    /// normalization touched, and a caller's `value` outlives nothing it borrows.
+    fn origins_of(&self, path: &DiagnosticPath, value: &Node<L>) -> Option<&[&'a Node<L>]> {
+        self.origins
+            .iter()
+            .find(|((at, element), _)| at == path && *element == value)
+            .map(|(_, origins)| origins.as_slice())
+    }
+}
+
+/// Walk one input as read alongside the same input normalized, recording the
+/// elements of every array normalization touched. Normalization rewrites values in
+/// place, so the two trees have the same shape and pair off positionally.
+fn collect_origins<'a, L: Leaf>(
+    as_read: &'a Node<L>,
+    normalized: &'a Node<L>,
+    path: &mut DiagnosticPath,
+    into: &mut ElementOrigins<'a, L>,
+) {
+    match (as_read, normalized) {
+        (Node::Map(read), Node::Map(new)) => {
+            for (key, was) in read {
+                let Some(is) = new.get(key) else { continue };
+                path.push(Step::Key(key.clone()));
+                collect_origins(was, is, path, into);
+                path.pop();
+            }
+        }
+        (Node::Array(read), Node::Array(new)) if read.len() == new.len() => {
+            // Only an array normalization changed can have lost anything to it, and
+            // an element it left alone is still a value the input distinguished --
+            // so once any element changed, all of them are recorded.
+            if read != new {
+                for (was, is) in read.iter().zip(new) {
+                    into.entry((path.clone(), is)).or_default().push(was);
+                }
+            }
+            for (index, (was, is)) in read.iter().zip(new).enumerate() {
+                path.push(Step::Index(index));
+                collect_origins(was, is, path, into);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Report arrays where normalization conflated values an input distinguished and
 /// the reconcile then kept fewer copies than there were distinct originals.
@@ -49,15 +130,10 @@ type Conflations<'a, L> =
 /// conflated and writes anyway, because the same normalization is what keeps TARGET
 /// comparable to BASE.
 ///
-/// Only paths that name an array on both sides can be judged: a date inside an
-/// array of dicts is recorded under the array's key and is unreachable here, and a
-/// path the result no longer holds was pruned, which is a removal rather than a
-/// collapse. Both are skipped -- see issue #37.
+/// A path the result no longer holds is skipped: the array was pruned, which is a
+/// removal rather than a collapse.
 fn lossy_collapses<L: Leaf>(
-    target_rewritten: &[Normalized<L>],
-    desired_rewritten: &[Normalized<L>],
-    target: &Node<L>,
-    desired: &Node<L>,
+    inputs: &[NormalizedInput<'_, L>],
     result: &Node<L>,
     arrays: ArrayStrategy,
 ) -> Vec<Warning<L>> {
@@ -66,37 +142,55 @@ fn lossy_collapses<L: Leaf>(
     if !matches!(arrays, ArrayStrategy::Merge | ArrayStrategy::Set) {
         return Vec::new();
     }
-    let mut rewritten: Conflations<'_, L> = HashMap::new();
-    for n in target_rewritten.iter().chain(desired_rewritten.iter()) {
-        let entry = rewritten.entry((&n.path, &n.value)).or_default();
-        entry.0.push(&n.original);
-        // From a record that produced *this* value, not one merely sharing the path.
-        entry.1 = n.because;
-    }
     // Collected as plain fields so the sort key is total without matching on a
     // variant the list cannot hold.
     let mut reported: Vec<(DiagnosticPath, usize, usize, &'static str)> = Vec::new();
-    for ((path, value), (originals, because)) in &rewritten {
-        let array = |node: &Node<L>| match node.get_diagnostic_path(path) {
-            Some(Node::Array(a)) => Some(a.iter().filter(|e| e == value).count()),
-            _ => None,
-        };
-        let Some(kept) = array(result) else { continue };
-        let before = array(target).unwrap_or(0) + array(desired).unwrap_or(0);
-        if before == 0 {
-            continue;
+    let mut judged: HashSet<(&DiagnosticPath, &Node<L>)> = HashSet::new();
+    for input in inputs {
+        for (path, value) in input.origins.keys() {
+            let value = *value;
+            if !judged.insert((path, value)) {
+                continue;
+            }
+            let Some(Node::Array(survivors)) = result.get_diagnostic_path(path) else {
+                continue;
+            };
+            // Every input value that became `value`, taken from both sides:
+            // membership unions the two arrays, so a collapse can fall between them
+            // rather than inside either one.
+            let mut distinct: HashSet<&Node<L>> = HashSet::new();
+            for other in inputs {
+                match other.origins_of(path, value) {
+                    Some(origins) => distinct.extend(origins),
+                    // Untouched here, so an element equal to `value` is an input
+                    // value in its own right -- one the collapse also cost.
+                    None => {
+                        if matches!(other.node.get_diagnostic_path(path),
+                                    Some(Node::Array(a)) if a.contains(value))
+                        {
+                            distinct.insert(value);
+                        }
+                    }
+                }
+            }
+            let kept = survivors.iter().filter(|e| *e == value).count();
+            if distinct.len() < 2 || kept >= distinct.len() {
+                continue;
+            }
+            // From a record inside this array: the reason belongs to the values that
+            // collapsed. A touched array always has one, so the fallback is only
+            // against a format that rewrote a value without recording it -- stay
+            // silent rather than invent a reason.
+            let Some(because) = inputs
+                .iter()
+                .flat_map(|input| input.rewritten)
+                .find(|r| r.path.starts_with(path))
+                .map(|r| r.because)
+            else {
+                continue;
+            };
+            reported.push((path.clone(), distinct.len(), kept, because));
         }
-        // What the inputs distinguished before normalization: the originals it
-        // rewrote, plus the value itself when an element already held it untouched
-        // -- that element is a distinct input value the collapse also cost.
-        let mut distinct: HashSet<&Node<L>> = originals.iter().copied().collect();
-        if before > originals.len() {
-            distinct.insert(value);
-        }
-        if distinct.len() < 2 || kept >= distinct.len() {
-            continue;
-        }
-        reported.push(((*path).clone(), distinct.len(), kept, because));
     }
     // A `HashMap` iterates in an arbitrary order, and two collapses can share a
     // path, so order on the whole record.
@@ -256,9 +350,12 @@ pub(crate) trait Backend {
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
+        // Both inputs are kept as they were read: what an array lost to
+        // normalization is only visible against the values it held before.
+        let mut desired_as_read = None;
         let desired_risks = match Self::normalize_for_run(args, write_opts, &desired)? {
             Some(normalized) => {
-                desired = normalized.node;
+                desired_as_read = Some(std::mem::replace(&mut desired, normalized.node));
                 normalized.rewritten
             }
             None => Vec::new(),
@@ -271,13 +368,10 @@ pub(crate) trait Backend {
             Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
             None => Node::empty_map(),
         };
-        // `--diff` compares against the node as read, or it shows nothing and
-        // disagrees with the `--check` that compares against the bytes on disk.
-        let mut target_on_disk = None;
+        let mut target_as_read = None;
         let target_risks = match Self::normalize_for_run(args, write_opts, &target)? {
             Some(normalized) => {
-                let as_read = std::mem::replace(&mut target, normalized.node);
-                target_on_disk = args.diff.then_some(as_read);
+                target_as_read = Some(std::mem::replace(&mut target, normalized.node));
                 normalized.rewritten
             }
             None => Vec::new(),
@@ -306,29 +400,25 @@ pub(crate) trait Backend {
             arrays: args.array_strategy,
             merge_keys: Self::merge_keys(args),
         };
-        let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
-        // The engine sees normalized inputs, so two values it made equal look like
-        // one identity the file held twice -- which the file never did.
-        // `n` distinct originals collapsing onto one value introduce `n - 1`
-        // equalities that were not in the file; occurrences beyond that are repeats
-        // the file genuinely held, and those are still worth reporting.
-        // The engine sees normalized inputs, so equalities normalization introduced
-        // reach it as repeats the file "held". Matched on the node, not a rendering:
-        // a rendering that changes would silently start reporting duplicates the
-        // file never had.
-        fn equalities<L: Leaf>(risks: &[Normalized<L>]) -> Equalities<'_, L> {
-            let mut origins: Equalities<'_, L> = HashMap::new();
-            for n in risks {
-                let entry = origins.entry((&n.path, &n.value)).or_default();
-                entry.0.insert(&n.original);
-                entry.1 += 1;
-            }
-            origins
-        }
-        let by_source = [
-            (Source::Target, equalities(&target_risks)),
-            (Source::Desired, equalities(&desired_risks)),
+        let inputs = [
+            NormalizedInput::new(
+                Source::Target,
+                target_as_read.as_ref(),
+                &target,
+                &target_risks,
+            ),
+            NormalizedInput::new(
+                Source::Desired,
+                desired_as_read.as_ref(),
+                &desired,
+                &desired_risks,
+            ),
         ];
+        let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
+        // The engine sees normalized inputs, so values it made equal reach it as one
+        // identity the input "held" twice -- which the file never did. Counted from
+        // the values the elements actually held, so nothing has to be reconstructed:
+        // the identity was held as often as one original value repeats among them.
         warnings.retain_mut(|w| match w {
             Warning::DuplicateCollapsed {
                 path,
@@ -338,19 +428,19 @@ pub(crate) trait Backend {
                 kept,
                 ..
             } => {
-                let made = by_source
+                if let Some(origins) = inputs
                     .iter()
-                    .find(|(s, _)| s == source)
-                    .and_then(|(_, o)| o.get(&(&*path, &*matched)))
-                    .map_or(0, |(distinct, records)| {
-                        // An occurrence the records do not account for was already
-                        // equal to this value before normalization touched anything.
-                        let untouched = *held > *records;
-                        distinct.len() - usize::from(!untouched)
-                    });
-                *held = held.saturating_sub(made);
-                // `value_duplicates` reports a loss, so there has to be one: after
-                // the subtraction the repeat must still outnumber what survived.
+                    .find(|input| input.source == *source)
+                    .and_then(|input| input.origins_of(path, matched))
+                {
+                    let mut times: HashMap<&Node<Self::Leaf>, usize> = HashMap::new();
+                    for original in origins {
+                        *times.entry(original).or_default() += 1;
+                    }
+                    *held = times.into_values().max().unwrap_or(0);
+                }
+                // `value_duplicates` reports a loss, so there has to be one: the
+                // repeat must still outnumber what survived.
                 *held >= 2 && *held > *kept
             }
             _ => true,
@@ -360,14 +450,7 @@ pub(crate) trait Backend {
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
         emit(&warnings, Self::COMPONENT_SEPARATOR);
         emit(
-            &lossy_collapses(
-                &target_risks,
-                &desired_risks,
-                &target,
-                &desired,
-                &result,
-                opts.arrays,
-            ),
+            &lossy_collapses(&inputs, &result, opts.arrays),
             Self::COMPONENT_SEPARATOR,
         );
 
@@ -379,7 +462,7 @@ pub(crate) trait Backend {
         // so it should still show what the run would do to a target the writer then
         // turns out to be unable to represent.
         if args.diff {
-            let before = target_on_disk.as_ref().unwrap_or(&target);
+            let before = target_as_read.as_ref().unwrap_or(&target);
             print!("{}", before.diff(&result, Self::COMPONENT_SEPARATOR));
         }
 

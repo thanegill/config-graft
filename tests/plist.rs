@@ -755,6 +755,30 @@ fn a_value_xml_cannot_represent_is_refused_not_mangled() {
 }
 
 #[test]
+fn a_refusal_inside_an_array_names_the_element() {
+    // The refusal has to say where the byte is. An array element has no key of its
+    // own, so naming the array alone would point at a value that is not a string.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    pdict(vec![(
+        "keys",
+        plist::Value::Array(vec![
+            plist::Value::String("fine".into()),
+            plist::Value::String("\u{1b}Window".into()),
+        ]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains(r"keys[1]"), "got: {err}");
+    assert!(err.contains("U+001B"), "got: {err}");
+}
+
+#[test]
 fn an_unmanaged_array_is_never_refused_for_a_floor_collapse() {
     // The array is absent from DESIRED, so the reconcile copies it through
     // untouched and both instants survive. Refusing here would fail every
@@ -788,6 +812,55 @@ fn an_unmanaged_array_is_never_refused_for_a_floor_collapse() {
     // Both survive -- floored to the same second, but an unmanaged array keeps
     // its duplicates.
     assert_eq!(checks.len(), 2, "got: {checks:?}");
+}
+
+#[test]
+fn a_repeat_the_file_held_is_reported_beside_a_nested_array() {
+    // A duplicate the file genuinely holds is reported as one; the floor is not
+    // what made those two equal. The nested element is the trap: it floors to the
+    // same instant one level deeper, and while an element inside an array had no
+    // address of its own it counted against the repeat at the outer level and
+    // silenced the warning the plain shape gets (issue #49). Both shapes hold the
+    // same repeat, so both say so.
+    let dir = tempfile::tempdir().unwrap();
+    let reports_the_repeat = |name: &str, elements: Vec<plist::Value>| {
+        let target = dir.path().join(format!("{name}-t.plist"));
+        let desired = dir.path().join(format!("{name}-d.plist"));
+        pdict(vec![("arr", plist::Value::Array(elements))])
+            .to_file_binary(&target)
+            .unwrap();
+        pdict(vec![("arr", plist::Value::Array(vec![instant(0, 0)]))])
+            .to_file_xml(&desired)
+            .unwrap();
+
+        let out = run(&[
+            "plist",
+            "--plist-format",
+            "xml",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{name} failed the run");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(
+                "array `arr` in TARGET holds <date 1970-01-12T13:46:40Z> 2 times; \
+                 array membership is a set, so one is in the result"
+            ),
+            "{name} stderr was: {err}"
+        );
+    };
+
+    let repeated = || instant(1_000_000, 700_000_000);
+    reports_the_repeat("plain", vec![repeated(), repeated()]);
+    reports_the_repeat(
+        "nested",
+        vec![
+            plist::Value::Array(vec![instant(1_000_000, 200_000_000)]),
+            repeated(),
+            repeated(),
+        ],
+    );
 }
 
 #[test]
@@ -828,10 +901,69 @@ fn a_collapse_across_target_and_desired_warns() {
 }
 
 #[test]
+fn a_collapse_inside_an_array_of_dicts_warns() {
+    // What `defaults export` produces most often: the dates sit one level inside
+    // the array, so the elements that membership is a set over are the dicts. Both
+    // floor to the same dict, and DESIRED's element is the only other survivor.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![(
+        "k",
+        plist::Value::Array(vec![
+            pdict(vec![("d", instant(1_000_000, 300_000_000))]),
+            pdict(vec![("d", instant(1_000_000, 700_000_000))]),
+        ]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![(
+        "k",
+        plist::Value::Array(vec![pdict(vec![("z", pint(1))])]),
+    )])
+    .to_file_xml(&desired)
+    .unwrap();
+
+    let out = run(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("array `k` held 2 values that normalizing made identical"),
+        "stderr was: {err}"
+    );
+    // And the value warning names where the date is, not a key path that does not
+    // exist: `k` is an array, so there is no `k:d`.
+    assert!(
+        err.contains("`k[0]:d` in TARGET: <date 1970-01-12T13:46:40.2"),
+        "stderr was: {err}"
+    );
+    assert!(
+        !err.contains("`k:d`"),
+        "stderr named a key path that does not exist: {err}"
+    );
+
+    // One of the two dicts is gone; DESIRED's element is the other survivor.
+    let plist::Value::Dictionary(d) = read_plist(&target) else {
+        panic!("expected a dictionary");
+    };
+    let plist::Value::Array(kept) = d.get("k").unwrap().clone() else {
+        panic!("expected an array");
+    };
+    assert_eq!(kept.len(), 2, "got: {kept:?}");
+}
+
+#[test]
 fn normalization_does_not_warn_where_nothing_is_dropped() {
-    // The three shapes the check cannot judge, and so must stay quiet about: a
-    // scalar date on both sides, a date inside an array of dicts (unreachable by
-    // key path), and a managed array the user removed from DESIRED.
+    // Two shapes where the floor conflates values and nothing is lost by it: a
+    // scalar date on both sides, where DESIRED simply wins, and an unmanaged array
+    // of dicts, which is copied through with both (now equal) elements intact.
     let dir = tempfile::tempdir().unwrap();
     let quiet = |name: &str, target_value: plist::Value, desired: plist::Value| {
         let target = dir.path().join(format!("{name}-t.plist"));
@@ -859,7 +991,8 @@ fn normalization_does_not_warn_where_nothing_is_dropped() {
         instant(1_000_000, 300_000_000),
         pdict(vec![("d", instant(1_000_000, 700_000_000))]),
     );
-    // Dates inside an array of dicts, with the array unmanaged.
+    // Dates inside an array of dicts, with the array unmanaged: an unmanaged array
+    // keeps its duplicates, so the floor costs nothing.
     quiet(
         "k",
         plist::Value::Array(vec![
