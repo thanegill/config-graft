@@ -1264,6 +1264,45 @@ fn a_sub_second_date_the_app_owns_survives_a_default_run_on_a_binary_target() {
 }
 
 #[test]
+fn an_xml_target_opening_with_a_comment_can_still_carry_a_byte_xml_cannot_hold() {
+    // An XML comment or a non-`xml` processing instruction ahead of the declaration
+    // is well formed, and the `plist` crate reads such a file happily -- so what it
+    // already holds is not this run's doing, however its prologue opens.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    let xml = format!(
+        "<!-- written by something that announces itself -->\n\
+         <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \t<key>NSUserKeyEquivalents</key>\n\t<dict>\n\
+         \t\t<key>{esc}Window{esc}New Window</key>\n\t\t<string>@~n</string>\n\
+         \t</dict>\n\
+         \t<key>b</key>\n\t<integer>1</integer>\n</dict>\n</plist>\n"
+    );
+    fs::write(&target, &xml).unwrap();
+    pdict(vec![("b", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "the prologue decided the run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("U+001B"), "the pass-through was silent: {err}");
+    assert!(err.contains("warning"), "got: {err}");
+    assert!(
+        fs::read(&target).unwrap().contains(&27u8),
+        "the key the app owns was dropped"
+    );
+}
+
+#[test]
 fn a_byte_xml_cannot_carry_that_is_passed_through_is_reported() {
     // Passing a byte through writes XML a conforming parser rejects -- a deliberate
     // trade, since refusing broke every activation, but not a silent one.
