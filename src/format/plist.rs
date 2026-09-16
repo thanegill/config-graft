@@ -207,9 +207,11 @@ impl Format for Plist {
 
     fn resolve_write_opts(current: &[u8], opts: WriteOpts) -> WriteOpts {
         let plist_format = match opts.plist_format {
-            PlistFormat::Follow if is_binary_plist(current) => PlistFormat::Binary,
-            // Absent, empty and unrecognized all land here: with nothing to follow,
-            // a first apply writes the canonical encoding.
+            PlistFormat::Follow if CurrentBytes::classify(current) == CurrentBytes::Binary => {
+                PlistFormat::Binary
+            }
+            // An XML target keeps its encoding; absent and unrecognized ones have
+            // nothing to follow, so they get the canonical encoding.
             PlistFormat::Follow => PlistFormat::Xml,
             chosen => chosen,
         };
@@ -234,7 +236,7 @@ impl Format for Plist {
         // because we just wrote it -- and only when the target is already XML, since
         // rewriting a binary plist emits every byte anew.
         let mut carried = Carried::default();
-        if is_xml_plist(current) {
+        if CurrentBytes::classify(current) == CurrentBytes::Xml {
             let mut in_target = Represented::default();
             let mut in_result = Represented::default();
             collect_represented(target, &mut KeyPath::new(), &mut in_target);
@@ -369,22 +371,41 @@ fn xml_unrepresentable(text: &str) -> Option<char> {
     })
 }
 
-/// Whether `bytes` are a binary plist. The complement is not [`is_xml_plist`]:
-/// bytes that are neither -- absent, empty, or something else entirely -- answer
-/// `false` to both, which is what makes XML the encoding a run falls back to.
-fn is_binary_plist(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"bplist0")
+/// What the bytes a plist run is about to overwrite turn out to be. Two questions
+/// are asked of them -- which encoding a `follow` run writes, and whether an
+/// unrepresentable value the file already holds may be passed through -- and one
+/// classification answers both, so they cannot disagree about the same file.
+///
+/// `Absent` and `Unrecognized` are kept apart even though both write XML and carry
+/// nothing: only one of them is a statement about the file's contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurrentBytes {
+    /// Nothing to overwrite: the file is missing, empty, or entirely whitespace.
+    Absent,
+    Binary,
+    Xml,
+    /// Present, but neither encoding. Treated as not-XML, so nothing carries over.
+    Unrecognized,
 }
 
-/// Whether `bytes` are an XML plist. Strict on purpose: anything unrecognized
-/// counts as not-XML, so nothing is passed through.
-fn is_xml_plist(bytes: &[u8]) -> bool {
-    let text = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-    let text = match text.iter().position(|b| !b.is_ascii_whitespace()) {
-        Some(i) => &text[i..],
-        None => return false,
-    };
-    text.starts_with(b"<?xml") || text.starts_with(b"<!DOCTYPE") || text.starts_with(b"<plist")
+impl CurrentBytes {
+    fn classify(bytes: &[u8]) -> CurrentBytes {
+        if bytes.starts_with(b"bplist0") {
+            return CurrentBytes::Binary;
+        }
+        let rest = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+        let rest = match rest.iter().position(|b| !b.is_ascii_whitespace()) {
+            Some(i) => &rest[i..],
+            None => return CurrentBytes::Absent,
+        };
+        if rest.starts_with(b"<?xml")
+            || rest.starts_with(b"<!DOCTYPE")
+            || rest.starts_with(b"<plist")
+        {
+            return CurrentBytes::Xml;
+        }
+        CurrentBytes::Unrecognized
+    }
 }
 
 /// Where each unrepresentable string and dictionary key of a document sits, keys
@@ -829,5 +850,62 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_binary_plist_is_classified_by_its_magic() {
+        assert_eq!(
+            CurrentBytes::classify(b"bplist00\x00\x01"),
+            CurrentBytes::Binary
+        );
+    }
+
+    #[test]
+    fn nothing_at_all_is_absent() {
+        assert_eq!(CurrentBytes::classify(b""), CurrentBytes::Absent);
+        assert_eq!(CurrentBytes::classify(b"  \n\t "), CurrentBytes::Absent);
+    }
+
+    #[test]
+    fn each_recognized_prologue_is_xml() {
+        for opening in [
+            &b"<?xml version=\"1.0\"?>"[..],
+            &b"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"\">"[..],
+            &b"<plist version=\"1.0\"><dict/></plist>"[..],
+        ] {
+            assert_eq!(CurrentBytes::classify(opening), CurrentBytes::Xml);
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_and_leading_whitespace_are_skipped() {
+        assert_eq!(
+            CurrentBytes::classify(b"\xef\xbb\xbf\n  <?xml version=\"1.0\"?>"),
+            CurrentBytes::Xml
+        );
+    }
+
+    #[test]
+    fn anything_else_is_unrecognized() {
+        assert_eq!(CurrentBytes::classify(b"hello"), CurrentBytes::Unrecognized);
+        assert_eq!(
+            CurrentBytes::classify(b"<html>"),
+            CurrentBytes::Unrecognized
+        );
+    }
+
+    #[test]
+    fn only_the_binary_magic_changes_the_encoding_a_follow_run_writes() {
+        let follow = WriteOpts {
+            plist_format: PlistFormat::Follow,
+            indent: Indent::Spaces(2),
+        };
+        let writes_xml = |bytes: &[u8]| {
+            Plist::resolve_write_opts(bytes, follow).plist_format == PlistFormat::Xml
+        };
+        assert!(writes_xml(b"<?xml version=\"1.0\"?>"));
+        assert!(writes_xml(b""));
+        assert!(writes_xml(b"hello"));
+        assert!(!writes_xml(b"bplist00"));
     }
 }
