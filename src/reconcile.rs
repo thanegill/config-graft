@@ -1378,6 +1378,24 @@ mod tests {
     }
 
     #[test]
+    fn a_composite_key_value_renders_in_the_element_selector() {
+        // A merge key whose field holds an object rather than a scalar. Degenerate
+        // -- real keys are scalars -- but the selector still has to render it, and
+        // the rendering is user-visible in a conflict path and in a collapse
+        // warning, so pin it rather than leaving it to whichever renderer happens
+        // to be wired up.
+        assert_eq!(
+            keyed_conflict_paths(
+                json!({"servers": [{"name": {"host": "web", "port": 80}, "tags": ["x", "y"]}]}),
+                json!({"servers": [{"name": {"host": "web", "port": 80}, "tags": ["y", "x"]}]}),
+                None,
+                &["name"],
+            ),
+            vec!["servers[name={host=\"web\",port=80}].tags"]
+        );
+    }
+
+    #[test]
     fn keyed_record_reorder_conflict_reports_at_the_array() {
         // Reordering the keyed records themselves contradictorily is an ordering
         // conflict of the array -> reported at `servers`, with no element selector.
