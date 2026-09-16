@@ -7,8 +7,7 @@
 //!
 //! Warnings are diagnostics only -- they never change the exit code.
 
-use crate::reconcile::KeyPath;
-use crate::value::{Leaf, Node};
+use crate::value::{DiagnosticPath, Leaf, Node};
 
 /// Which of a run's inputs a warning is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,13 +31,13 @@ pub enum Warning<L: Leaf> {
     /// contradictorily (a cross-over move). The order is still resolved
     /// deterministically; this records that it was resolved, not agreed.
     ContradictoryReorder {
-        path: KeyPath,
+        path: DiagnosticPath,
         elements: Vec<Node<L>>,
     },
     /// One input array held the same identity twice. Membership is a set, so the
     /// repeats cannot all survive -- and where the value was also pruned, none do.
     DuplicateCollapsed {
-        path: KeyPath,
+        path: DiagnosticPath,
         source: Source,
         /// What repeated: an element's compact value, or a `[field=value]`
         /// selector when the array is matched by merge key.
@@ -55,7 +54,7 @@ pub enum Warning<L: Leaf> {
     /// printed one by one -- a `defaults export` domain stores every date as an
     /// `f64`, so listing each would bury every other diagnostic.
     MoreValuesNormalized {
-        path: KeyPath,
+        path: DiagnosticPath,
         source: Source,
         more: usize,
         because: &'static str,
@@ -64,7 +63,7 @@ pub enum Warning<L: Leaf> {
     /// read with one that it can -- so the reconcile, `--diff` and the write all
     /// agree. `because` completes the sentence "... because <because>".
     ValueNormalized {
-        path: KeyPath,
+        path: DiagnosticPath,
         source: Source,
         from: String,
         to: String,
@@ -73,14 +72,14 @@ pub enum Warning<L: Leaf> {
     /// A byte the output encoding cannot carry, kept because the file already had
     /// it -- so the result loads on macOS but in no conforming parser.
     NonConformingByteKept {
-        path: KeyPath,
+        path: DiagnosticPath,
         character: char,
         because: &'static str,
     },
     /// Normalization made array elements equal that an input distinguished, and
     /// membership is a set, so fewer survived.
     ArrayCollapsed {
-        path: KeyPath,
+        path: DiagnosticPath,
         distinct: usize,
         kept: usize,
         because: &'static str,
@@ -89,7 +88,7 @@ pub enum Warning<L: Leaf> {
 
 impl<L: Leaf> Warning<L> {
     /// The path this warning points at.
-    pub fn path(&self) -> &KeyPath {
+    pub fn path(&self) -> &DiagnosticPath {
         match self {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
@@ -102,7 +101,7 @@ impl<L: Leaf> Warning<L> {
 
     /// The same, mutably, so a caller can extend it as the warning bubbles up out
     /// of a subtree and gains its parent key at each level.
-    pub fn path_mut(&mut self) -> &mut KeyPath {
+    pub fn path_mut(&mut self) -> &mut DiagnosticPath {
         match self {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
@@ -116,7 +115,7 @@ impl<L: Leaf> Warning<L> {
     /// The message body, without the `config-graft: warning: ` prefix. `sep` is
     /// the format's key-path separator (`.`, or `:` for plist, `/` for a tree).
     pub fn render(&self, sep: &str) -> String {
-        let at = self.path().render(sep);
+        let at = self.path().display(sep);
         match self {
             Warning::ContradictoryReorder { elements, .. } => {
                 let elements: Vec<String> = elements.iter().map(Node::to_string).collect();

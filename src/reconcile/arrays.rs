@@ -7,8 +7,8 @@
 //! every element of both sides is an object carrying it -- by that key, deep-merging
 //! the matched records.
 
-use super::{reconcile, ArrayStrategy, KeyPath, NodeList, Options};
-use crate::value::{Leaf, Node};
+use super::{reconcile, ArrayStrategy, NodeList, Options};
+use crate::value::{DiagnosticPath, Leaf, Node, Step};
 use crate::warning::{Source, Warning};
 use std::collections::{HashMap, HashSet};
 
@@ -162,7 +162,10 @@ fn keyed_merge<L: Leaf>(
             (Some(t), Some(d)) => {
                 let (m, conflicts) = reconcile(&t, &d, find(base, k).as_ref(), opts);
                 let (field, key_value) = k;
-                let selector = format!("[{field}={key_value}]");
+                let selector = Step::Selector {
+                    field: field.clone(),
+                    value: key_value.to_string(),
+                };
                 for mut c in conflicts {
                     c.path_mut().prepend(selector.clone());
                     nested.push(c);
@@ -210,7 +213,7 @@ fn value_duplicates<L: Leaf>(seq: &[Node<L>], out: &[Node<L>], source: Source) -
             continue;
         }
         warnings.push(Warning::DuplicateCollapsed {
-            path: KeyPath::new(),
+            path: DiagnosticPath::new(),
             source,
             identity: element.to_string(),
             matched: element.clone(),
@@ -243,7 +246,7 @@ fn key_duplicates<L: Leaf>(
         }
         let (field, value) = ident;
         warnings.push(Warning::DuplicateCollapsed {
-            path: KeyPath::new(),
+            path: DiagnosticPath::new(),
             source,
             identity: format!("[{field}={value}]"),
             matched: (*value).clone(),
@@ -292,7 +295,7 @@ fn assemble<L: Leaf>(
         Vec::new()
     } else {
         vec![Warning::ContradictoryReorder {
-            path: KeyPath::new(),
+            path: DiagnosticPath::new(),
             elements: conflict_ids.iter().map(|&i| merged[i].clone()).collect(),
         }]
     };

@@ -4,7 +4,7 @@
 //! what we applied last time). Arrays and scalars are atomic leaves, so a list
 //! is reconciled and pruned as a whole, never element-by-element.
 
-use crate::value::{Leaf, Node};
+use crate::value::{Leaf, ManagedPath, Node, Step};
 use crate::warning::Warning;
 use clap::ValueEnum;
 use indexmap::IndexMap;
@@ -15,87 +15,6 @@ mod arrays;
 /// A list of array elements -- the payload of a `Node::Array`. It's what the
 /// array-combining strategies produce, and (on a `merge` conflict) report.
 pub type NodeList<L> = Vec<Node<L>>;
-
-/// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
-/// leaves). Distinct from `std::path::Path` -- this addresses keys, not files.
-///
-/// Pruning only ever builds key segments. A conflict path may additionally carry a
-/// `[field=value]` element-selector segment naming a keyed-array record it points
-/// into; such paths are used only for rendering, never for pruning lookups.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct KeyPath(Vec<String>);
-
-/// Escape anything unprintable, so rendering a path cannot emit a control byte into
-/// the reader's terminal. Only *rendering* escapes: a segment stays the real key, or
-/// a path built for display could no longer be looked up.
-pub(crate) fn escape_unprintable(segment: &str) -> String {
-    if !segment.chars().any(|c| c < '\u{20}' || c == '\u{7f}') {
-        return segment.to_string();
-    }
-    segment
-        .chars()
-        .map(|c| {
-            if c < '\u{20}' || c == '\u{7f}' {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
-}
-
-impl KeyPath {
-    /// An empty path (the document root).
-    pub(crate) fn new() -> KeyPath {
-        KeyPath(Vec::new())
-    }
-
-    /// Append a key segment.
-    pub(crate) fn push(&mut self, seg: String) {
-        self.0.push(seg);
-    }
-
-    /// Drop the last key segment.
-    pub(crate) fn pop(&mut self) {
-        self.0.pop();
-    }
-
-    /// Prepend a key segment -- used as a conflict bubbles up out of a subtree,
-    /// gaining its parent key at each level.
-    fn prepend(&mut self, seg: String) {
-        self.0.insert(0, seg);
-    }
-
-    /// The path of the first `n` segments (a proper ancestor when `n < len`).
-    fn prefix(&self, n: usize) -> KeyPath {
-        KeyPath(self.0[..n].to_vec())
-    }
-
-    /// Render as a user-facing string: key segments joined by `sep`, or `<root>`
-    /// for the empty path. `sep` is format-specific. An element selector segment
-    /// (`[field=value]`, in a conflict path pointing into a keyed record) attaches
-    /// directly to the preceding key with no separator, e.g. `servers[name="web"]`.
-    pub fn render(&self, sep: &str) -> String {
-        if self.0.is_empty() {
-            return "<root>".to_string();
-        }
-        let mut out = String::new();
-        for (i, seg) in self.0.iter().enumerate() {
-            if i > 0 && !seg.starts_with('[') {
-                out.push_str(sep);
-            }
-            out.push_str(&escape_unprintable(seg));
-        }
-        out
-    }
-}
-
-impl std::ops::Deref for KeyPath {
-    type Target = [String];
-    fn deref(&self) -> &[String] {
-        &self.0
-    }
-}
 
 /// How a DESIRED array combines with a TARGET array during the deep-merge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
@@ -173,10 +92,10 @@ pub fn reconcile<L: Leaf>(
     // 1-3: prune leaves we managed before (present in BASE) but no longer do
     // (gone from DESIRED) -- but only where TARGET still holds the BASE value, so
     // a value the user/app changed by hand is left alone.
-    let mut removed: Vec<KeyPath> = Vec::new();
+    let mut removed: Vec<ManagedPath> = Vec::new();
     if opts.prune {
         if let Some(base) = base {
-            let desired_leaves: HashSet<KeyPath> = desired.leaf_paths().into_iter().collect();
+            let desired_leaves: HashSet<ManagedPath> = desired.leaf_paths().into_iter().collect();
             removed = base
                 .leaf_paths()
                 .into_iter()
@@ -195,11 +114,11 @@ pub fn reconcile<L: Leaf>(
     // alongside so the three-way `Merge` array strategy can see it. Array
     // warnings bubble up as `deep_merge`'s return, gaining a path segment at each
     // level, so a location is built only for the (rare) warnings.
-    let warnings = deep_merge(&mut result, desired, base, opts, &mut KeyPath::new());
+    let warnings = deep_merge(&mut result, desired, base, opts, &mut ManagedPath::new());
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
-        let mut ancestors: Vec<KeyPath> = Vec::new();
+        let mut ancestors: Vec<ManagedPath> = Vec::new();
         for p in &removed {
             for i in 1..p.len() {
                 ancestors.push(p.prefix(i));
@@ -221,9 +140,9 @@ pub fn reconcile<L: Leaf>(
 impl<L: Leaf> Node<L> {
     /// Managed leaf paths: descend only through objects, so arrays and scalars are
     /// atomic leaves.
-    pub(crate) fn leaf_paths(&self) -> Vec<KeyPath> {
+    pub(crate) fn leaf_paths(&self) -> Vec<ManagedPath> {
         let mut out = Vec::new();
-        let mut prefix = KeyPath::new();
+        let mut prefix = ManagedPath::new();
         collect(self, &mut prefix, &mut out);
         out
     }
@@ -272,7 +191,7 @@ impl<L: Leaf> Node<L> {
 }
 
 /// Recurse into `v`, pushing the path of every leaf (non-map node) into `out`.
-fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
+fn collect<L: Leaf>(v: &Node<L>, prefix: &mut ManagedPath, out: &mut Vec<ManagedPath>) {
     match v {
         Node::Map(map) => {
             for (k, val) in map {
@@ -303,7 +222,7 @@ pub fn deep_merge<L: Leaf>(
     desired: &Node<L>,
     base: Option<&Node<L>>,
     opts: &Options,
-    path: &mut KeyPath,
+    path: &mut ManagedPath,
 ) -> Vec<Warning<L>> {
     match desired {
         Node::Map(d) => {
@@ -316,7 +235,7 @@ pub fn deep_merge<L: Leaf>(
                         let sub = deep_merge(tv, dv, bv, opts, path);
                         path.pop();
                         for mut c in sub {
-                            c.path_mut().prepend(k.clone());
+                            c.path_mut().prepend(Step::Key(k.clone()));
                             warnings.push(c);
                         }
                     } else {
@@ -1267,16 +1186,6 @@ mod tests {
     }
 
     #[test]
-    fn keypath_render_uses_the_given_separator() {
-        let mut p = KeyPath::new();
-        p.push("a".to_string());
-        p.push("b".to_string());
-        assert_eq!(p.render("."), "a.b");
-        assert_eq!(p.render(":"), "a:b");
-        assert_eq!(KeyPath::new().render(":"), "<root>"); // empty path
-    }
-
-    #[test]
     fn merge_conflict_names_the_conflicting_elements() {
         // The conflict carries the elements caught in the contradictory reorder.
         let (_result, conflicts) = reconcile(
@@ -1350,16 +1259,6 @@ mod tests {
             ArrayStrategy::Replace
         )
         .is_empty());
-    }
-
-    #[test]
-    fn keypath_render_attaches_element_selector_to_the_preceding_key() {
-        let mut p = KeyPath::new();
-        p.push("servers".to_string());
-        p.push("[name=\"web\"]".to_string()); // an element selector, no sep before it
-        p.push("tags".to_string());
-        assert_eq!(p.render("."), "servers[name=\"web\"].tags");
-        assert_eq!(p.render(":"), "servers[name=\"web\"]:tags");
     }
 
     #[test]
@@ -1441,14 +1340,8 @@ mod tests {
     fn leaf_paths_treats_arrays_as_atomic() {
         let mut paths = n(json!({"a":1,"b":{"c":2},"d":[1,2]})).leaf_paths();
         paths.sort();
-        assert_eq!(
-            paths,
-            vec![
-                KeyPath(vec!["a".to_string()]),
-                KeyPath(vec!["b".to_string(), "c".to_string()]),
-                KeyPath(vec!["d".to_string()]),
-            ]
-        );
+        let paths: Vec<String> = paths.iter().map(|p| p.render(".")).collect();
+        assert_eq!(paths, vec!["a", "b.c", "d"]);
     }
 
     #[test]
