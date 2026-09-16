@@ -45,6 +45,14 @@ pub enum FormatKind {
     Directory,
 }
 
+/// How many containers a document may nest. The bound is the engine's, not any
+/// one codec's -- `deep_merge`, `compact`, `--diff` and `encode` all recurse over
+/// [`Node`] -- so a codec whose parser caps nothing enforces this one instead, and
+/// refuses a deeper document rather than letting the walk abort the process. An
+/// order of magnitude below where a run actually runs out of stack (measured in
+/// issue #48).
+pub(crate) const MAX_DEPTH: usize = 512;
+
 impl FormatKind {
     /// The format's name, for diagnostics that are not per-format errors.
     pub fn name(self) -> &'static str {

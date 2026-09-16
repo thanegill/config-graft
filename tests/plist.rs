@@ -1235,3 +1235,124 @@ fn a_carriage_return_survives_an_xml_run_as_a_character_reference() {
     };
     assert_eq!(d.get("cr\rkey").unwrap().clone(), expected);
 }
+
+/// A *binary* plist nested `depth` deep. Building the `plist::Value` is a loop,
+/// but writing and dropping it are recursive, so the test does that work on a
+/// thread with a stack big enough for it -- the depth under test is config-graft's
+/// to survive, not this helper's.
+fn deep_binary(depth: usize) -> Vec<u8> {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let mut value = pint(1);
+            for _ in 0..depth {
+                value = pdict(vec![("a", value)]);
+            }
+            let mut out = Vec::new();
+            plist::to_writer_binary(&mut out, &value).unwrap();
+            out
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// An XML plist nested `depth` deep, written as raw text so the depth costs the
+/// test process no recursion of its own.
+fn deep_xml(depth: usize) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n{}<integer>1</integer>{}\n</plist>\n",
+        "<dict><key>a</key>".repeat(depth),
+        "</dict>".repeat(depth)
+    )
+}
+
+#[test]
+fn a_deeply_nested_xml_target_is_refused_not_aborted() {
+    // plist's event readers are iterative, but a `plist::Value` *drops*
+    // recursively and the codec walks it recursively, so a deep document aborts
+    // the process unless the depth is capped before the tree is built.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let deep = deep_xml(50_000);
+    fs::write(&target, &deep).unwrap();
+    pdict(vec![("a", pint(1))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {out:?}"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not valid plist"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), deep);
+}
+
+#[test]
+fn a_deeply_nested_binary_target_is_refused_not_aborted() {
+    // Binary carries its nesting in object references rather than in bytes a scan
+    // could count, so the guard has to read it the way the parser does.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let binary = deep_binary(5_000);
+    fs::write(&target, &binary).unwrap();
+    pdict(vec![("a", pint(1))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {out:?}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), binary);
+}
+
+#[test]
+fn a_document_at_the_depth_cap_reconciles_end_to_end() {
+    // The cap is only worth its number if a document sitting on it survives a
+    // whole run -- three inputs, diffed, and written back as XML.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = ["config.plist", "desired.plist", "base.plist"].map(|n| dir.path().join(n));
+    for (path, leaf) in paths.iter().zip([1, 2, 1]) {
+        fs::write(
+            path,
+            deep_xml(512).replace("<integer>1", &format!("<integer>{leaf}")),
+        )
+        .unwrap();
+    }
+
+    let out = run(&[
+        "plist",
+        "--diff",
+        paths[0].to_str().unwrap(),
+        paths[1].to_str().unwrap(),
+        paths[2].to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "a document at the cap did not survive a run: {out:?}"
+    );
+    assert!(fs::read_to_string(&paths[0])
+        .unwrap()
+        .contains("<integer>2"));
+}
+
+#[test]
+fn a_deeply_nested_desired_is_refused_not_aborted() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
+    let before = fs::read(&target).unwrap();
+    fs::write(&desired, deep_xml(50_000)).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {out:?}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), before);
+}
