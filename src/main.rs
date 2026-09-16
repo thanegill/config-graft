@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -407,15 +408,14 @@ impl<L: Leaf> Node<L> {
             let disp = Self::diff_label(path, sep, is_dir_attrs);
             match (self.get_path(path), new.get_path(path)) {
                 (None, Some(new_node)) => {
-                    lines.push((path.clone(), format!("+ {disp} = {}", new_node.compact())))
+                    lines.push((path.clone(), format!("+ {disp} = {new_node}")))
                 }
                 (Some(old_node), None) => {
-                    lines.push((path.clone(), format!("- {disp} = {}", old_node.compact())))
+                    lines.push((path.clone(), format!("- {disp} = {old_node}")))
                 }
-                (Some(old_node), Some(new_node)) if old_node != new_node => lines.push((
-                    path.clone(),
-                    format!("~ {disp}: {} => {}", old_node.compact(), new_node.compact()),
-                )),
+                (Some(old_node), Some(new_node)) if old_node != new_node => {
+                    lines.push((path.clone(), format!("~ {disp}: {old_node} => {new_node}")))
+                }
                 _ => {}
             }
         }
@@ -461,24 +461,33 @@ impl<L: Leaf> Node<L> {
             .collect::<Vec<_>>()
             .join(sep)
     }
+}
 
-    /// Render as a compact, single-line token for `--diff`. JSON-representable
-    /// values match `serde_json`'s compact form; plist-only leaves get a readable
-    /// `<date ...>` / `<data N bytes>` / `<uid N>` token (they have no JSON rendering).
-    pub(crate) fn compact(&self) -> String {
+/// A compact, single-line token for `--diff`. JSON-representable values match
+/// `serde_json`'s compact form; plist-only leaves get a readable `<date ...>` /
+/// `<data N bytes>` / `<uid N>` token (they have no JSON rendering).
+impl<L: Leaf> fmt::Display for Node<L> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Node::Map(m) => {
-                let inner: Vec<String> = m
-                    .iter()
-                    .map(|(k, val)| format!("{}:{}", quote(k), val.compact()))
-                    .collect();
-                format!("{{{}}}", inner.join(","))
+                f.write_str("{")?;
+                let mut sep = "";
+                for (key, value) in m {
+                    write!(f, "{sep}{}:{value}", quote(key))?;
+                    sep = ",";
+                }
+                f.write_str("}")
             }
             Node::Array(a) => {
-                let inner: Vec<String> = a.iter().map(|v| v.compact()).collect();
-                format!("[{}]", inner.join(","))
+                f.write_str("[")?;
+                let mut sep = "";
+                for element in a {
+                    write!(f, "{sep}{element}")?;
+                    sep = ",";
+                }
+                f.write_str("]")
             }
-            Node::Leaf(l) => l.to_string(),
+            Node::Leaf(l) => write!(f, "{l}"),
         }
     }
 }

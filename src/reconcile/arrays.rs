@@ -213,7 +213,7 @@ fn value_duplicates<L: Leaf>(seq: &[Node<L>], out: &[Node<L>], source: Source) -
         warnings.push(Warning::DuplicateCollapsed {
             path: KeyPath::new(),
             source,
-            identity: element.compact(),
+            identity: element.to_string(),
             matched: element.clone(),
             held: held[element],
             kept,

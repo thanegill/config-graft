@@ -119,7 +119,7 @@ impl<L: Leaf> Warning<L> {
         let at = self.path().render(sep);
         match self {
             Warning::ContradictoryReorder { elements, .. } => {
-                let elements: Vec<String> = elements.iter().map(Node::compact).collect();
+                let elements: Vec<String> = elements.iter().map(Node::to_string).collect();
                 format!(
                     "array `{}` had a contradictory reorder of [{}] between TARGET and \
                      DESIRED; resolved deterministically (TARGET order preferred)",
