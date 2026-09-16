@@ -19,38 +19,25 @@ pub fn quote(s: &str) -> String {
         .to_string()
 }
 
-/// A float as JSON renders it. Rust's `Debug` is already the shortest
-/// round-tripping form, and differs only in leaving a positive exponent unsigned.
-/// JSON has no NaN or infinity, so those render as `null`, as every JSON writer
-/// does.
+/// A float as JSON renders it: the shortest form that round-trips, via the same
+/// algorithm serde_json emits through. JSON has no NaN or infinity, so those
+/// render as `null`, as every JSON writer does.
+///
+/// Hand-rolling this from Rust's `{:?}` is what the shortest round-tripping form
+/// tempts you into, and it is wrong: `{:?}` picks decimal-versus-exponent at
+/// different thresholds than JSON writers do, in more than one range.
 pub fn render_f64(f: f64) -> String {
     if !f.is_finite() {
         return "null".to_string();
     }
-    let rendered = format!("{f:?}");
+    let mut buffer = ryu::Buffer::new();
+    let rendered = buffer.format_finite(f);
     match rendered.split_once('e') {
         Some((mantissa, exponent)) if !exponent.starts_with('-') => {
             format!("{mantissa}e+{exponent}")
         }
-        // The one range the two disagree on: JSON writes decimal down to 1e-5,
-        // Rust switches to an exponent below 1e-4.
-        Some((mantissa, "-5")) => decimal_at_e_minus_5(mantissa),
-        _ => rendered,
+        _ => rendered.to_string(),
     }
-}
-
-/// `mantissa` scaled by 1e-5, written out in full. Only reachable for a shortest
-/// rendering whose exponent is exactly -5, so the point always lands left of the
-/// digits and no rounding is involved.
-fn decimal_at_e_minus_5(mantissa: &str) -> String {
-    let (sign, mantissa) = match mantissa.strip_prefix('-') {
-        Some(rest) => ("-", rest),
-        None => ("", mantissa),
-    };
-    let integer_len = mantissa.find('.').unwrap_or(mantissa.len());
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    let zeros = 5 - integer_len;
-    format!("{sign}0.{}{digits}", "0".repeat(zeros))
 }
 
 /// A format's atomic leaf value. The engine treats leaves opaquely -- it only
@@ -174,37 +161,41 @@ impl<L: Leaf> Node<L> {
 mod tests {
     use super::render_f64;
 
+    /// The boundaries where a writer switches between decimal and exponent
+    /// notation, plus the extremes of the type.
+    const EDGE_CASES: &[f64] = &[
+        0.0,
+        -0.0,
+        0.1,
+        1.5,
+        1e-6,
+        5e-6,
+        9.9e-6,
+        1e-5,
+        1.5e-5,
+        9e-5,
+        9.99e-5,
+        1e-4,
+        1e13,
+        1.5e13,
+        9.999e15,
+        1e15,
+        1e16,
+        1e17,
+        1.234e20,
+        1e300,
+        -1e-5,
+        -1.5e-5,
+        -0.1,
+        f64::MAX,
+        f64::MIN,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+    ];
+
     #[test]
     fn matches_serde_json_byte_for_byte() {
-        // `--diff` output is asserted by the integration tests, and this is where
-        // it comes from. serde_json writes decimal down to 1e-5 where Rust's
-        // `{:?}` switches to an exponent below 1e-4, so that range needs its own
-        // rendering.
-        for v in [
-            1e-6_f64,
-            5e-6,
-            9.9e-6,
-            1e-5,
-            1.5e-5,
-            9e-5,
-            9.99e-5,
-            1e-4,
-            0.1,
-            1.5,
-            0.0,
-            -0.0,
-            1e15,
-            1e16,
-            1e17,
-            1.234e20,
-            1e300,
-            -1e-5,
-            -1.5e-5,
-            -0.1,
-            f64::MAX,
-            f64::MIN,
-            f64::MIN_POSITIVE,
-        ] {
+        for &v in EDGE_CASES {
             assert_eq!(
                 render_f64(v),
                 serde_json::to_string(&v).unwrap(),
@@ -214,5 +205,33 @@ mod tests {
         for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(render_f64(v), "null");
         }
+    }
+
+    /// The edge-case list above passed against a hand-rolled `{:?}` renderer that
+    /// in fact disagreed with serde_json on 3.6% of `[1e13, 1e16)` -- a fixed
+    /// corpus only ever proves the cases someone already thought of. This sweeps
+    /// the whole type instead, so a renderer that diverges anywhere has to be
+    /// lucky across 200k tries rather than across one list.
+    #[test]
+    fn matches_serde_json_across_the_whole_range() {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut compared = 0;
+        for _ in 0..200_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let v = f64::from_bits(state);
+            if !v.is_finite() {
+                continue;
+            }
+            assert_eq!(
+                render_f64(v),
+                serde_json::to_string(&v).unwrap(),
+                "mismatch for bits {state:#018x}"
+            );
+            compared += 1;
+        }
+        // A renderer that started declining values would otherwise pass vacuously.
+        assert!(compared > 190_000, "only compared {compared} values");
     }
 }
