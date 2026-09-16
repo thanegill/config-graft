@@ -1139,3 +1139,76 @@ fn a_duplicate_warning_needs_something_to_have_been_dropped() {
         "warned about a loss that did not happen: {err}"
     );
 }
+
+#[test]
+fn a_deeply_nested_target_is_refused_not_aborted() {
+    // json-syntax parses iteratively but drops a `Value` recursively, so a depth
+    // limit enforced after the tree is built still lets that drop run off the
+    // stack and abort the process. Exit 1 with a diagnostic, never a signal.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let deep = format!("{}1{}", r#"{"a":"#.repeat(50_000), "}".repeat(50_000));
+    fs::write(&target, &deep).unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {out:?}"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not valid JSON"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), deep);
+}
+
+#[test]
+fn a_document_at_the_depth_cap_reconciles_end_to_end() {
+    // The cap is only worth its number if a document sitting on it survives the
+    // deepest path a run has: three nested-array inputs through the array merge,
+    // diffed, sorted and written. Arrays nest one level under a key, so 511 of
+    // them is the cap; the codec's own unit tests pin the exact boundary.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    let nest = |leaf: &str| format!(r#"{{"a":{}{leaf}{}}}"#, "[".repeat(511), "]".repeat(511));
+    fs::write(&target, nest("1")).unwrap();
+    fs::write(&desired, nest("2")).unwrap();
+    fs::write(&base, nest("1")).unwrap();
+
+    let out = run(&[
+        "json",
+        "--diff",
+        "--sort-keys",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "a document at the cap did not survive a run: {out:?}"
+    );
+    assert!(fs::read_to_string(&target).unwrap().contains('2'));
+}
+
+#[test]
+fn a_deeply_nested_desired_is_refused_not_aborted() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1}"#).unwrap();
+    fs::write(
+        &desired,
+        format!("{}1{}", r#"{"a":"#.repeat(50_000), "}".repeat(50_000)),
+    )
+    .unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {out:?}"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#);
+}
