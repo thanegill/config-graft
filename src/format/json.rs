@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 
 use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::number::{number_value, NumberValue};
+use crate::number::NumberValue;
 use crate::value::{quote, Leaf, Node};
 
 /// JSON codec.
@@ -92,7 +92,7 @@ fn leaf_number_value(leaf: &JsonLeaf) -> Option<NumberValue<'_>> {
     match leaf {
         JsonLeaf::Int(i) => Some(NumberValue::Integer(i128::from(*i))),
         JsonLeaf::Uint(u) => Some(NumberValue::Integer(i128::from(*u))),
-        JsonLeaf::Number(literal) => number_value(literal),
+        JsonLeaf::Number(literal) => NumberValue::try_from(literal.as_str()).ok(),
         _ => None,
     }
 }
@@ -171,7 +171,7 @@ impl ValueCodec for Json {
                 Value::Object(obj)
             }
             Node::Array(a) => Value::Array(a.iter().map(Json::encode).collect()),
-            Node::Leaf(l) => leaf_to_json(l),
+            Node::Leaf(l) => l.into(),
         }
     }
 }
@@ -224,20 +224,24 @@ impl Format for Json {
     }
 }
 
-fn leaf_to_json(json_leaf: &JsonLeaf) -> json_syntax::Value {
-    use json_syntax::{NumberBuf, Value};
-    let number = |literal: &str| {
-        Value::Number(NumberBuf::new(literal.bytes().collect()).expect("a valid number literal"))
-    };
-    match json_leaf {
-        JsonLeaf::Null => Value::Null,
-        JsonLeaf::Bool(b) => Value::Boolean(*b),
-        JsonLeaf::Int(i) => number(&i.to_string()),
-        JsonLeaf::Uint(u) => number(&u.to_string()),
-        // Verbatim: the literal is exactly what the file spelled, which is the
-        // whole point of keeping it as text rather than an `f64`.
-        JsonLeaf::Number(lit) => number(lit),
-        JsonLeaf::String(s) => Value::String(s.as_str().into()),
+impl From<&JsonLeaf> for json_syntax::Value {
+    fn from(json_leaf: &JsonLeaf) -> json_syntax::Value {
+        use json_syntax::{NumberBuf, Value};
+        let number = |literal: &str| {
+            Value::Number(
+                NumberBuf::new(literal.bytes().collect()).expect("a valid number literal"),
+            )
+        };
+        match json_leaf {
+            JsonLeaf::Null => Value::Null,
+            JsonLeaf::Bool(b) => Value::Boolean(*b),
+            JsonLeaf::Int(i) => number(&i.to_string()),
+            JsonLeaf::Uint(u) => number(&u.to_string()),
+            // Verbatim: the literal is exactly what the file spelled, which is the
+            // whole point of keeping it as text rather than an `f64`.
+            JsonLeaf::Number(lit) => number(lit),
+            JsonLeaf::String(s) => Value::String(s.as_str().into()),
+        }
     }
 }
 

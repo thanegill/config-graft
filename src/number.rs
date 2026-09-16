@@ -9,7 +9,7 @@
 //! json-syntax cannot do this for us: it stores numbers lexically and compares them
 //! lexically, so by its own derived `Ord` a `1` is greater than a `0.1e+80` (and its
 //! `Eq` makes `1` differ from `1.0`). Comparison must
-//! go through [`number_value`], never through the parser's number type.
+//! go through [`NumberValue`], never through the parser's number type.
 //!
 //! [`NumberValue`] borrows the literal and allocates nothing, because `Node`
 //! equality and hashing sit inside the array engine's membership scans.
@@ -92,62 +92,78 @@ impl Hash for NumberValue<'_> {
     }
 }
 
-/// The identity of a number literal, or `None` when its exponent is too large for an
-/// `i64` to describe -- no normalization can compare that meaningfully, so callers
-/// fall back to comparing the literals themselves.
-pub(crate) fn number_value(literal: &str) -> Option<NumberValue<'_>> {
-    let (negative, rest) = match literal.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, literal),
-    };
-    let (mantissa, exponent) = match rest.find(['e', 'E']) {
-        Some(i) => (&rest[..i], rest[i + 1..].parse::<i64>().ok()?),
-        None => (rest, 0),
-    };
-    let (mut integer, mut fraction) = match mantissa.find('.') {
-        Some(i) => (&mantissa[..i], &mantissa[i + 1..]),
-        None => (mantissa, ""),
-    };
+/// A literal whose exponent is past what an `i64` can describe. No normalization
+/// can compare that meaningfully, so callers fall back to comparing the literals
+/// themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExponentOutOfRange;
 
-    // Drop the fraction's trailing zeros *before* anchoring the exponent at its
-    // last digit. Subtracting the untrimmed length first can underflow on an
-    // extreme exponent even when the trimmed result is perfectly describable, which
-    // left `1.0e-9223372036854775808` without an identity while `1e-...808` had one
-    // -- the same number comparing unequal, and a zero that did not equal zero.
-    while let Some(trimmed) = fraction.strip_suffix('0') {
-        fraction = trimmed;
-    }
-    let mut exponent = exponent.checked_sub(fraction.len() as i64)?;
-    if fraction.is_empty() {
-        while let Some(trimmed) = integer.strip_suffix('0') {
-            integer = trimmed;
-            exponent = exponent.checked_add(1)?;
-        }
-    }
-    integer = integer.trim_start_matches('0');
-    if integer.is_empty() {
-        fraction = fraction.trim_start_matches('0');
-    }
+impl<'a> TryFrom<&'a str> for NumberValue<'a> {
+    type Error = ExponentOutOfRange;
 
-    if integer.is_empty() && fraction.is_empty() {
-        // Every spelling of zero is one number, `-0` included (`-0.0 == 0.0`).
-        return Some(NumberValue::Integer(0));
-    }
-    // A whole number that fits an `i128` gets the integer identity, so it can equal
-    // an `Int`/`Uint` spelled the ordinary way. The digits are integer and fraction
-    // together: after the trims above the value is `digits * 10^exponent` however
-    // the literal split them, so `0.5e1` is as whole a 5 as `5` is.
-    if exponent >= 0 {
-        if let Some(value) = whole(negative, integer, fraction, exponent) {
-            return Some(NumberValue::Integer(value));
+    fn try_from(literal: &'a str) -> Result<Self, ExponentOutOfRange> {
+        let (negative, rest) = match literal.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, literal),
+        };
+        let (mantissa, exponent) = match rest.find(['e', 'E']) {
+            Some(i) => (
+                &rest[..i],
+                rest[i + 1..]
+                    .parse::<i64>()
+                    .map_err(|_| ExponentOutOfRange)?,
+            ),
+            None => (rest, 0),
+        };
+        let (mut integer, mut fraction) = match mantissa.find('.') {
+            Some(i) => (&mantissa[..i], &mantissa[i + 1..]),
+            None => (mantissa, ""),
+        };
+
+        // Drop the fraction's trailing zeros *before* anchoring the exponent at its
+        // last digit. Subtracting the untrimmed length first can underflow on an
+        // extreme exponent even when the trimmed result is perfectly describable,
+        // which left `1.0e-9223372036854775808` without an identity while
+        // `1e-...808` had one -- the same number comparing unequal, and a zero that
+        // did not equal zero.
+        while let Some(trimmed) = fraction.strip_suffix('0') {
+            fraction = trimmed;
         }
+        let mut exponent = exponent
+            .checked_sub(fraction.len() as i64)
+            .ok_or(ExponentOutOfRange)?;
+        if fraction.is_empty() {
+            while let Some(trimmed) = integer.strip_suffix('0') {
+                integer = trimmed;
+                exponent = exponent.checked_add(1).ok_or(ExponentOutOfRange)?;
+            }
+        }
+        integer = integer.trim_start_matches('0');
+        if integer.is_empty() {
+            fraction = fraction.trim_start_matches('0');
+        }
+
+        if integer.is_empty() && fraction.is_empty() {
+            // Every spelling of zero is one number, `-0` included (`-0.0 == 0.0`).
+            return Ok(NumberValue::Integer(0));
+        }
+        // A whole number that fits an `i128` gets the integer identity, so it can
+        // equal an `Int`/`Uint` spelled the ordinary way. The digits are integer and
+        // fraction together: after the trims above the value is `digits *
+        // 10^exponent` however the literal split them, so `0.5e1` is as whole a 5 as
+        // `5` is.
+        if exponent >= 0 {
+            if let Some(value) = whole(negative, integer, fraction, exponent) {
+                return Ok(NumberValue::Integer(value));
+            }
+        }
+        Ok(NumberValue::Decimal {
+            negative,
+            integer,
+            fraction,
+            exponent,
+        })
     }
-    Some(NumberValue::Decimal {
-        negative,
-        integer,
-        fraction,
-        exponent,
-    })
 }
 
 /// The digits as an `i128`, scaled by `10^exponent`, or `None` if that overflows.
@@ -172,7 +188,8 @@ mod tests {
     use std::str::FromStr;
 
     fn identity(literal: &str) -> NumberValue<'_> {
-        number_value(literal).unwrap_or_else(|| panic!("{literal} should have an identity"))
+        NumberValue::try_from(literal)
+            .unwrap_or_else(|_| panic!("{literal} should have an identity"))
     }
 
     fn hash_of(literal: &str) -> u64 {
@@ -247,9 +264,9 @@ mod tests {
     #[test]
     fn an_exponent_too_large_to_describe_has_no_identity() {
         // No lossy stand-in: callers compare the literals themselves instead.
-        assert!(number_value("1e999999999999999999999").is_none());
-        assert!(number_value("1e-999999999999999999999").is_none());
-        assert!(number_value("1e400").is_some());
+        assert!(NumberValue::try_from("1e999999999999999999999").is_err());
+        assert!(NumberValue::try_from("1e-999999999999999999999").is_err());
+        assert!(NumberValue::try_from("1e400").is_ok());
     }
 
     /// Literals whose pairs must agree with an arbitrary-precision decimal. Includes
@@ -295,14 +312,14 @@ mod tests {
 
     /// Cross-check the hand-written normalization against an arbitrary-precision
     /// decimal. `bigdecimal` is a dev-dependency only: it allocates per comparison
-    /// and cannot spell the exponents `number_value` deliberately declines, so it is
+    /// and cannot spell the exponents `NumberValue` deliberately declines, so it is
     /// an oracle for the tests rather than a replacement for the real thing.
     #[test]
     fn agrees_with_an_arbitrary_precision_decimal() {
         let mut compared = 0usize;
         for a in CORPUS {
             for b in CORPUS {
-                let (Some(x), Some(y)) = (number_value(a), number_value(b)) else {
+                let (Ok(x), Ok(y)) = (NumberValue::try_from(*a), NumberValue::try_from(*b)) else {
                     panic!("{a} or {b} lost its identity");
                 };
                 let (Ok(bx), Ok(by)) = (BigDecimal::from_str(a), BigDecimal::from_str(b)) else {
@@ -312,7 +329,7 @@ mod tests {
                 assert_eq!(
                     x == y,
                     bx == by,
-                    "disagreed on {a} vs {b}: number_value said {}, BigDecimal said {}",
+                    "disagreed on {a} vs {b}: NumberValue said {}, BigDecimal said {}",
                     x == y,
                     bx == by
                 );
@@ -358,7 +375,10 @@ mod tests {
         let mut compared = 0usize;
         for _ in 0..2_000 {
             let (a, b) = (literal(next()), literal(next()));
-            let (Some(x), Some(y)) = (number_value(&a), number_value(&b)) else {
+            let (Ok(x), Ok(y)) = (
+                NumberValue::try_from(a.as_str()),
+                NumberValue::try_from(b.as_str()),
+            ) else {
                 panic!("{a} or {b} lost its identity");
             };
             let (Ok(bx), Ok(by)) = (BigDecimal::from_str(&a), BigDecimal::from_str(&b)) else {
