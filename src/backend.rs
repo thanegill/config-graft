@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
-use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
-use crate::value::{Leaf, Node};
+use crate::reconcile::{reconcile, ArrayStrategy, MergeKeys, Options};
+use crate::value::{DiagnosticPath, Leaf, Node};
 use crate::warning::{Source, Warning};
 use crate::RunArgs;
 
@@ -34,10 +34,11 @@ fn requested_write_opts(args: &RunArgs) -> WriteOpts {
 /// Per `(array path, resulting value)`: the distinct originals normalization
 /// rewrote into it, and how many records it wrote. The two differ when the same
 /// original repeats, which is what separates a manufactured repeat from a real one.
-type Equalities<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (HashSet<&'a Node<L>>, usize)>;
+type Equalities<'a, L> = HashMap<(&'a DiagnosticPath, &'a Node<L>), (HashSet<&'a Node<L>>, usize)>;
 
 /// The originals rewritten into each `(array path, resulting value)`, and why.
-type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
+type Conflations<'a, L> =
+    HashMap<(&'a DiagnosticPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
 
 /// Report arrays where normalization conflated values an input distinguished and
 /// the reconcile then kept fewer copies than there were distinct originals.
@@ -48,10 +49,10 @@ type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>,
 /// conflated and writes anyway, because the same normalization is what keeps TARGET
 /// comparable to BASE.
 ///
-/// Only paths that name an array on both sides can be judged. `KeyPath` addresses
-/// map keys, so a date inside an array of dicts is recorded under the array's key
-/// and is unreachable here; a path the result no longer holds was pruned, which is
-/// a removal rather than a collapse. Both are skipped -- see issue #37.
+/// Only paths that name an array on both sides can be judged: a date inside an
+/// array of dicts is recorded under the array's key and is unreachable here, and a
+/// path the result no longer holds was pruned, which is a removal rather than a
+/// collapse. Both are skipped -- see issue #37.
 fn lossy_collapses<L: Leaf>(
     target_rewritten: &[Normalized<L>],
     desired_rewritten: &[Normalized<L>],
@@ -74,9 +75,9 @@ fn lossy_collapses<L: Leaf>(
     }
     // Collected as plain fields so the sort key is total without matching on a
     // variant the list cannot hold.
-    let mut reported: Vec<(KeyPath, usize, usize, &'static str)> = Vec::new();
+    let mut reported: Vec<(DiagnosticPath, usize, usize, &'static str)> = Vec::new();
     for ((path, value), (originals, because)) in &rewritten {
-        let array = |node: &Node<L>| match node.get_path(path) {
+        let array = |node: &Node<L>| match node.get_diagnostic_path(path) {
             Some(Node::Array(a)) => Some(a.iter().filter(|e| e == value).count()),
             _ => None,
         };
