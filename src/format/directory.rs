@@ -16,6 +16,7 @@
 //! multi-file apply is best-effort, not one transaction (a partial apply is
 //! completed by a re-run, which is idempotent).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -38,7 +39,7 @@ type Digest = [u8; 32];
 /// A file's or directory's tracked metadata: a filesystem-agnostic map of
 /// `attribute name -> raw value` (see [`FsLeaf`] for the well-known keys). A
 /// newtype (rather than a bare `BTreeMap` alias) so it can carry attribute logic
-/// like [`FsAttrs::render_summary`]; it `Deref`s to the map for the usual
+/// like its [`Display`] summary; it `Deref`s to the map for the usual
 /// `insert`/`get`/`iter`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) struct FsAttrs(BTreeMap<String, Vec<u8>>);
@@ -66,39 +67,49 @@ impl FsAttrs {
     fn new() -> Self {
         FsAttrs(BTreeMap::new())
     }
+}
 
-    /// Render the `mode, uid:gid[, xattr[...]]` summary for `--diff`. Used for a
-    /// file leaf and for a directory's own metadata.
-    fn render_summary(&self) -> String {
+/// The `mode, uid:gid[, xattr[...]]` summary for `--diff`. Used for a file leaf
+/// and for a directory's own metadata.
+impl fmt::Display for FsAttrs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mode = self
             .get("mode")
             .and_then(|b| std::str::from_utf8(b).ok())
-            .and_then(|s| u32::from_str_radix(s, 8).ok())
-            .map(|m| format!("{:04o}", m & 0o7777))
-            .unwrap_or_else(|| "?".into());
+            .and_then(|s| u32::from_str_radix(s, 8).ok());
+        match mode {
+            Some(m) => write!(f, "{:04o}", m & 0o7777)?,
+            None => f.write_str("?")?,
+        }
         let num = |k: &str| {
             self.get(k)
-                .map(|b| String::from_utf8_lossy(b).into_owned())
-                .unwrap_or_else(|| "?".into())
+                .map_or(Cow::Borrowed("?"), |b| String::from_utf8_lossy(b))
         };
-        let mut out = format!("{mode}, {}:{}", num("uid"), num("gid"));
+        write!(f, ", {}:{}", num("uid"), num("gid"))?;
+
         // Each extended attribute is shown as `name=<digest>` -- a short hash of the
         // value distinguishes a value or rename change in the diff without dumping
         // (possibly binary or large) bytes. The map is ordered (`BTreeMap`).
-        let xattrs: Vec<String> = self
+        let mut xattrs = self
             .iter()
-            .filter_map(|(k, v)| {
-                k.strip_prefix("xattr:").map(|name| {
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    std::hash::Hash::hash(v, &mut h);
-                    format!("{name}={:08x}", std::hash::Hasher::finish(&h) as u32)
-                })
-            })
-            .collect();
-        if !xattrs.is_empty() {
-            out.push_str(&format!(", xattr[{}]", xattrs.join(", ")));
+            .filter_map(|(k, v)| k.strip_prefix("xattr:").map(|name| (name, v)))
+            .peekable();
+        if xattrs.peek().is_none() {
+            return Ok(());
         }
-        out
+        f.write_str(", xattr[")?;
+        let mut sep = "";
+        for (name, value) in xattrs {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(value, &mut h);
+            write!(
+                f,
+                "{sep}{name}={:08x}",
+                std::hash::Hasher::finish(&h) as u32
+            )?;
+            sep = ", ";
+        }
+        f.write_str("]")
     }
 }
 
@@ -271,10 +282,10 @@ impl fmt::Display for FsLeaf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FsLeaf::File { len, attrs, .. } => {
-                write!(f, "file({len} bytes, {})", attrs.render_summary())
+                write!(f, "file({len} bytes, {attrs})")
             }
             FsLeaf::Symlink { target } => write!(f, "-> {}", target.display()),
-            FsLeaf::DirectoryAttributes(attrs) => write!(f, "dir({})", attrs.render_summary()),
+            FsLeaf::DirectoryAttributes(attrs) => write!(f, "dir({attrs})"),
         }
     }
 }
