@@ -258,11 +258,11 @@ fn key_duplicates<L: Leaf>(
 }
 
 /// Render a keyed record's identity value for an element selector. Key fields are
-/// scalars in practice (`Leaf::render`, which quotes strings); the composite arms
+/// scalars in practice (a leaf's `Display`, which quotes strings); the composite arms
 /// are a deterministic fallback for the degenerate non-scalar-key case.
 fn render_value<L: Leaf>(v: &Node<L>) -> String {
     match v {
-        Node::Leaf(l) => l.render(),
+        Node::Leaf(l) => l.to_string(),
         Node::Array(a) => {
             let inner: Vec<String> = a.iter().map(render_value).collect();
             format!("[{}]", inner.join(","))

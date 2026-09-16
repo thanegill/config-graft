@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 
 use indexmap::IndexMap;
 
-/// JSON-escape and quote a string, for `--diff` and `Leaf::render`.
+/// JSON-escape and quote a string, for `--diff` and the leaf `Display` impls.
 pub fn quote(s: &str) -> String {
     json_syntax::Value::String(s.into())
         .compact_print()
@@ -41,14 +41,12 @@ pub fn render_f64(f: f64) -> String {
 }
 
 /// A format's atomic leaf value. The engine treats leaves opaquely -- it only
-/// needs `Clone` + `Eq` + `Hash` (and `Debug` for diagnostics/tests) -- plus a
-/// compact rendering for `--diff`. `Eq`/`Hash` let array set-union and the GTS
-/// internals dedup via `HashSet` instead of quadratic linear scans; every impl
-/// must keep `Hash` consistent with `Eq` (equal values hash equal).
-pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug {
-    /// Compact single-line rendering for `--diff`.
-    fn render(&self) -> String;
-
+/// needs `Clone` + `Eq` + `Hash` (and `Debug` for diagnostics/tests) -- plus
+/// `Display`, the compact single-line rendering `--diff` is built from.
+/// `Eq`/`Hash` let array set-union and the GTS internals dedup via `HashSet`
+/// instead of quadratic linear scans; every impl must keep `Hash` consistent with
+/// `Eq` (equal values hash equal).
+pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug + std::fmt::Display {
     /// True for a directory's own-attributes leaf, whose empty-string key is the
     /// reserved directory-attrs slot, not a real entry.
     fn is_dir_attrs(&self) -> bool {

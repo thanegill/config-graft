@@ -17,6 +17,7 @@
 //! completed by a re-run, which is idempotent).
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -262,21 +263,23 @@ impl Node<FsLeaf> {
     }
 }
 
-impl Leaf for FsLeaf {
-    /// Compact `--diff` rendering. Never dumps contents (files may be huge or
-    /// binary): a file shows its length, mode, owner, and extended attributes
-    /// (each as `name=<value-digest>`); a symlink its target; a directory's own
-    /// attributes their `dir(...)` summary.
-    fn render(&self) -> String {
+/// Compact `--diff` rendering. Never dumps contents (files may be huge or
+/// binary): a file shows its length, mode, owner, and extended attributes
+/// (each as `name=<value-digest>`); a symlink its target; a directory's own
+/// attributes their `dir(...)` summary.
+impl fmt::Display for FsLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FsLeaf::File { len, attrs, .. } => {
-                format!("file({len} bytes, {})", attrs.render_summary())
+                write!(f, "file({len} bytes, {})", attrs.render_summary())
             }
-            FsLeaf::Symlink { target } => format!("-> {}", target.display()),
-            FsLeaf::DirectoryAttributes(attrs) => format!("dir({})", attrs.render_summary()),
+            FsLeaf::Symlink { target } => write!(f, "-> {}", target.display()),
+            FsLeaf::DirectoryAttributes(attrs) => write!(f, "dir({})", attrs.render_summary()),
         }
     }
+}
 
+impl Leaf for FsLeaf {
     /// A [`FsLeaf::DirectoryAttributes`] leaf occupies the reserved empty-string
     /// key of its directory's map -- it is that directory's own attributes, not a
     /// real entry.
@@ -1006,7 +1009,7 @@ mod tests {
     fn render_never_dumps_contents() {
         let owner = || attrs(&[("mode", "755"), ("uid", "501"), ("gid", "20")]);
         assert_eq!(
-            leaf("/x", "hello world", owner()).render(),
+            leaf("/x", "hello world", owner()).to_string(),
             "file(11 bytes, 0755, 501:20)"
         );
         let r = leaf(
@@ -1019,7 +1022,7 @@ mod tests {
                 ("xattr:user.k", "v"),
             ]),
         )
-        .render();
+        .to_string();
         assert!(
             r.starts_with("file(2 bytes, 0644, 0:0, xattr[user.k="),
             "{r}"
@@ -1028,7 +1031,7 @@ mod tests {
             FsLeaf::Symlink {
                 target: PathBuf::from("/etc/foo"),
             }
-            .render(),
+            .to_string(),
             "-> /etc/foo"
         );
     }
@@ -1045,15 +1048,15 @@ mod tests {
         };
         // A value-only xattr change (same name, same length) must render distinctly.
         assert_ne!(
-            leaf("/x", "hi", base("v1")).render(),
-            leaf("/x", "hi", base("v2")).render()
+            leaf("/x", "hi", base("v1")).to_string(),
+            leaf("/x", "hi", base("v2")).to_string()
         );
     }
 
     #[test]
     fn dir_attributes_leaf_renders_dir_summary() {
         let m = FsLeaf::DirectoryAttributes(attrs(&[("mode", "755"), ("uid", "0"), ("gid", "0")]))
-            .render();
+            .to_string();
         assert!(m.starts_with("dir(0755"), "{m}");
         // A directory with managed attributes carries a reserved-key attrs leaf;
         // an unmanaged root (empty attrs) carries none.

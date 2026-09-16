@@ -478,7 +478,7 @@ impl<L: Leaf> Node<L> {
                 let inner: Vec<String> = a.iter().map(|v| v.compact()).collect();
                 format!("[{}]", inner.join(","))
             }
-            Node::Leaf(l) => l.render(),
+            Node::Leaf(l) => l.to_string(),
         }
     }
 }

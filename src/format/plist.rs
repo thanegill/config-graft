@@ -1,6 +1,7 @@
 //! Apple plist codec, leaf type, and I/O. Reads accept XML or binary; writes keep
 //! the target's own encoding by default, or whichever `--plist-format` names.
 
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::time::{Duration, SystemTime};
@@ -89,20 +90,22 @@ impl std::fmt::Debug for PlistLeaf {
     }
 }
 
-impl Leaf for PlistLeaf {
-    fn render(&self) -> String {
+impl fmt::Display for PlistLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PlistLeaf::Bool(b) => b.to_string(),
-            PlistLeaf::Int(i) => i.to_string(),
-            PlistLeaf::Uint(u) => u.to_string(),
-            PlistLeaf::Float(f) => render_f64(*f),
-            PlistLeaf::String(s) => quote(s),
-            PlistLeaf::Date(d) => format!("<date {}>", render_date(*d)),
-            PlistLeaf::Data(bytes) => format!("<data {} bytes>", bytes.len()),
-            PlistLeaf::Uid(u) => format!("<uid {u}>"),
+            PlistLeaf::Bool(b) => write!(f, "{b}"),
+            PlistLeaf::Int(i) => write!(f, "{i}"),
+            PlistLeaf::Uint(u) => write!(f, "{u}"),
+            PlistLeaf::Float(v) => f.write_str(&render_f64(*v)),
+            PlistLeaf::String(s) => f.write_str(&quote(s)),
+            PlistLeaf::Date(d) => write!(f, "<date {}>", render_date(*d)),
+            PlistLeaf::Data(bytes) => write!(f, "<data {} bytes>", bytes.len()),
+            PlistLeaf::Uid(u) => write!(f, "<uid {u}>"),
         }
     }
 }
+
+impl Leaf for PlistLeaf {}
 
 impl ValueCodec for Plist {
     type Leaf = PlistLeaf;
@@ -573,7 +576,7 @@ fn render_date(date: plist::Date) -> String {
 
 /// Whether `date` is valid in the RFC 3339 form an XML plist uses. The
 /// `plist` crate **panics** rather than erroring outside years 0..=9999 -- in its
-/// writer and in `to_xml_format`, which `Leaf::render` reaches -- so a run that
+/// writer and in `to_xml_format`, which `PlistLeaf`'s `Display` reaches -- so a run that
 /// only passes such a value through would abort instead of refusing.
 fn date_valid_in_xml(date: plist::Date) -> bool {
     // Seconds from the Unix epoch to the start of year 0 and of year 10000.

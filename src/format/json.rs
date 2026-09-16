@@ -3,6 +3,7 @@
 use indexmap::IndexMap;
 use json_syntax::{Parse, Print};
 
+use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts, MAX_DEPTH};
@@ -106,18 +107,20 @@ impl JsonLeaf {
     }
 }
 
-impl Leaf for JsonLeaf {
-    fn render(&self) -> String {
+impl fmt::Display for JsonLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JsonLeaf::Null => "null".to_string(),
-            JsonLeaf::Bool(b) => b.to_string(),
-            JsonLeaf::Int(i) => i.to_string(),
-            JsonLeaf::Uint(u) => u.to_string(),
-            JsonLeaf::Number(lit) => lit.clone(),
-            JsonLeaf::String(s) => quote(s),
+            JsonLeaf::Null => f.write_str("null"),
+            JsonLeaf::Bool(b) => write!(f, "{b}"),
+            JsonLeaf::Int(i) => write!(f, "{i}"),
+            JsonLeaf::Uint(u) => write!(f, "{u}"),
+            JsonLeaf::Number(lit) => f.write_str(lit),
+            JsonLeaf::String(s) => f.write_str(&quote(s)),
         }
     }
 }
+
+impl Leaf for JsonLeaf {}
 
 /// Whether `text` nests no deeper than `MAX_DEPTH`, counting brackets outside
 /// strings. This has to run **before** `Value::parse_str`: json-syntax's parser is
@@ -388,7 +391,7 @@ mod tests {
     fn a_number_too_big_for_u64_keeps_its_literal() {
         let big = "123456789012345678901234567890";
         assert_eq!(leaf(big), JsonLeaf::Number(big.to_string()));
-        assert_eq!(leaf(big).render(), big);
+        assert_eq!(leaf(big).to_string(), big);
     }
 
     #[test]
