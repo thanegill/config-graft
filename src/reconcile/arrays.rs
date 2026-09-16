@@ -11,7 +11,6 @@ use super::{reconcile, ArrayStrategy, KeyPath, NodeList, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 /// Combine a TARGET array with a DESIRED array per `opts.arrays`, returning the
 /// new element list and any [`Warning`]s (each with a path *relative to*
@@ -163,7 +162,7 @@ fn keyed_merge<L: Leaf>(
             (Some(t), Some(d)) => {
                 let (m, conflicts) = reconcile(&t, &d, find(base, k).as_ref(), opts);
                 let (field, key_value) = k;
-                let selector = format!("[{field}={}]", IdentityValue(key_value));
+                let selector = format!("[{field}={key_value}]");
                 for mut c in conflicts {
                     c.path_mut().prepend(selector.clone());
                     nested.push(c);
@@ -246,7 +245,7 @@ fn key_duplicates<L: Leaf>(
         warnings.push(Warning::DuplicateCollapsed {
             path: KeyPath::new(),
             source,
-            identity: format!("[{field}={}]", IdentityValue(value)),
+            identity: format!("[{field}={value}]"),
             matched: (*value).clone(),
             held: held[ident],
             kept: out
@@ -256,38 +255,6 @@ fn key_duplicates<L: Leaf>(
         });
     }
     warnings
-}
-
-/// A keyed record's identity value as it appears in an element selector. Key
-/// fields are scalars in practice (a leaf's `Display`, which quotes strings); the
-/// composite arms are a deterministic fallback for the degenerate non-scalar-key
-/// case.
-struct IdentityValue<'a, L: Leaf>(&'a Node<L>);
-
-impl<L: Leaf> fmt::Display for IdentityValue<'_, L> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Node::Leaf(l) => write!(f, "{l}"),
-            Node::Array(a) => {
-                f.write_str("[")?;
-                let mut sep = "";
-                for element in a {
-                    write!(f, "{sep}{}", IdentityValue(element))?;
-                    sep = ",";
-                }
-                f.write_str("]")
-            }
-            Node::Map(m) => {
-                f.write_str("{")?;
-                let mut sep = "";
-                for (key, value) in m {
-                    write!(f, "{sep}{key}={}", IdentityValue(value))?;
-                    sep = ",";
-                }
-                f.write_str("}")
-            }
-        }
-    }
 }
 
 /// Shared GTS assembly: given the survivor count `n`, a map from an input element

@@ -1383,7 +1383,8 @@ mod tests {
         // -- real keys are scalars -- but the selector still has to render it, and
         // the rendering is user-visible in a conflict path and in a collapse
         // warning, so pin it rather than leaving it to whichever renderer happens
-        // to be wired up.
+        // to be wired up. The value renders as `--diff` renders it anywhere else;
+        // only the `[field=` around it belongs to the selector.
         assert_eq!(
             keyed_conflict_paths(
                 json!({"servers": [{"name": {"host": "web", "port": 80}, "tags": ["x", "y"]}]}),
@@ -1391,7 +1392,7 @@ mod tests {
                 None,
                 &["name"],
             ),
-            vec!["servers[name={host=\"web\",port=80}].tags"]
+            vec!["servers[name={\"host\":\"web\",\"port\":80}].tags"]
         );
     }
 
