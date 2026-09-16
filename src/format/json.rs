@@ -266,17 +266,20 @@ mod tests {
 
     #[test]
     fn distinguishes_signed_unsigned_and_non_integer() {
-        assert_eq!(
-            Json::decode(&value("-1")),
-            Some(Node::Leaf(JsonLeaf::Int(-1)))
-        );
-        assert_eq!(
-            Json::decode(&value("18446744073709551615")),
-            Some(Node::Leaf(JsonLeaf::Uint(u64::MAX)))
-        );
-        assert_eq!(
-            Json::decode(&value("2.5")),
-            Some(Node::Leaf(JsonLeaf::Number("2.5".to_string())))
+        // Matched on the variant, not compared with `assert_eq!`: `JsonLeaf`'s own
+        // `PartialEq` holds every spelling of a number equal, so an equality
+        // assertion here passes whichever variant `decode` picked and says nothing
+        // about the split it is named for.
+        assert!(matches!(leaf("-1"), JsonLeaf::Int(-1)));
+        assert!(matches!(
+            leaf("18446744073709551615"),
+            JsonLeaf::Uint(u64::MAX)
+        ));
+        assert!(matches!(leaf("2.5"), JsonLeaf::Number(ref n) if n == "2.5"));
+        // An integer past `u64` has no fixed-width variant to land in.
+        assert!(
+            matches!(leaf("123456789012345678901234567890"), JsonLeaf::Number(ref n)
+                if n == "123456789012345678901234567890")
         );
     }
 
