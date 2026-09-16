@@ -22,12 +22,12 @@ use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
 use crate::RunArgs;
 
-/// Output preferences for this run. Built in one place so the read-time
-/// normalization and the write see the same settings.
-fn write_opts(args: &RunArgs) -> WriteOpts {
+/// Output preferences as the flags asked for them, before any format settles what
+/// depends on the target's bytes.
+fn requested_write_opts(args: &RunArgs) -> WriteOpts {
     WriteOpts {
         indent: args.indent.unwrap_or(Indent::Spaces(2)),
-        plist_binary: args.plist_binary,
+        plist_format: args.plist_format,
     }
 }
 
@@ -185,6 +185,15 @@ pub(crate) trait Backend {
     /// `Err` is a hard failure (e.g. a non-directory target for the tree backend).
     fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<Self::Leaf>>, Error>;
 
+    /// This run's settled output preferences. [`Backend::run`] takes them once, up
+    /// front, and hands the same value to every step: plist's `--plist-format
+    /// follow` reads them off the target, and the date floor that
+    /// [`Backend::normalize_for_run`] applies to all three inputs depends on the
+    /// answer. Default: whatever the flags asked for.
+    fn write_opts(args: &RunArgs) -> WriteOpts {
+        requested_write_opts(args)
+    }
+
     /// Reduce a freshly read input to the precision this run's output encoding can
     /// hold. [`Backend::run`] calls it on each of TARGET, DESIRED and BASE, so all
     /// three agree with what lands on disk -- prune compares TARGET against BASE,
@@ -195,6 +204,7 @@ pub(crate) trait Backend {
     /// costs anything. Default: nothing to adjust.
     fn normalize_for_run(
         _args: &RunArgs,
+        _opts: WriteOpts,
         _node: &Node<Self::Leaf>,
     ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
         Ok(None)
@@ -209,6 +219,7 @@ pub(crate) trait Backend {
     /// target were edited between them).
     fn prepare(
         args: &RunArgs,
+        opts: WriteOpts,
         target: &Node<Self::Leaf>,
         result: &Node<Self::Leaf>,
     ) -> Result<Prepared, Error>;
@@ -228,6 +239,11 @@ pub(crate) trait Backend {
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
     /// `ByteBackend::<Json>::run(args)` / `Directory::run(args)`.
     fn run(args: &RunArgs) -> Result<Outcome, Error> {
+        // Settled before the first read: every input is normalized for the encoding
+        // the write will use, so all three stay comparable to each other and to
+        // what lands on disk.
+        let write_opts = Self::write_opts(args);
+
         // The unreadable-TARGET wording is about not mistaking it for empty, which
         // says nothing about DESIRED.
         let mut desired = Self::read(args, &args.desired)
@@ -239,7 +255,7 @@ pub(crate) trait Backend {
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
-        let desired_risks = match Self::normalize_for_run(args, &desired)? {
+        let desired_risks = match Self::normalize_for_run(args, write_opts, &desired)? {
             Some(normalized) => {
                 desired = normalized.node;
                 normalized.rewritten
@@ -257,7 +273,7 @@ pub(crate) trait Backend {
         // `--diff` compares against the node as read, or it shows nothing and
         // disagrees with the `--check` that compares against the bytes on disk.
         let mut target_on_disk = None;
-        let target_risks = match Self::normalize_for_run(args, &target)? {
+        let target_risks = match Self::normalize_for_run(args, write_opts, &target)? {
             Some(normalized) => {
                 let as_read = std::mem::replace(&mut target, normalized.node);
                 target_on_disk = args.diff.then_some(as_read);
@@ -279,7 +295,7 @@ pub(crate) trait Backend {
         // managed key can never be pruned. BASE is never written, so a failure here
         // leaves it as read rather than failing the run.
         if let Some(base) = base.as_mut() {
-            if let Ok(Some(normalized)) = Self::normalize_for_run(args, base) {
+            if let Ok(Some(normalized)) = Self::normalize_for_run(args, write_opts, base) {
                 *base = normalized.node;
             }
         }
@@ -366,7 +382,7 @@ pub(crate) trait Backend {
             print!("{}", before.diff(&result, Self::COMPONENT_SEPARATOR));
         }
 
-        let Prepared { output, changed } = Self::prepare(args, &target, &result)?;
+        let Prepared { output, changed } = Self::prepare(args, write_opts, &target, &result)?;
 
         if args.check {
             return Ok(if changed {
@@ -411,11 +427,23 @@ impl<F: Format> Backend for ByteBackend<F> {
         crate::parse_merge_keys(&args.merge_key, F::PATH_SEP)
     }
 
+    /// The probe read is its own: `prepare`'s snapshot is taken after the reconcile,
+    /// far too late to normalize against. A target re-encoded between the two reads
+    /// would be written in the encoding it had at the start, which is the same
+    /// staleness window `prepare`'s own re-read already carries.
+    fn write_opts(args: &RunArgs) -> WriteOpts {
+        F::resolve_write_opts(
+            &fs::read(&args.target).unwrap_or_default(),
+            requested_write_opts(args),
+        )
+    }
+
     fn normalize_for_run(
-        args: &RunArgs,
+        _args: &RunArgs,
+        opts: WriteOpts,
         node: &Node<F::Leaf>,
     ) -> Result<Option<Normalization<F::Leaf>>, Error> {
-        F::normalize_for_run(node, write_opts(args))
+        F::normalize_for_run(node, opts)
     }
 
     fn error_desired_absent(path: PathBuf) -> Error {
@@ -442,6 +470,7 @@ impl<F: Format> Backend for ByteBackend<F> {
 
     fn prepare(
         args: &RunArgs,
+        opts: WriteOpts,
         target: &Node<F::Leaf>,
         result: &Node<F::Leaf>,
     ) -> Result<Prepared, Error> {
@@ -449,10 +478,10 @@ impl<F: Format> Backend for ByteBackend<F> {
         // matches, making the output and the "changed?" verdict disagree.
         let current = fs::read(&args.target).unwrap_or_default();
         emit(
-            &F::refuse_on_write(result, target, &current, write_opts(args))?,
+            &F::refuse_on_write(result, target, &current, opts)?,
             F::PATH_SEP,
         );
-        let output = F::serialize(result, &current, write_opts(args))?;
+        let output = F::serialize(result, &current, opts)?;
         Ok(Prepared {
             changed: output != current,
             output: Some(output),
@@ -502,6 +531,7 @@ impl Backend for Directory {
 
     fn prepare(
         _args: &RunArgs,
+        _opts: WriteOpts,
         target: &Node<FsLeaf>,
         result: &Node<FsLeaf>,
     ) -> Result<Prepared, Error> {

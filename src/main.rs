@@ -15,7 +15,7 @@ mod value;
 mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
-use format::{Indent, Json, Plist, Toml, Yaml};
+use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use reconcile::{escape_unprintable, ArrayStrategy, KeyPath, MergeKeys};
 use value::quote;
 use value::{Leaf, Node};
@@ -127,15 +127,20 @@ pub(crate) struct JsonArgs {
     indent: Option<Indent>,
 }
 
-/// plist: the byte flags plus plist-only `--plist-binary`.
+/// plist: the byte flags plus plist-only `--plist-format`.
 #[derive(Args)]
 pub(crate) struct PlistArgs {
     #[command(flatten)]
     byte: ByteArgs,
 
-    /// Write plist output as binary instead of XML.
-    #[arg(long = "plist-binary")]
-    plist_binary: bool,
+    /// Which encoding to write: `follow` the target's own (default), `xml`, or
+    /// `binary`.
+    #[arg(
+        long = "plist-format",
+        value_name = "ENCODING",
+        default_value = "follow"
+    )]
+    plist_format: PlistFormat,
 }
 
 /// directory: the common flags plus the tree-only attribute controls.
@@ -161,7 +166,7 @@ pub(crate) struct DirArgs {
 
 /// The resolved options a [`Backend`] run reads, built from whichever subcommand
 /// clap parsed. Flags a given format doesn't expose are filled with today's
-/// defaults (directory: no stdout/sort/array/merge_key/indent/plist_binary; byte
+/// defaults (directory: no stdout/sort/array/merge_key/indent/plist_format; byte
 /// formats: no manage_root/no_owner/xattrs), so the backend logic is unchanged.
 pub(crate) struct RunArgs {
     pub(crate) target: PathBuf,
@@ -173,7 +178,7 @@ pub(crate) struct RunArgs {
     pub(crate) diff: bool,
     pub(crate) check: bool,
     pub(crate) indent: Option<Indent>,
-    pub(crate) plist_binary: bool,
+    pub(crate) plist_format: PlistFormat,
     pub(crate) sort_keys: bool,
     pub(crate) array_strategy: ArrayStrategy,
     merge_key: Vec<String>,
@@ -219,11 +224,11 @@ pub(crate) fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
 }
 
 impl RunArgs {
-    /// A [`RunArgs`] from a byte-format subcommand's flags. `indent`/`plist_binary`
+    /// A [`RunArgs`] from a byte-format subcommand's flags. `indent`/`plist_format`
     /// are format-specific, so the caller supplies them (JSON sets `indent`, plist
-    /// sets `plist_binary`, YAML/TOML use the defaults). The directory-only fields
+    /// sets `plist_format`, YAML/TOML use the defaults). The directory-only fields
     /// take their inert defaults.
-    fn from_byte(byte: ByteArgs, indent: Option<Indent>, plist_binary: bool) -> RunArgs {
+    fn from_byte(byte: ByteArgs, indent: Option<Indent>, plist_format: PlistFormat) -> RunArgs {
         let CommonArgs {
             target,
             desired,
@@ -243,7 +248,7 @@ impl RunArgs {
             diff,
             check,
             indent,
-            plist_binary,
+            plist_format,
             sort_keys: byte.sort_keys,
             array_strategy: byte.array_strategy,
             merge_key: byte.merge_key,
@@ -254,7 +259,7 @@ impl RunArgs {
     }
 
     /// A [`RunArgs`] from the `directory` subcommand's flags. The byte-only shaping
-    /// fields (stdout/sort_keys/array_strategy/merge_key/indent/plist_binary) take
+    /// fields (stdout/sort_keys/array_strategy/merge_key/indent/plist_format) take
     /// their inert defaults -- a tree exposes none of them.
     fn from_dir(args: DirArgs) -> RunArgs {
         let CommonArgs {
@@ -276,7 +281,7 @@ impl RunArgs {
             diff,
             check,
             indent: None,
-            plist_binary: false,
+            plist_format: PlistFormat::default(),
             sort_keys: false,
             // Matches the byte formats' `--array-strategy` default (`merge`); a tree
             // has no arrays, so the value is inert either way.
@@ -294,11 +299,19 @@ fn main() {
     // The subcommand picks the format; dispatch statically -- the node type carries
     // the format's leaf type, so each format is its own monomorphization of `run`.
     let result = match cli.command {
-        Command::Json(a) => ByteBackend::<Json>::run(&RunArgs::from_byte(a.byte, a.indent, false)),
-        Command::Yaml(a) => ByteBackend::<Yaml>::run(&RunArgs::from_byte(a, None, false)),
-        Command::Toml(a) => ByteBackend::<Toml>::run(&RunArgs::from_byte(a, None, false)),
+        Command::Json(a) => ByteBackend::<Json>::run(&RunArgs::from_byte(
+            a.byte,
+            a.indent,
+            PlistFormat::default(),
+        )),
+        Command::Yaml(a) => {
+            ByteBackend::<Yaml>::run(&RunArgs::from_byte(a, None, PlistFormat::default()))
+        }
+        Command::Toml(a) => {
+            ByteBackend::<Toml>::run(&RunArgs::from_byte(a, None, PlistFormat::default()))
+        }
         Command::Plist(a) => {
-            ByteBackend::<Plist>::run(&RunArgs::from_byte(a.byte, None, a.plist_binary))
+            ByteBackend::<Plist>::run(&RunArgs::from_byte(a.byte, None, a.plist_format))
         }
         Command::Directory(a) => Directory::run(&RunArgs::from_dir(a)),
     };

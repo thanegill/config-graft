@@ -77,6 +77,7 @@
           inherit pkgs;
           inherit (pkgs) lib;
           common = import ./modules/lib/common.nix;
+          package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         };
       });
 

@@ -102,6 +102,16 @@ pub trait Format: ValueCodec {
     const PATH_SEP: &'static str;
     /// Parse `bytes`, or `None` if they don't parse as this format.
     fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
+    /// Settle any output preference that depends on what the target already is,
+    /// given its current bytes. plist answers [`PlistFormat::Follow`] from them;
+    /// every other format writes one encoding and keeps what it was given.
+    ///
+    /// Called once per run, before the first input is read: the plist date floor
+    /// runs at read time and is encoding-dependent, so deciding any later would
+    /// normalize against an encoding the write does not use.
+    fn resolve_write_opts(_current: &[u8], opts: WriteOpts) -> WriteOpts {
+        opts
+    }
     /// Refuse a write whose output encoding cannot carry what the run *introduces*.
     /// A value `target` already holds is passed through, or refusing it would fail
     /// every run against a file the app itself wrote. `current` is needed too: a
@@ -161,14 +171,31 @@ pub struct Normalized<L: Leaf> {
     pub because: &'static str,
 }
 
+/// Which encoding a plist run writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum PlistFormat {
+    /// Keep the encoding the target already has (default), XML when there is no
+    /// target to follow.
+    #[default]
+    Follow,
+    /// Always write XML.
+    Xml,
+    /// Always write binary.
+    Binary,
+}
+
 /// Output preferences threaded to [`Format::serialize`]. Each field is honored by
 /// one format and ignored by the others.
+///
+/// [`Backend::run`](crate::backend::Backend::run) resolves these once against the
+/// target's bytes before anything is read, so `plist_format` is never still
+/// [`PlistFormat::Follow`] by the time a codec sees it.
 #[derive(Clone, Copy, Debug)]
 pub struct WriteOpts {
     /// JSON indentation.
     pub indent: Indent,
-    /// Write plist output as binary instead of XML.
-    pub plist_binary: bool,
+    /// The encoding a plist run writes.
+    pub plist_format: PlistFormat,
 }
 
 /// Conversion between a format's native value type and the internal `Node` model.

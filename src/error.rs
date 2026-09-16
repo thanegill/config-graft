@@ -166,13 +166,13 @@ impl fmt::Display for Error {
             Error::PlistXmlUnrepresentable { path, character } => write!(
                 f,
                 "`{path}` contains U+{:04X}, which XML 1.0 cannot represent at all, \
-                 so this run cannot write XML; pass --plist-binary to keep the value",
+                 so this run cannot write XML; pass --plist-format binary to keep the value",
                 *character as u32
             ),
             Error::PlistDateOutOfRange { path } => write!(
                 f,
                 "the date at `{path}` falls outside the years an XML plist can \
-                 render (0 to 9999); pass --plist-binary to write it unchanged"
+                 render (0 to 9999); pass --plist-format binary to write it unchanged"
             ),
             Error::YamlUnsafe => f.write_str(YAML_UNSAFE),
             Error::TomlUnsafe => f.write_str(TOML_UNSAFE),
