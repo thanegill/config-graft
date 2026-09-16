@@ -5,7 +5,7 @@ use json_syntax::{Parse, Print};
 
 use std::hash::{Hash, Hasher};
 
-use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::number::NumberValue;
 use crate::value::{quote, Leaf, Node};
@@ -118,10 +118,6 @@ impl Leaf for JsonLeaf {
         }
     }
 }
-
-/// How many containers a JSON document may nest -- an order of magnitude below
-/// where a run's deepest recursion runs out of stack (measured in issue #48).
-const MAX_DEPTH: usize = 512;
 
 /// Whether `text` nests no deeper than `MAX_DEPTH`, counting brackets outside
 /// strings. This has to run **before** `Value::parse_str`: json-syntax's parser is
