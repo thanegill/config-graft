@@ -10,6 +10,15 @@ let
   # nested dirs or a leading "//"), and no doubled extension since the name already
   # ends in one.
   safeName = builtins.replaceStrings [ "/" ] [ "-" ];
+
+  # The attribute *policy* flags of a directory entry, separate from `--manage-root`:
+  # the policy says which attributes are reconciled at all, `--manage-root` says
+  # whether the target's own attributes are among them. A reconcile wants both; a
+  # caller with a DESIRED tree of its own making wants only the policy.
+  directoryPolicyFlags =
+    { lib, entry }:
+    lib.optional entry.noOwner "--no-owner"
+    ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}";
 in
 {
   inherit safeName;
@@ -295,9 +304,7 @@ in
     }:
     let
       flags = lib.concatStringsSep " " (
-        lib.optional entry.manageRoot "--manage-root"
-        ++ lib.optional entry.noOwner "--no-owner"
-        ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}"
+        lib.optional entry.manageRoot "--manage-root" ++ directoryPolicyFlags { inherit lib entry; }
       );
     in
     ''
