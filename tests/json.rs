@@ -1139,3 +1139,46 @@ fn a_duplicate_warning_needs_something_to_have_been_dropped() {
         "warned about a loss that did not happen: {err}"
     );
 }
+
+#[test]
+fn a_deeply_nested_target_is_refused_not_aborted() {
+    // json-syntax parses iteratively but drops a `Value` recursively, so a depth
+    // limit enforced after the tree is built still lets that drop run off the
+    // stack and abort the process. Exit 1 with a diagnostic, never a signal.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let deep = format!("{}1{}", r#"{"a":"#.repeat(50_000), "}".repeat(50_000));
+    fs::write(&target, &deep).unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {out:?}"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not valid JSON"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), deep);
+}
+
+#[test]
+fn a_deeply_nested_desired_is_refused_not_aborted() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1}"#).unwrap();
+    fs::write(
+        &desired,
+        format!("{}1{}", r#"{"a":"#.repeat(50_000), "}".repeat(50_000)),
+    )
+    .unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {out:?}"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#);
+}

@@ -119,37 +119,44 @@ impl Leaf for JsonLeaf {
     }
 }
 
-/// How deep a JSON document may nest. `json-syntax`'s parser is iterative and caps
-/// nothing, but `decode` -- and then `deep_merge`, `compact` and `encode` -- all
-/// recurse, so without a limit a deeply nested file overflows the stack and aborts
-/// the process instead of being refused. serde_json enforced 128 before the swap.
+/// How many containers a JSON document may nest. serde_json enforced 128 before
+/// the swap to json-syntax, which caps nothing.
 const MAX_DEPTH: usize = 128;
 
-/// `decode` with the remaining depth budget. `None` past the limit, which
-/// `read_file` turns into the same "there but unreadable" refusal as a parse error.
-fn decode_within(value: &json_syntax::Value, budget: usize) -> Option<Node<JsonLeaf>> {
-    use json_syntax::Value;
-    let budget = budget.checked_sub(1)?;
-    Some(match value {
-        Value::Object(o) => {
-            let mut map = IndexMap::with_capacity(o.len());
-            for entry in o.iter() {
-                // A duplicate key keeps the last occurrence, as every JSON reader
-                // config-graft can be pointed at does.
-                map.insert(entry.key.to_string(), decode_within(&entry.value, budget)?);
+/// Whether `text` nests no deeper than `MAX_DEPTH`, counting brackets outside
+/// strings. This has to run **before** `Value::parse_str`: json-syntax's parser is
+/// iterative, but its `Value` *drops* recursively, so a limit enforced on the
+/// finished tree -- in `decode`, or anywhere after it -- aborts the process on the
+/// drop it was added to prevent. Nothing deeper than this becomes a `Value`, which
+/// is also what bounds the recursion in `decode`, `deep_merge`, `compact` and
+/// `encode`.
+fn nests_within_limit(text: &str) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in text.bytes() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
             }
-            Node::Map(map)
+            continue;
         }
-        Value::Array(a) => Node::Array(
-            a.iter()
-                .map(|e| decode_within(e, budget))
-                .collect::<Option<_>>()?,
-        ),
-        Value::Null => Node::Leaf(JsonLeaf::Null),
-        Value::Boolean(b) => Node::Leaf(JsonLeaf::Bool(*b)),
-        Value::String(s) => Node::Leaf(JsonLeaf::String(s.to_string())),
-        Value::Number(n) => Node::Leaf(number_leaf(n.as_str())),
-    })
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return false;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    true
 }
 
 impl ValueCodec for Json {
@@ -157,7 +164,23 @@ impl ValueCodec for Json {
     type Value<'a> = json_syntax::Value;
 
     fn decode(value: &json_syntax::Value) -> Option<Node<JsonLeaf>> {
-        decode_within(value, MAX_DEPTH)
+        use json_syntax::Value;
+        Some(match value {
+            Value::Object(o) => {
+                let mut map = IndexMap::with_capacity(o.len());
+                for entry in o.iter() {
+                    // A duplicate key keeps the last occurrence, as every JSON
+                    // reader config-graft can be pointed at does.
+                    map.insert(entry.key.to_string(), Json::decode(&entry.value)?);
+                }
+                Node::Map(map)
+            }
+            Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect::<Option<_>>()?),
+            Value::Null => Node::Leaf(JsonLeaf::Null),
+            Value::Boolean(b) => Node::Leaf(JsonLeaf::Bool(*b)),
+            Value::String(s) => Node::Leaf(JsonLeaf::String(s.to_string())),
+            Value::Number(n) => Node::Leaf(number_leaf(n.as_str())),
+        })
     }
 
     fn encode(node: &Node<JsonLeaf>) -> json_syntax::Value {
@@ -200,6 +223,9 @@ impl Format for Json {
 
     fn parse(bytes: &[u8]) -> Option<Node<JsonLeaf>> {
         let text = std::str::from_utf8(bytes).ok()?;
+        if !nests_within_limit(text) {
+            return None;
+        }
         let (value, _) = json_syntax::Value::parse_str(text).ok()?;
         Json::decode(&value)
     }
@@ -259,6 +285,36 @@ mod tests {
         let text = r#"{"n":-3,"big":18446744073709551615,"f":1.5,"s":"hi","b":true,"nil":null,"arr":[1,"x",false],"nested":{"k":{"deep":2}}}"#;
         let node = Json::decode(&value(text)).unwrap();
         assert_eq!(Json::encode(&node).compact_print().to_string(), text);
+    }
+
+    /// `{"a":` * `depth`, a scalar, then the closing braces.
+    fn nested(depth: usize) -> String {
+        format!("{}1{}", r#"{"a":"#.repeat(depth), "}".repeat(depth))
+    }
+
+    #[test]
+    fn nesting_is_capped_before_the_tree_is_built() {
+        assert!(Json::parse(nested(MAX_DEPTH).as_bytes()).is_some());
+        assert!(Json::parse(nested(MAX_DEPTH + 1).as_bytes()).is_none());
+        // Deep enough that dropping the parsed tree would abort the process, so
+        // reaching this assertion at all is the thing being tested.
+        assert!(Json::parse(nested(50_000).as_bytes()).is_none());
+    }
+
+    #[test]
+    fn brackets_inside_a_string_are_not_nesting() {
+        let braces = "{".repeat(MAX_DEPTH * 2);
+        let escaped_quote = format!(r#"{{"a":"\"{braces}"}}"#);
+        assert!(Json::parse(format!(r#"{{"a":"{braces}"}}"#).as_bytes()).is_some());
+        assert!(Json::parse(escaped_quote.as_bytes()).is_some());
+    }
+
+    #[test]
+    fn sibling_containers_do_not_accumulate_depth() {
+        // Depth is the deepest path, not the count of brackets: a flat array of
+        // objects must not be read as one nest per element.
+        let siblings = format!("[{}]", vec!["{\"a\":1}"; MAX_DEPTH * 4].join(","));
+        assert!(Json::parse(siblings.as_bytes()).is_some());
     }
 
     #[test]
