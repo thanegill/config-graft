@@ -85,12 +85,14 @@ fn apply_is_idempotent_on_plist() {
 }
 
 #[test]
-fn binary_plist_target_is_rewritten_as_xml() {
+fn a_binary_target_keeps_its_encoding() {
+    // The app owns the file, and its encoding is part of what it owns: re-encoding
+    // a whole binary plist as XML is the least minimal write there is, and it is
+    // what floors the app's dates and puts its own bytes out of reach (issue #43).
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
 
-    // Write the target as *binary* plist.
     let f = fs::File::create(&target).unwrap();
     pdict(vec![("a", pint(1)), ("keep", plist::Value::Boolean(true))])
         .to_writer_binary(f)
@@ -100,13 +102,105 @@ fn binary_plist_target_is_rewritten_as_xml() {
     let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success());
 
-    // The file is now XML text (not the `bplist00` binary magic) ...
     let bytes = fs::read(&target).unwrap();
-    assert!(bytes.starts_with(b"<?xml"), "expected XML output");
-    // ... and the merge applied while preserving the app-written key.
+    assert!(
+        bytes.starts_with(b"bplist0"),
+        "expected the binary encoding to be kept"
+    );
     assert_eq!(
         read_plist(&target),
         pdict(vec![("a", pint(2)), ("keep", plist::Value::Boolean(true))])
+    );
+}
+
+#[test]
+fn an_xml_target_keeps_its_encoding() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![("a", pint(1)), ("keep", plist::Value::Boolean(true))])
+        .to_file_xml(&target)
+        .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+
+    let bytes = fs::read(&target).unwrap();
+    assert!(bytes.starts_with(b"<?xml"), "expected XML output");
+    assert_eq!(
+        read_plist(&target),
+        pdict(vec![("a", pint(2)), ("keep", plist::Value::Boolean(true))])
+    );
+}
+
+#[test]
+fn an_absent_target_is_written_as_xml() {
+    // Nothing to follow, so the run falls back to the canonical encoding.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"<?xml"),
+        "expected XML output"
+    );
+}
+
+#[test]
+fn plist_format_xml_rewrites_a_binary_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    let f = fs::File::create(&target).unwrap();
+    pdict(vec![("a", pint(1)), ("keep", plist::Value::Boolean(true))])
+        .to_writer_binary(f)
+        .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"<?xml"),
+        "expected XML output"
+    );
+    assert_eq!(
+        read_plist(&target),
+        pdict(vec![("a", pint(2)), ("keep", plist::Value::Boolean(true))])
+    );
+}
+
+#[test]
+fn plist_format_binary_rewrites_an_xml_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+
+    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&[
+        "plist",
+        "--plist-format",
+        "binary",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(
+        fs::read(&target).unwrap().starts_with(b"bplist0"),
+        "expected binary output"
     );
 }
 
@@ -188,7 +282,8 @@ fn plist_binary_output_is_binary_and_round_trips() {
 
     let out = run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
@@ -224,7 +319,8 @@ fn binary_desired_with_control_char_key_round_trips() {
 
     let out = run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
@@ -248,7 +344,8 @@ fn binary_desired_with_control_char_key_round_trips() {
     let out = run(&[
         "plist",
         "--check",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
@@ -267,7 +364,8 @@ fn plist_binary_is_idempotent() {
     // which only holds if the binary writer is deterministic.
     assert!(run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap()
     ])
@@ -276,7 +374,8 @@ fn plist_binary_is_idempotent() {
     let out = run(&[
         "plist",
         "--check",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
@@ -294,7 +393,8 @@ fn stdout_plist_binary_writes_binary() {
     let out = run(&[
         "plist",
         "--stdout",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
@@ -371,14 +471,22 @@ fn xml_write_emits_whole_second_dates_cfpropertylist_can_parse() {
     let desired = dir.path().join("desired.plist");
 
     // The app owns the date; config-graft only passes it through. A *binary*
-    // target is the real trigger -- CFPropertyList could never have produced an
-    // XML plist carrying a fraction, so only the binary side can hand us one.
+    // target is the only source of one -- CFPropertyList could never have produced
+    // an XML plist carrying a fraction -- so forcing XML is what puts the two
+    // together.
     pdict(vec![("SULastCheckTime", fractional_date()), ("a", pint(1))])
         .to_file_binary(&target)
         .unwrap();
     pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
 
-    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let xml_run = [
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ];
+    let out = run(&xml_run);
     assert!(out.status.success());
 
     let written = fs::read_to_string(&target).unwrap();
@@ -395,11 +503,11 @@ fn xml_write_emits_whole_second_dates_cfpropertylist_can_parse() {
         ),
         "stderr was: {err}"
     );
-    assert!(err.contains("--plist-binary"), "stderr was: {err}");
+    assert!(err.contains("--plist-format binary"), "stderr was: {err}");
 
     // Re-applying is a no-op: the truncated date is already what we would write.
     let before = fs::read(&target).unwrap();
-    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&xml_run);
     assert!(out.status.success());
     assert_eq!(fs::read(&target).unwrap(), before);
 }
@@ -508,7 +616,8 @@ fn plist_binary_write_keeps_sub_second_dates() {
 
     let out = run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
@@ -577,14 +686,20 @@ fn flooring_that_collapses_two_instants_warns_and_writes() {
         .to_file_xml(&desired)
         .unwrap();
 
-    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
     assert!(out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("array `checks` held 2 values that normalizing made identical"),
         "stderr was: {err}"
     );
-    assert!(err.contains("--plist-binary"), "stderr was: {err}");
+    assert!(err.contains("--plist-format binary"), "stderr was: {err}");
 
     // One of the two instants is gone; the DESIRED element is the other survivor.
     let plist::Value::Dictionary(d) = read_plist(&target) else {
@@ -616,7 +731,7 @@ fn a_value_xml_cannot_represent_is_refused_not_mangled() {
     let before = fs::read(&target).unwrap();
     let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains("U+001B"), "got: {err}");
-    assert!(err.contains("--plist-binary"), "got: {err}");
+    assert!(err.contains("--plist-format binary"), "got: {err}");
     // The message names the key, with the control byte escaped rather than echoed.
     assert!(
         err.contains(r"NSUserKeyEquivalents:\u{1b}Window\u{1b}New Window"),
@@ -631,7 +746,8 @@ fn a_value_xml_cannot_represent_is_refused_not_mangled() {
     // The same run as binary is fine -- that is what the flag is for.
     let out = run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
@@ -696,7 +812,13 @@ fn a_collapse_across_target_and_desired_warns() {
     .to_file_binary(&desired)
     .unwrap();
 
-    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
     assert!(out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -908,7 +1030,13 @@ fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
     .to_file_binary(&desired)
     .unwrap();
 
-    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = run(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         err.contains("that normalizing made identical"),
@@ -938,7 +1066,13 @@ fn a_date_outside_the_years_xml_can_spell_is_refused_not_a_panic() {
         .unwrap();
 
     let before = fs::read(&target).unwrap();
-    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
     assert!(err.contains("0 to 9999"), "got: {err}");
     assert_eq!(fs::read(&target).unwrap(), before);
 
@@ -951,7 +1085,8 @@ fn a_date_outside_the_years_xml_can_spell_is_refused_not_a_panic() {
         .unwrap();
     let out = run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         "--diff",
         target.to_str().unwrap(),
         replaces.to_str().unwrap(),
@@ -1024,8 +1159,8 @@ fn a_duplicate_is_reported_only_when_the_file_really_held_one() {
 #[test]
 fn a_binary_target_is_refused_rather_than_rewritten_as_xml_with_the_byte() {
     // Rewriting a binary plist as XML emits every byte anew, so nothing in it is
-    // "already written". The common shape: Preferences are binary and a
-    // `managedPlist` file entry defaults to `binary = false`.
+    // "already written" and the pass-through cannot license it. Only reachable by
+    // forcing the encoding now that `follow` keeps the target binary.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
@@ -1043,18 +1178,89 @@ fn a_binary_target_is_refused_rather_than_rewritten_as_xml_with_the_byte() {
     pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
 
     let before = fs::read(&target).unwrap();
-    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let err = stderr_of(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
     assert!(err.contains("U+001B"), "got: {err}");
     assert_eq!(fs::read(&target).unwrap(), before);
     assert!(before.starts_with(b"bplist00"));
 
     let out = run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
     assert!(out.status.success());
+}
+
+#[test]
+fn a_byte_the_app_wrote_survives_a_default_run_on_a_binary_target() {
+    // Issue #43: Preferences are binary, and one holding an ESC in its own
+    // `NSUserKeyEquivalents` failed every activation because the run re-encoded it
+    // as XML. Following the target's encoding is what makes the byte reachable.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+    let key = format!("{esc}Window");
+
+    pdict(vec![(
+        "NSUserKeyEquivalents",
+        pdict(vec![(&key[..], plist::Value::String("@~n".into()))]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "default run was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        read_plist(&target),
+        pdict(vec![
+            (
+                "NSUserKeyEquivalents",
+                pdict(vec![(&key[..], plist::Value::String("@~n".into()))])
+            ),
+            ("a", pint(2)),
+        ])
+    );
+}
+
+#[test]
+fn a_sub_second_date_the_app_owns_survives_a_default_run_on_a_binary_target() {
+    // Issue #43's other half: a binary plist stores dates as `f64` seconds since
+    // 2001, so a fraction is the norm, and an XML run floored one away on every
+    // activation. Following the encoding leaves the app's value alone.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    write_fractional_binary(&target, vec![("a", pint(1))]);
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "default run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        read_plist(&target),
+        pdict(vec![("k", fractional_date()), ("a", pint(2))])
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("one-second resolution"),
+        "nothing was floored, so nothing should be reported"
+    );
 }
 
 #[test]
@@ -1225,7 +1431,8 @@ fn a_carriage_return_survives_an_xml_run_as_a_character_reference() {
     pdict(vec![]).to_file_xml(&binary_target).unwrap();
     let out = run(&[
         "plist",
-        "--plist-binary",
+        "--plist-format",
+        "binary",
         binary_target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);

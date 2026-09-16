@@ -10,6 +10,7 @@
   lib,
   pkgs,
   common,
+  package,
 }:
 let
   # An entry as the submodule would produce it, so `mkEntryReconcileScript` and
@@ -80,6 +81,67 @@ let
       name = "com.example.app.plist";
       entry = entry overrides;
     }).drvPath;
+
+  # The entry submodule shape a plain `managedPlist` file entry resolves to, with
+  # this flake's own build so the script can actually be run.
+  fileEntry = entry {
+    package = package;
+    settings.a = 1;
+  };
+
+  # The one case pure evaluation cannot answer: what the module's own decisions do
+  # to a *binary* plist on disk. macOS stores Preferences as binary, and an entry at
+  # its defaults must leave the app's own XML-illegal bytes intact (issue #43) --
+  # which holds only while the script omits `--plist-format`, the engine follows the
+  # target's encoding, and the two agree about what "follow" means. A flag mapping
+  # test sees none of that.
+  binaryTargetRun =
+    pkgs.runCommand "config-graft-module-binary-target"
+      {
+        nativeBuildInputs = [
+          pkgs.libplist
+          package
+        ];
+      }
+      ''
+        # Raw ESC 0x1B, as macOS writes into `NSUserKeyEquivalents`. Built by printf
+        # rather than spelled here so nothing along the way has to carry the byte.
+        printf '%s' \
+          '<?xml version="1.0" encoding="UTF-8"?>' \
+          '<plist version="1.0"><dict><key>NSUserKeyEquivalents</key><dict>' \
+          > target.xml
+        printf '<key>\033Window</key><string>@~n</string></dict></dict></plist>' >> target.xml
+        plistutil -f bin -i target.xml -o target.plist
+
+        run() { "$@"; }
+        _i() { :; }
+        _prev=""
+        ${common.mkEntryReconcileScript {
+          inherit lib;
+          format = {
+            name = "plist";
+          };
+          entry = fileEntry;
+          desired = common.mkDesired {
+            inherit lib pkgs;
+            format = {
+              name = "plist";
+            };
+            name = "com.example.app.plist";
+            entry = fileEntry;
+          };
+          target = "target.plist";
+        }}
+
+        [ "$(head -c 7 target.plist)" = "bplist0" ] \
+          || { echo "target was re-encoded, not followed"; exit 1; }
+        plistutil -f xml -i target.plist -o roundtrip.xml
+        grep -qa "$(printf '\033')Window" roundtrip.xml \
+          || { echo "the app's own ESC byte did not survive"; exit 1; }
+        grep -q '<key>a</key>' roundtrip.xml \
+          || { echo "the managed key was not grafted in"; exit 1; }
+        echo ok > $out
+      '';
 
   # A generator distinguishable from the default only by what it emits. Under the
   # old `builtins.toJSON` path the entry's `format` was bypassed, so this produced
@@ -275,7 +337,7 @@ let
     {
       name = "cfprefsd path writes binary even when `binary` is false";
       expected = true;
-      actual = lib.hasInfix " --plist-binary" (script {
+      actual = lib.hasInfix " --plist-format binary" (script {
         cfprefsdDomain = "com.example.app";
         binary = false;
       });
@@ -283,14 +345,16 @@ let
     {
       name = "file path honours `binary = true`";
       expected = true;
-      actual = lib.hasInfix " --plist-binary" (script {
+      actual = lib.hasInfix " --plist-format binary" (script {
         binary = true;
       });
     }
     {
+      # Without the flag the run follows the target's own encoding, which is what
+      # keeps a binary Preferences file binary (issue #43).
       name = "file path omits the flag when `binary` is false";
       expected = false;
-      actual = lib.hasInfix " --plist-binary" (script {
+      actual = lib.hasInfix " --plist-format" (script {
         binary = false;
       });
     }
@@ -331,4 +395,5 @@ assert lib.assertMsg (failures == [ ]) (
 );
 pkgs.runCommand "config-graft-module-tests" { } ''
   echo "${toString (builtins.length cases)} module assertions passed" > $out
+  cat ${binaryTargetRun} >> $out
 ''

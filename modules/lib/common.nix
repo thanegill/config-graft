@@ -124,13 +124,21 @@ in
               default = config.cfprefsdDomain != null;
               defaultText = literalExpression "config.cfprefsdDomain != null";
               description = ''
-                Generate the plist DESIRED as a binary plist and reconcile with
-                `--plist-binary`, so values XML cannot represent (bytes illegal in
-                XML 1.0, e.g. the ESC 0x1B separators in `NSUserKeyEquivalents`)
-                round-trip. When generated from {option}`settings` this runs the
-                entry's {option}`format` generator and converts its output with
-                `pkgs.libplist` at build time, so a {option}`format` override still
-                applies; with {option}`source` it only forces the binary write.
+                Generate the plist DESIRED as a binary plist and force the write
+                with `--plist-format binary`, so values XML cannot represent (bytes
+                illegal in XML 1.0, e.g. the ESC 0x1B separators in
+                `NSUserKeyEquivalents`) round-trip. When generated from
+                {option}`settings` this runs the entry's {option}`format` generator
+                and converts its output with `pkgs.libplist` at build time, so a
+                {option}`format` override still applies; with {option}`source` it
+                only forces the binary write.
+
+                A file entry rarely needs it: at `false` the DESIRED is XML but the
+                *write* follows whatever encoding the target already has, so a
+                binary target (which is what macOS stores) stays binary and keeps
+                its own dates and bytes intact. Set it when {option}`settings`
+                themselves hold a byte XML cannot carry, which an XML DESIRED could
+                not express -- a build-time assertion says so.
 
                 Defaults to `true` for a {option}`cfprefsdDomain` entry, whose whole
                 round-trip is binary anyway ({command}`defaults export` produces a
@@ -179,10 +187,12 @@ in
         [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
 
         # Graft our settings into the live state, then push it back through cfprefsd
-        # so it adopts the merged result. `--plist-binary` is unconditional here (not
-        # `binary`-gated): routing this scratch file through XML would drop
-        # XML-illegal bytes and sub-second dates that both `defaults` ends carry.
-        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-binary
+        # so it adopts the merged result. `--plist-format binary` is unconditional
+        # here -- not `binary`-gated, and not left to `follow`: routing this scratch
+        # file through XML would drop XML-illegal bytes and sub-second dates that
+        # both `defaults` ends carry, and an empty domain's scratch file is the
+        # `plutil -create xml1` one above, which `follow` would read as XML.
+        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-format binary
         run /usr/bin/defaults import "$_domain" "$_live"
         rm -f "$_live"
       ''
@@ -191,7 +201,7 @@ in
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
         run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${
-          lib.optionalString (format.name == "plist" && entry.binary) " --plist-binary"
+          lib.optionalString (format.name == "plist" && entry.binary) " --plist-format binary"
         }
       '';
 

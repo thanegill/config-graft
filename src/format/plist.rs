@@ -1,5 +1,5 @@
-//! Apple plist codec, leaf type, and I/O. Reads accept XML or binary; writes are
-//! normalized XML by default, or binary with `--plist-binary`.
+//! Apple plist codec, leaf type, and I/O. Reads accept XML or binary; writes keep
+//! the target's own encoding by default, or whichever `--plist-format` names.
 
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime};
 
 use indexmap::IndexMap;
 
-use super::{Format, FormatKind, Normalization, Normalized, ValueCodec, WriteOpts, MAX_DEPTH};
+use super::{
+    Format, FormatKind, Normalization, Normalized, PlistFormat, ValueCodec, WriteOpts, MAX_DEPTH,
+};
 use crate::error::Error;
 use crate::reconcile::KeyPath;
 use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
@@ -203,13 +205,27 @@ impl Format for Plist {
         Plist::decode(&value)
     }
 
+    fn resolve_write_opts(current: &[u8], opts: WriteOpts) -> WriteOpts {
+        let plist_format = match opts.plist_format {
+            PlistFormat::Follow if is_binary_plist(current) => PlistFormat::Binary,
+            // Absent, empty and unrecognized all land here: with nothing to follow,
+            // a first apply writes the canonical encoding.
+            PlistFormat::Follow => PlistFormat::Xml,
+            chosen => chosen,
+        };
+        WriteOpts {
+            plist_format,
+            ..opts
+        }
+    }
+
     fn refuse_on_write(
         result: &Node<PlistLeaf>,
         target: &Node<PlistLeaf>,
         current: &[u8],
         opts: WriteOpts,
     ) -> Result<Vec<Warning<PlistLeaf>>, Error> {
-        if opts.plist_binary {
+        if opts.plist_format == PlistFormat::Binary {
             return Ok(Vec::new());
         }
         // Passing a value through is only honest while the occurrence the file
@@ -234,7 +250,7 @@ impl Format for Plist {
         node: &Node<PlistLeaf>,
         opts: WriteOpts,
     ) -> Result<Option<Normalization<PlistLeaf>>, Error> {
-        if opts.plist_binary {
+        if opts.plist_format == PlistFormat::Binary {
             return Ok(None);
         }
         let needs_floor = scan_dates(node).map_err(|mut segments| {
@@ -266,7 +282,7 @@ impl Format for Plist {
     ) -> Result<Vec<u8>, Error> {
         let value = Plist::encode(node);
         let mut buf = Vec::new();
-        if opts.plist_binary {
+        if opts.plist_format == PlistFormat::Binary {
             value
                 .to_writer_binary(&mut buf)
                 .map_err(Error::PlistSerialize)?;
@@ -286,13 +302,13 @@ impl Format for Plist {
 /// Completes both the refusal and the pass-through report for a byte XML cannot
 /// carry.
 const XML_UNREPRESENTABLE_REMEDY: &str =
-    "pass --plist-binary (or set `binary = true`) to store it properly";
+    "pass --plist-format binary (or set `binary = true`) to store it properly";
 
 /// Why an XML run cannot keep a date as it stands -- the tail of both the warning
 /// and, when the floor costs an element, the refusal.
 const XML_DATE_RESOLUTION: &str =
-    "an XML plist carries dates at one-second resolution; pass --plist-binary to \
-     keep the full value";
+    "an XML plist carries dates at one-second resolution; pass --plist-format \
+     binary to keep the full value";
 
 // CFPropertyList's XML parser accepts only whole seconds, but the `plist` crate
 // writes an RFC 3339 fraction whenever it has one -- which is always for a date
@@ -351,6 +367,13 @@ fn xml_unrepresentable(text: &str) -> Option<char> {
     text.chars().find(|&c| {
         (c < '\u{20}' && c != '\t' && c != '\n' && c != '\r') || c == '\u{fffe}' || c == '\u{ffff}'
     })
+}
+
+/// Whether `bytes` are a binary plist. The complement is not [`is_xml_plist`]:
+/// bytes that are neither -- absent, empty, or something else entirely -- answer
+/// `false` to both, which is what makes XML the encoding a run falls back to.
+fn is_binary_plist(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"bplist0")
 }
 
 /// Whether `bytes` are an XML plist. Strict on purpose: anything unrecognized
@@ -671,10 +694,10 @@ mod tests {
 
     /// A whole run's value path: decode, normalize for the chosen output
     /// encoding (as `Backend::read` does), then serialize.
-    fn run_to_bytes(value: &plist::Value, plist_binary: bool) -> Vec<u8> {
+    fn run_to_bytes(value: &plist::Value, plist_format: PlistFormat) -> Vec<u8> {
         let opts = WriteOpts {
             indent: Indent::Spaces(2),
-            plist_binary,
+            plist_format,
         };
         let mut node = Plist::decode(value).unwrap();
         if let Some(n) = Plist::normalize_for_run(&node, opts).unwrap() {
@@ -687,7 +710,7 @@ mod tests {
     fn xml_output_floors_sub_second_dates() {
         let mut d = plist::Dictionary::new();
         d.insert("when".to_string(), fractional_date());
-        let xml = run_to_bytes(&plist::Value::Dictionary(d), false);
+        let xml = run_to_bytes(&plist::Value::Dictionary(d), PlistFormat::Xml);
 
         let xml = String::from_utf8(xml).unwrap();
         assert!(
@@ -705,7 +728,8 @@ mod tests {
                 SystemTime::UNIX_EPOCH - Duration::new(1, 500_000_000),
             )),
         );
-        let xml = String::from_utf8(run_to_bytes(&plist::Value::Dictionary(d), false)).unwrap();
+        let xml = String::from_utf8(run_to_bytes(&plist::Value::Dictionary(d), PlistFormat::Xml))
+            .unwrap();
         assert!(
             xml.contains("<date>1969-12-31T23:59:58Z</date>"),
             "expected a floored whole-second date, got:\n{xml}"
@@ -721,7 +745,8 @@ mod tests {
         );
         let mut d = plist::Dictionary::new();
         d.insert("nested".to_string(), plist::Value::Dictionary(inner));
-        let xml = String::from_utf8(run_to_bytes(&plist::Value::Dictionary(d), false)).unwrap();
+        let xml = String::from_utf8(run_to_bytes(&plist::Value::Dictionary(d), PlistFormat::Xml))
+            .unwrap();
         assert!(
             xml.contains("<date>1970-01-12T13:46:40Z</date>"),
             "nested dates should be floored too, got:\n{xml}"
@@ -734,7 +759,7 @@ mod tests {
         d.insert("when".to_string(), fractional_date());
         let original = plist::Value::Dictionary(d);
 
-        let bytes = run_to_bytes(&original, true);
+        let bytes = run_to_bytes(&original, PlistFormat::Binary);
         assert_eq!(
             plist::Value::from_reader(Cursor::new(bytes)).unwrap(),
             original
