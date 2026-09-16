@@ -162,7 +162,7 @@ fn keyed_merge<L: Leaf>(
             (Some(t), Some(d)) => {
                 let (m, conflicts) = reconcile(&t, &d, find(base, k).as_ref(), opts);
                 let (field, key_value) = k;
-                let selector = format!("[{field}={}]", render_value(key_value));
+                let selector = format!("[{field}={key_value}]");
                 for mut c in conflicts {
                     c.path_mut().prepend(selector.clone());
                     nested.push(c);
@@ -212,7 +212,7 @@ fn value_duplicates<L: Leaf>(seq: &[Node<L>], out: &[Node<L>], source: Source) -
         warnings.push(Warning::DuplicateCollapsed {
             path: KeyPath::new(),
             source,
-            identity: element.compact(),
+            identity: element.to_string(),
             matched: element.clone(),
             held: held[element],
             kept,
@@ -245,7 +245,7 @@ fn key_duplicates<L: Leaf>(
         warnings.push(Warning::DuplicateCollapsed {
             path: KeyPath::new(),
             source,
-            identity: format!("[{field}={}]", render_value(value)),
+            identity: format!("[{field}={value}]"),
             matched: (*value).clone(),
             held: held[ident],
             kept: out
@@ -255,26 +255,6 @@ fn key_duplicates<L: Leaf>(
         });
     }
     warnings
-}
-
-/// Render a keyed record's identity value for an element selector. Key fields are
-/// scalars in practice (`Leaf::render`, which quotes strings); the composite arms
-/// are a deterministic fallback for the degenerate non-scalar-key case.
-fn render_value<L: Leaf>(v: &Node<L>) -> String {
-    match v {
-        Node::Leaf(l) => l.render(),
-        Node::Array(a) => {
-            let inner: Vec<String> = a.iter().map(render_value).collect();
-            format!("[{}]", inner.join(","))
-        }
-        Node::Map(m) => {
-            let inner: Vec<String> = m
-                .iter()
-                .map(|(k, val)| format!("{k}={}", render_value(val)))
-                .collect();
-            format!("{{{}}}", inner.join(","))
-        }
-    }
 }
 
 /// Shared GTS assembly: given the survivor count `n`, a map from an input element

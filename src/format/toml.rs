@@ -2,6 +2,7 @@
 //! in place to preserve comments (see [`super::toml_edit_apply`]); empty/
 //! first-apply targets are emitted canonically here.
 
+use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use indexmap::IndexMap;
@@ -9,7 +10,8 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
+use crate::render::{quote, render_f64};
+use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// TOML codec.
 pub struct Toml;
@@ -61,18 +63,20 @@ impl Hash for TomlLeaf {
     }
 }
 
-impl Leaf for TomlLeaf {
-    fn render(&self) -> String {
+impl fmt::Display for TomlLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TomlLeaf::Bool(b) => b.to_string(),
-            TomlLeaf::Int(i) => i.to_string(),
-            TomlLeaf::Float(f) => render_f64(*f),
-            TomlLeaf::String(s) => quote(s),
+            TomlLeaf::Bool(b) => write!(f, "{b}"),
+            TomlLeaf::Int(i) => write!(f, "{i}"),
+            TomlLeaf::Float(v) => f.write_str(&render_f64(*v)),
+            TomlLeaf::String(s) => f.write_str(&quote(s)),
             // No JSON rendering -- a readable token, mirroring plist's `<date ...>`.
-            TomlLeaf::Datetime(d) => format!("<datetime {d}>"),
+            TomlLeaf::Datetime(d) => write!(f, "<datetime {d}>"),
         }
     }
 }
+
+impl Leaf for TomlLeaf {}
 
 impl ValueCodec for Toml {
     type Leaf = TomlLeaf;

@@ -16,7 +16,9 @@
 //! multi-file apply is best-effort, not one transaction (a partial apply is
 //! completed by a re-run, which is idempotent).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -29,6 +31,7 @@ use indexmap::IndexMap;
 use sha2::{Digest as _, Sha256};
 
 use crate::error::Error;
+use crate::render::write_separated;
 use crate::value::{Leaf, Node};
 
 /// A file's content digest (SHA-256).
@@ -37,7 +40,7 @@ type Digest = [u8; 32];
 /// A file's or directory's tracked metadata: a filesystem-agnostic map of
 /// `attribute name -> raw value` (see [`FsLeaf`] for the well-known keys). A
 /// newtype (rather than a bare `BTreeMap` alias) so it can carry attribute logic
-/// like [`FsAttrs::render_summary`]; it `Deref`s to the map for the usual
+/// like its [`Display`] summary; it `Deref`s to the map for the usual
 /// `insert`/`get`/`iter`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) struct FsAttrs(BTreeMap<String, Vec<u8>>);
@@ -65,39 +68,45 @@ impl FsAttrs {
     fn new() -> Self {
         FsAttrs(BTreeMap::new())
     }
+}
 
-    /// Render the `mode, uid:gid[, xattr[...]]` summary for `--diff`. Used for a
-    /// file leaf and for a directory's own metadata.
-    fn render_summary(&self) -> String {
+/// The `mode, uid:gid[, xattr[...]]` summary for `--diff`. Used for a file leaf
+/// and for a directory's own metadata.
+impl fmt::Display for FsAttrs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mode = self
             .get("mode")
             .and_then(|b| std::str::from_utf8(b).ok())
-            .and_then(|s| u32::from_str_radix(s, 8).ok())
-            .map(|m| format!("{:04o}", m & 0o7777))
-            .unwrap_or_else(|| "?".into());
+            .and_then(|s| u32::from_str_radix(s, 8).ok());
+        match mode {
+            Some(m) => write!(f, "{:04o}", m & 0o7777)?,
+            None => f.write_str("?")?,
+        }
         let num = |k: &str| {
             self.get(k)
-                .map(|b| String::from_utf8_lossy(b).into_owned())
-                .unwrap_or_else(|| "?".into())
+                .map_or(Cow::Borrowed("?"), |b| String::from_utf8_lossy(b))
         };
-        let mut out = format!("{mode}, {}:{}", num("uid"), num("gid"));
+        write!(f, ", {}:{}", num("uid"), num("gid"))?;
+
         // Each extended attribute is shown as `name=<digest>` -- a short hash of the
         // value distinguishes a value or rename change in the diff without dumping
         // (possibly binary or large) bytes. The map is ordered (`BTreeMap`).
-        let xattrs: Vec<String> = self
+        let mut xattrs = self
             .iter()
-            .filter_map(|(k, v)| {
-                k.strip_prefix("xattr:").map(|name| {
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    std::hash::Hash::hash(v, &mut h);
-                    format!("{name}={:08x}", std::hash::Hasher::finish(&h) as u32)
-                })
-            })
-            .collect();
-        if !xattrs.is_empty() {
-            out.push_str(&format!(", xattr[{}]", xattrs.join(", ")));
+            .filter_map(|(k, v)| k.strip_prefix("xattr:").map(|name| (name, v)))
+            .peekable();
+        if xattrs.peek().is_none() {
+            return Ok(());
         }
-        out
+        f.write_str(", xattr[")?;
+        write_separated(f, xattrs, ", ", |(name, value)| {
+            fmt::from_fn(move |f| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(value, &mut h);
+                write!(f, "{name}={:08x}", std::hash::Hasher::finish(&h) as u32)
+            })
+        })?;
+        f.write_str("]")
     }
 }
 
@@ -262,21 +271,23 @@ impl Node<FsLeaf> {
     }
 }
 
-impl Leaf for FsLeaf {
-    /// Compact `--diff` rendering. Never dumps contents (files may be huge or
-    /// binary): a file shows its length, mode, owner, and extended attributes
-    /// (each as `name=<value-digest>`); a symlink its target; a directory's own
-    /// attributes their `dir(...)` summary.
-    fn render(&self) -> String {
+/// Compact `--diff` rendering. Never dumps contents (files may be huge or
+/// binary): a file shows its length, mode, owner, and extended attributes
+/// (each as `name=<value-digest>`); a symlink its target; a directory's own
+/// attributes their `dir(...)` summary.
+impl fmt::Display for FsLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FsLeaf::File { len, attrs, .. } => {
-                format!("file({len} bytes, {})", attrs.render_summary())
+                write!(f, "file({len} bytes, {attrs})")
             }
-            FsLeaf::Symlink { target } => format!("-> {}", target.display()),
-            FsLeaf::DirectoryAttributes(attrs) => format!("dir({})", attrs.render_summary()),
+            FsLeaf::Symlink { target } => write!(f, "-> {}", target.display()),
+            FsLeaf::DirectoryAttributes(attrs) => write!(f, "dir({attrs})"),
         }
     }
+}
 
+impl Leaf for FsLeaf {
     /// A [`FsLeaf::DirectoryAttributes`] leaf occupies the reserved empty-string
     /// key of its directory's map -- it is that directory's own attributes, not a
     /// real entry.
@@ -1006,7 +1017,7 @@ mod tests {
     fn render_never_dumps_contents() {
         let owner = || attrs(&[("mode", "755"), ("uid", "501"), ("gid", "20")]);
         assert_eq!(
-            leaf("/x", "hello world", owner()).render(),
+            leaf("/x", "hello world", owner()).to_string(),
             "file(11 bytes, 0755, 501:20)"
         );
         let r = leaf(
@@ -1019,7 +1030,7 @@ mod tests {
                 ("xattr:user.k", "v"),
             ]),
         )
-        .render();
+        .to_string();
         assert!(
             r.starts_with("file(2 bytes, 0644, 0:0, xattr[user.k="),
             "{r}"
@@ -1028,7 +1039,7 @@ mod tests {
             FsLeaf::Symlink {
                 target: PathBuf::from("/etc/foo"),
             }
-            .render(),
+            .to_string(),
             "-> /etc/foo"
         );
     }
@@ -1045,15 +1056,15 @@ mod tests {
         };
         // A value-only xattr change (same name, same length) must render distinctly.
         assert_ne!(
-            leaf("/x", "hi", base("v1")).render(),
-            leaf("/x", "hi", base("v2")).render()
+            leaf("/x", "hi", base("v1")).to_string(),
+            leaf("/x", "hi", base("v2")).to_string()
         );
     }
 
     #[test]
     fn dir_attributes_leaf_renders_dir_summary() {
         let m = FsLeaf::DirectoryAttributes(attrs(&[("mode", "755"), ("uid", "0"), ("gid", "0")]))
-            .render();
+            .to_string();
         assert!(m.starts_with("dir(0755"), "{m}");
         // A directory with managed attributes carries a reserved-key attrs leaf;
         // an unmanaged root (empty attrs) carries none.

@@ -3,6 +3,7 @@
 //! first-apply targets are emitted canonically here.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use indexmap::IndexMap;
@@ -10,7 +11,8 @@ use saphyr::LoadableYamlNode;
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
+use crate::render::{quote, render_f64};
+use crate::value::{canonical_float_bits, Leaf, Node};
 
 /// YAML codec.
 pub struct Yaml;
@@ -60,17 +62,19 @@ impl Hash for YamlLeaf {
     }
 }
 
-impl Leaf for YamlLeaf {
-    fn render(&self) -> String {
+impl fmt::Display for YamlLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            YamlLeaf::Null => "null".to_string(),
-            YamlLeaf::Bool(b) => b.to_string(),
-            YamlLeaf::Int(i) => i.to_string(),
-            YamlLeaf::Float(f) => render_f64(*f),
-            YamlLeaf::String(s) => quote(s),
+            YamlLeaf::Null => f.write_str("null"),
+            YamlLeaf::Bool(b) => write!(f, "{b}"),
+            YamlLeaf::Int(i) => write!(f, "{i}"),
+            YamlLeaf::Float(v) => f.write_str(&render_f64(*v)),
+            YamlLeaf::String(s) => f.write_str(&quote(s)),
         }
     }
 }
+
+impl Leaf for YamlLeaf {}
 
 impl ValueCodec for Yaml {
     type Leaf = YamlLeaf;

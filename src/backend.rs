@@ -124,8 +124,8 @@ fn normalization_warnings<L: Leaf>(rewritten: &[Normalized<L>], source: Source) 
         .map(|n| Warning::ValueNormalized {
             path: n.path.clone(),
             source,
-            from: n.original.compact(),
-            to: n.value.compact(),
+            from: n.original.to_string(),
+            to: n.value.to_string(),
             because: n.because,
         })
         .collect();

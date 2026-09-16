@@ -11,14 +11,13 @@ mod error;
 mod format;
 mod number;
 mod reconcile;
+mod render;
 mod value;
 mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
-use reconcile::{escape_unprintable, ArrayStrategy, KeyPath, MergeKeys};
-use value::quote;
-use value::{Leaf, Node};
+use reconcile::{ArrayStrategy, MergeKeys};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
 /// directory tree): deep-merge DESIRED into TARGET while preserving keys the app
@@ -367,118 +366,5 @@ pub fn dest_dir(path: &Path) -> PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
-    }
-}
-
-impl<L: Leaf> Node<L> {
-    /// A compact, leaf-level diff of `self` (old) against `new` (`+` added, `-`
-    /// removed, `~` changed), with path components joined by `sep` (`.` for byte
-    /// formats, `/` for a directory tree). Arrays and scalars are atomic leaves,
-    /// matching the reconcile semantics.
-    ///
-    /// An empty final path component is disambiguated by the *node* living there,
-    /// not by which backend is running. A leaf under the reserved empty-string key
-    /// that is a directory's own attributes (`Leaf::is_dir_attrs`, see
-    /// `format::directory`) renders as a trailing `/` (or a bare `/` for the root),
-    /// which reads naturally as "this directory". Any other empty key is a
-    /// legitimate, distinct key (`{"": 1}` is valid JSON/YAML/TOML/plist), so its
-    /// empty component is rendered as a quoted empty string (`""`) -- never a bare
-    /// separator, which would be indistinguishable from a directory line.
-    pub(crate) fn diff(&self, new: &Node<L>, sep: &str) -> String {
-        use std::collections::HashSet;
-        // Each entry is (key path, formatted line). Ordering is by the path's *segments*
-        // (not the rendered string), so a key that itself contains the format separator
-        // can't reorder against a nested path that renders identically; it also keeps a
-        // directory's own line (its final segment empty) just before its children.
-        let mut lines: Vec<(KeyPath, String)> = Vec::new();
-
-        let old_leaves: HashSet<KeyPath> = self.leaf_paths().into_iter().collect();
-        let new_leaves: HashSet<KeyPath> = new.leaf_paths().into_iter().collect();
-        for path in old_leaves.union(&new_leaves) {
-            // Decide the label from the actual node at this path, not the backend:
-            // only a directory's own-attributes leaf collapses an empty component to
-            // a bare separator; any other empty key is quoted. `diff` is generic over
-            // `L: Leaf` and can't name `FsLeaf`, so the concrete type answers through
-            // the `Leaf::is_dir_attrs` trait method.
-            let is_dir_attrs = self
-                .get_path(path)
-                .or_else(|| new.get_path(path))
-                .is_some_and(|node| matches!(node, Node::Leaf(leaf) if leaf.is_dir_attrs()));
-            let disp = Self::diff_label(path, sep, is_dir_attrs);
-            match (self.get_path(path), new.get_path(path)) {
-                (None, Some(new_node)) => {
-                    lines.push((path.clone(), format!("+ {disp} = {}", new_node.compact())))
-                }
-                (Some(old_node), None) => {
-                    lines.push((path.clone(), format!("- {disp} = {}", old_node.compact())))
-                }
-                (Some(old_node), Some(new_node)) if old_node != new_node => lines.push((
-                    path.clone(),
-                    format!("~ {disp}: {} => {}", old_node.compact(), new_node.compact()),
-                )),
-                _ => {}
-            }
-        }
-
-        lines.sort_by(|a, b| a.0.cmp(&b.0));
-        if lines.is_empty() {
-            String::new()
-        } else {
-            let body: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
-            format!("{}\n", body.join("\n"))
-        }
-    }
-
-    /// The `--diff` label for a leaf path. When the leaf at `path` is a directory's
-    /// own attributes (`is_dir_attrs`), the empty-string component renders as `sep`,
-    /// giving the bare-`/` root line or a trailing-`/` subdirectory line. Any other
-    /// empty component is quoted (`""`) so an empty-named key is unambiguous rather
-    /// than reading as a directory line.
-    fn diff_label(path: &KeyPath, sep: &str, is_dir_attrs: bool) -> String {
-        if is_dir_attrs {
-            // Keep the byte-identical tree behavior: a directory's own-attributes
-            // leaf's empty final segment gives a trailing `sep` (a subdirectory
-            // line); the root's own-attributes path is a lone empty segment, whose
-            // rendering is empty, so show a bare `sep` instead of a blank line.
-            let rendered = path.render(sep);
-            return if rendered.is_empty() {
-                sep.to_string()
-            } else {
-                rendered
-            };
-        }
-        // Any other empty key: diff paths are pure key segments (no `[field=value]`
-        // selectors), so joining with `sep` matches `KeyPath::render`, except that
-        // an empty segment is quoted so `{"": 1}` shows as `""`, not a bare `sep`.
-        path.iter()
-            .map(|seg| {
-                if seg.is_empty() {
-                    quote(seg)
-                } else {
-                    escape_unprintable(seg)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(sep)
-    }
-
-    /// Render as a compact, single-line token for `--diff`. JSON-representable
-    /// values match `serde_json`'s compact form; plist-only leaves get a readable
-    /// `<date ...>` / `<data N bytes>` / `<uid N>` token (they have no JSON rendering).
-    pub(crate) fn compact(&self) -> String {
-        match self {
-            Node::Map(m) => {
-                let inner: Vec<String> = m
-                    .iter()
-                    .map(|(k, val)| format!("{}:{}", quote(k), val.compact()))
-                    .collect();
-                format!("{{{}}}", inner.join(","))
-            }
-            Node::Array(a) => {
-                let inner: Vec<String> = a.iter().map(|v| v.compact()).collect();
-                format!("[{}]", inner.join(","))
-            }
-            Node::Leaf(l) => l.render(),
-        }
     }
 }
