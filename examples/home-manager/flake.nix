@@ -101,14 +101,17 @@
             };
           }
 
-          # `binary = true`: some macOS values contain bytes illegal in XML 1.0, so
-          # they cannot live in the default (XML) DESIRED. Per-app menu shortcuts
-          # (`NSUserKeyEquivalents`) key on menu paths joined by an ESC (0x1B) byte,
-          # so a binary DESIRED (generated via libplist at build time) plus the
-          # `--plist-binary` write is the only way they round-trip. Reconciling
-          # through cfprefsd then *merges* the dict instead of clobbering it like
-          # `defaults write -dict`. `esc` is the 0x1B separator; Nix source can only
-          # carry it via a JSON unicode escape decoded by `builtins.fromJSON`.
+          # Some macOS values contain bytes illegal in XML 1.0 and so cannot live in
+          # an XML DESIRED at all. Per-app menu shortcuts (`NSUserKeyEquivalents`)
+          # key on menu paths joined by an ESC (0x1B) byte, so they need the binary
+          # DESIRED that `binary` selects, generated via libplist at build time. A
+          # `cfprefsdDomain` entry gets that by default (its whole `defaults`
+          # round-trip is binary). A plain file target does not, so it needs
+          # `binary = true` spelled out -- a build-time assertion says so rather
+          # than letting the ESC bytes reach an XML DESIRED.
+          # Reconciling through cfprefsd also *merges* the dict instead of clobbering
+          # it like `defaults write -dict`. `esc` is the 0x1B separator; Nix source
+          # can only carry it via a JSON unicode escape decoded by `builtins.fromJSON`.
           (
             let
               esc = builtins.fromJSON ''"\u001b"'';
@@ -116,7 +119,6 @@
             {
               home.managedPlist."Library/Preferences/com.example.editor.plist" = {
                 cfprefsdDomain = "com.example.editor";
-                binary = true;
                 settings.NSUserKeyEquivalents = {
                   "${esc}Window${esc}New Window" = "@~n";
                 };

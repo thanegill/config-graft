@@ -10,7 +10,7 @@ use saphyr::LoadableYamlNode;
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
 
 /// YAML codec.
 pub struct Yaml;
@@ -66,8 +66,8 @@ impl Leaf for YamlLeaf {
             YamlLeaf::Null => "null".to_string(),
             YamlLeaf::Bool(b) => b.to_string(),
             YamlLeaf::Int(i) => i.to_string(),
-            YamlLeaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
-            YamlLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
+            YamlLeaf::Float(f) => render_f64(*f),
+            YamlLeaf::String(s) => quote(s),
         }
     }
 }
@@ -120,7 +120,7 @@ impl ValueCodec for Yaml {
                 saphyr::Yaml::Mapping(map)
             }
             Node::Array(a) => saphyr::Yaml::Sequence(a.iter().map(Yaml::encode).collect()),
-            Node::Leaf(l) => leaf_to_yaml(l),
+            Node::Leaf(l) => l.into(),
         }
     }
 }
@@ -171,13 +171,15 @@ fn write_canonical(node: &Node<YamlLeaf>) -> String {
     out
 }
 
-fn leaf_to_yaml(l: &YamlLeaf) -> saphyr::Yaml<'static> {
-    match l {
-        YamlLeaf::Null => saphyr::Yaml::Value(saphyr::Scalar::Null),
-        YamlLeaf::Bool(b) => saphyr::Yaml::Value(saphyr::Scalar::Boolean(*b)),
-        YamlLeaf::Int(i) => saphyr::Yaml::Value(saphyr::Scalar::Integer(*i)),
-        YamlLeaf::Float(f) => saphyr::Yaml::Value(saphyr::Scalar::FloatingPoint((*f).into())),
-        YamlLeaf::String(s) => yaml_string(s.clone()),
+impl From<&YamlLeaf> for saphyr::Yaml<'static> {
+    fn from(yaml_leaf: &YamlLeaf) -> saphyr::Yaml<'static> {
+        match yaml_leaf {
+            YamlLeaf::Null => saphyr::Yaml::Value(saphyr::Scalar::Null),
+            YamlLeaf::Bool(b) => saphyr::Yaml::Value(saphyr::Scalar::Boolean(*b)),
+            YamlLeaf::Int(i) => saphyr::Yaml::Value(saphyr::Scalar::Integer(*i)),
+            YamlLeaf::Float(f) => saphyr::Yaml::Value(saphyr::Scalar::FloatingPoint((*f).into())),
+            YamlLeaf::String(s) => yaml_string(s.clone()),
+        }
     }
 }
 

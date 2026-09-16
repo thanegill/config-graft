@@ -9,7 +9,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use super::{Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
 
 /// TOML codec.
 pub struct Toml;
@@ -66,9 +66,9 @@ impl Leaf for TomlLeaf {
         match self {
             TomlLeaf::Bool(b) => b.to_string(),
             TomlLeaf::Int(i) => i.to_string(),
-            TomlLeaf::Float(f) => serde_json::to_string(f).unwrap_or_default(),
-            TomlLeaf::String(s) => serde_json::to_string(s).unwrap_or_default(),
-            // No JSON spelling -- a readable token, mirroring plist's `<date ...>`.
+            TomlLeaf::Float(f) => render_f64(*f),
+            TomlLeaf::String(s) => quote(s),
+            // No JSON rendering -- a readable token, mirroring plist's `<date ...>`.
             TomlLeaf::Datetime(d) => format!("<datetime {d}>"),
         }
     }
@@ -98,7 +98,7 @@ impl ValueCodec for Toml {
             // Maps become real `[section]` tables so canonical output is idiomatic.
             Node::Map(m) => Item::Table(encode_table(m)),
             Node::Array(a) => Item::Value(Value::Array(encode_array(a))),
-            Node::Leaf(l) => Item::Value(leaf_to_value(l)),
+            Node::Leaf(l) => Item::Value(l.into()),
         }
     }
 }
@@ -214,17 +214,19 @@ pub(super) fn node_to_value(node: &Node<TomlLeaf>) -> Value {
             Value::InlineTable(it)
         }
         Node::Array(a) => Value::Array(encode_array(a)),
-        Node::Leaf(l) => leaf_to_value(l),
+        Node::Leaf(l) => l.into(),
     }
 }
 
-fn leaf_to_value(l: &TomlLeaf) -> Value {
-    match l {
-        TomlLeaf::Bool(b) => Value::from(*b),
-        TomlLeaf::Int(i) => Value::from(*i),
-        TomlLeaf::Float(f) => Value::from(*f),
-        TomlLeaf::String(s) => Value::from(s.clone()),
-        TomlLeaf::Datetime(d) => Value::from(*d),
+impl From<&TomlLeaf> for Value {
+    fn from(toml_leaf: &TomlLeaf) -> Value {
+        match toml_leaf {
+            TomlLeaf::Bool(b) => Value::from(*b),
+            TomlLeaf::Int(i) => Value::from(*i),
+            TomlLeaf::Float(f) => Value::from(*f),
+            TomlLeaf::String(s) => Value::from(s.clone()),
+            TomlLeaf::Datetime(d) => Value::from(*d),
+        }
     }
 }
 
