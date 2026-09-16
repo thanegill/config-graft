@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use indexmap::IndexMap;
 
-use super::{Format, FormatKind, Normalization, Normalized, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, Normalization, Normalized, ValueCodec, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::reconcile::KeyPath;
 use crate::value::{canonical_float_bits, quote, render_f64, Leaf, Node};
@@ -150,12 +150,56 @@ impl ValueCodec for Plist {
     }
 }
 
+/// Whether `value` nests no deeper than `MAX_DEPTH`, walked with an explicit
+/// stack. plist's readers are event-driven and its builder iterative, so the tree
+/// arrives intact however deep it is; everything downstream recurses over it --
+/// `decode` first, and `plist::Value`'s own derived `Drop` last. Both are walks
+/// this check has to make without, or it aborts on the depth it is measuring.
+/// A byte scan like JSON's cannot serve here: binary carries its nesting in the
+/// object table rather than in delimiters, so the depth is only visible once the
+/// reader has resolved it.
+fn nests_within_limit(value: &plist::Value) -> bool {
+    let mut pending = vec![(value, 1usize)];
+    while let Some((value, depth)) = pending.pop() {
+        // Only a container spends depth, so a leaf at the bottom of a document
+        // sitting exactly on the cap is still within it.
+        match value {
+            plist::Value::Dictionary(d) if depth <= MAX_DEPTH => {
+                pending.extend(d.values().map(|v| (v, depth + 1)))
+            }
+            plist::Value::Array(a) if depth <= MAX_DEPTH => {
+                pending.extend(a.iter().map(|v| (v, depth + 1)))
+            }
+            plist::Value::Dictionary(_) | plist::Value::Array(_) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Take a rejected document apart iteratively. Letting it fall out of scope would
+/// run the recursive `Drop` that the depth check just refused to run itself.
+fn dismantle(value: plist::Value) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            plist::Value::Dictionary(d) => pending.extend(d.into_iter().map(|(_, v)| v)),
+            plist::Value::Array(a) => pending.extend(a),
+            _ => {}
+        }
+    }
+}
+
 impl Format for Plist {
     const KIND: FormatKind = FormatKind::Plist;
     const PATH_SEP: &'static str = ":";
 
     fn parse(bytes: &[u8]) -> Option<Node<PlistLeaf>> {
         let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;
+        if !nests_within_limit(&value) {
+            dismantle(value);
+            return None;
+        }
         Plist::decode(&value)
     }
 
@@ -559,6 +603,25 @@ mod tests {
 
     fn pint(i: i64) -> plist::Value {
         plist::Value::Integer(i.into())
+    }
+
+    /// An XML plist nested `depth` dictionaries deep, as text -- building it as a
+    /// `plist::Value` would cost this test the recursion it is checking for.
+    fn deep_xml(depth: usize) -> String {
+        format!(
+            "<plist version=\"1.0\">{}<integer>1</integer>{}</plist>",
+            "<dict><key>a</key>".repeat(depth),
+            "</dict>".repeat(depth)
+        )
+    }
+
+    #[test]
+    fn nesting_is_capped_at_the_container_count() {
+        assert!(Plist::parse(deep_xml(MAX_DEPTH).as_bytes()).is_some());
+        assert!(Plist::parse(deep_xml(MAX_DEPTH + 1).as_bytes()).is_none());
+        // Deep enough that walking or dropping the tree would abort the process,
+        // so reaching this assertion at all is the thing being tested.
+        assert!(Plist::parse(deep_xml(50_000).as_bytes()).is_none());
     }
 
     /// A dictionary exercising every plist scalar type, including the exotic
