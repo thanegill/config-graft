@@ -145,7 +145,7 @@ impl ValueCodec for Plist {
                 plist::Value::Dictionary(dict)
             }
             Node::Array(a) => plist::Value::Array(a.iter().map(Plist::encode).collect()),
-            Node::Leaf(l) => leaf_to_plist(l),
+            Node::Leaf(l) => l.into(),
         }
     }
 }
@@ -536,16 +536,18 @@ fn floor_date(date: plist::Date) -> Option<plist::Date> {
     floored.map(plist::Date::from)
 }
 
-fn leaf_to_plist(plist_leaf: &PlistLeaf) -> plist::Value {
-    match plist_leaf {
-        PlistLeaf::Bool(b) => plist::Value::Boolean(*b),
-        PlistLeaf::Int(i) => plist::Value::Integer((*i).into()),
-        PlistLeaf::Uint(u) => plist::Value::Integer((*u).into()),
-        PlistLeaf::Float(f) => plist::Value::Real(*f),
-        PlistLeaf::String(s) => plist::Value::String(s.clone()),
-        PlistLeaf::Date(d) => plist::Value::Date(*d),
-        PlistLeaf::Data(bytes) => plist::Value::Data(bytes.clone()),
-        PlistLeaf::Uid(u) => plist::Value::Uid(plist::Uid::new(*u)),
+impl From<&PlistLeaf> for plist::Value {
+    fn from(plist_leaf: &PlistLeaf) -> plist::Value {
+        match plist_leaf {
+            PlistLeaf::Bool(b) => plist::Value::Boolean(*b),
+            PlistLeaf::Int(i) => plist::Value::Integer((*i).into()),
+            PlistLeaf::Uint(u) => plist::Value::Integer((*u).into()),
+            PlistLeaf::Float(f) => plist::Value::Real(*f),
+            PlistLeaf::String(s) => plist::Value::String(s.clone()),
+            PlistLeaf::Date(d) => plist::Value::Date(*d),
+            PlistLeaf::Data(bytes) => plist::Value::Data(bytes.clone()),
+            PlistLeaf::Uid(u) => plist::Value::Uid(plist::Uid::new(*u)),
+        }
     }
 }
 

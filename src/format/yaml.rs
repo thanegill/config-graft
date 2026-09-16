@@ -120,7 +120,7 @@ impl ValueCodec for Yaml {
                 saphyr::Yaml::Mapping(map)
             }
             Node::Array(a) => saphyr::Yaml::Sequence(a.iter().map(Yaml::encode).collect()),
-            Node::Leaf(l) => leaf_to_yaml(l),
+            Node::Leaf(l) => l.into(),
         }
     }
 }
@@ -171,13 +171,15 @@ fn write_canonical(node: &Node<YamlLeaf>) -> String {
     out
 }
 
-fn leaf_to_yaml(yaml_leaf: &YamlLeaf) -> saphyr::Yaml<'static> {
-    match yaml_leaf {
-        YamlLeaf::Null => saphyr::Yaml::Value(saphyr::Scalar::Null),
-        YamlLeaf::Bool(b) => saphyr::Yaml::Value(saphyr::Scalar::Boolean(*b)),
-        YamlLeaf::Int(i) => saphyr::Yaml::Value(saphyr::Scalar::Integer(*i)),
-        YamlLeaf::Float(f) => saphyr::Yaml::Value(saphyr::Scalar::FloatingPoint((*f).into())),
-        YamlLeaf::String(s) => yaml_string(s.clone()),
+impl From<&YamlLeaf> for saphyr::Yaml<'static> {
+    fn from(yaml_leaf: &YamlLeaf) -> saphyr::Yaml<'static> {
+        match yaml_leaf {
+            YamlLeaf::Null => saphyr::Yaml::Value(saphyr::Scalar::Null),
+            YamlLeaf::Bool(b) => saphyr::Yaml::Value(saphyr::Scalar::Boolean(*b)),
+            YamlLeaf::Int(i) => saphyr::Yaml::Value(saphyr::Scalar::Integer(*i)),
+            YamlLeaf::Float(f) => saphyr::Yaml::Value(saphyr::Scalar::FloatingPoint((*f).into())),
+            YamlLeaf::String(s) => yaml_string(s.clone()),
+        }
     }
 }
 

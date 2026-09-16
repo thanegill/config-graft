@@ -98,7 +98,7 @@ impl ValueCodec for Toml {
             // Maps become real `[section]` tables so canonical output is idiomatic.
             Node::Map(m) => Item::Table(encode_table(m)),
             Node::Array(a) => Item::Value(Value::Array(encode_array(a))),
-            Node::Leaf(l) => Item::Value(leaf_to_value(l)),
+            Node::Leaf(l) => Item::Value(l.into()),
         }
     }
 }
@@ -214,17 +214,19 @@ pub(super) fn node_to_value(node: &Node<TomlLeaf>) -> Value {
             Value::InlineTable(it)
         }
         Node::Array(a) => Value::Array(encode_array(a)),
-        Node::Leaf(l) => leaf_to_value(l),
+        Node::Leaf(l) => l.into(),
     }
 }
 
-fn leaf_to_value(toml_leaf: &TomlLeaf) -> Value {
-    match toml_leaf {
-        TomlLeaf::Bool(b) => Value::from(*b),
-        TomlLeaf::Int(i) => Value::from(*i),
-        TomlLeaf::Float(f) => Value::from(*f),
-        TomlLeaf::String(s) => Value::from(s.clone()),
-        TomlLeaf::Datetime(d) => Value::from(*d),
+impl From<&TomlLeaf> for Value {
+    fn from(toml_leaf: &TomlLeaf) -> Value {
+        match toml_leaf {
+            TomlLeaf::Bool(b) => Value::from(*b),
+            TomlLeaf::Int(i) => Value::from(*i),
+            TomlLeaf::Float(f) => Value::from(*f),
+            TomlLeaf::String(s) => Value::from(s.clone()),
+            TomlLeaf::Datetime(d) => Value::from(*d),
+        }
     }
 }
 
