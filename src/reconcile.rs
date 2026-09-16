@@ -100,17 +100,17 @@ impl std::ops::Deref for KeyPath {
 /// How a DESIRED array combines with a TARGET array during the deep-merge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum ArrayStrategy {
-    /// DESIRED's array replaces TARGET's wholesale (atomic; the default).
+    /// DESIRED's array replaces TARGET's wholesale (atomic).
     Replace,
     /// Append DESIRED's elements onto TARGET's (order preserved, duplicates kept).
     Concat,
     /// Union of both arrays, ignoring order and dropping duplicates.
     Set,
-    /// Three-way merge against BASE: keep elements present on either side, prune
-    /// a BASE element dropped from DESIRED (unless the user removed it from TARGET
-    /// first), and order the survivors move-aware so a reordering on either side
-    /// is preserved (via a generalized topological sort). Membership by value;
-    /// duplicates collapse.
+    /// Three-way merge against BASE (the default): keep elements present on either
+    /// side, prune a BASE element dropped from DESIRED (unless the user removed it
+    /// from TARGET first), and order the survivors move-aware so a reordering on
+    /// either side is preserved (via a generalized topological sort). Membership by
+    /// value; duplicates collapse.
     Merge,
 }
 
