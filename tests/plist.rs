@@ -1303,6 +1303,50 @@ fn an_xml_target_opening_with_a_comment_can_still_carry_a_byte_xml_cannot_hold()
 }
 
 #[test]
+fn a_binary_target_is_named_as_the_reason_a_refused_value_could_not_carry() {
+    // The refusal is the same either way, but the reason is not: a user whose file
+    // is XML needs to see that its opening bytes are what decided the run.
+    let dir = tempfile::tempdir().unwrap();
+    let desired = dir.path().join("desired.plist");
+    let esc = char::from(27u8);
+
+    pdict(vec![(
+        "NSUserKeyEquivalents",
+        pdict(vec![(
+            &format!("{esc}Window")[..],
+            plist::Value::String("@~n".into()),
+        )]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let binary = dir.path().join("binary.plist");
+    pdict(vec![("b", pint(1))]).to_file_binary(&binary).unwrap();
+    let err = stderr_of(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        binary.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert!(
+        err.contains("binary plist"),
+        "the binary target went unnamed: {err}"
+    );
+
+    // A first apply has nothing to carry for a reason of its own, so it says
+    // nothing about the bytes on disk.
+    let absent = dir.path().join("absent.plist");
+    let err = stderr_of(&["plist", absent.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("U+001B"), "got: {err}");
+    assert!(
+        !err.contains("not recognized") && !err.contains("binary plist"),
+        "an absent target was blamed on its contents: {err}"
+    );
+}
+
+#[test]
 fn a_byte_xml_cannot_carry_that_is_passed_through_is_reported() {
     // Passing a byte through writes XML a conforming parser rejects -- a deliberate
     // trade, since refusing broke every activation, but not a silent one.

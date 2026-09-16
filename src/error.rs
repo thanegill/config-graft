@@ -1,6 +1,7 @@
 //! Typed errors and the process outcome, replacing stringly-typed results and
 //! magic exit codes.
 
+use crate::format::plist::CurrentBytes;
 use crate::format::FormatKind;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -51,8 +52,13 @@ pub enum Error {
     PlistSerialize(plist::Error),
     /// A value at `path` holds a character XML 1.0 cannot represent, so writing
     /// the target as XML would produce a file no conforming parser can read. The
-    /// write is refused; `--plist-binary` carries the value as-is.
-    PlistXmlUnrepresentable { path: String, character: char },
+    /// write is refused; `--plist-format binary` carries the value as-is.
+    PlistXmlUnrepresentable {
+        path: String,
+        character: char,
+        /// What the target held, so the refusal can say why nothing carried over.
+        current: CurrentBytes,
+    },
     /// A date at `path` is so far from the epoch that flooring it overflows, so
     /// the XML this run would write cannot hold it. Unreachable through the plist
     /// parsers; refused rather than emitted as the fractional date an XML parser
@@ -163,12 +169,35 @@ impl fmt::Display for Error {
                 kind.mapping_name()
             ),
             Error::PlistSerialize(e) => write!(f, "serializing plist: {e}"),
-            Error::PlistXmlUnrepresentable { path, character } => write!(
-                f,
-                "`{path}` contains U+{:04X}, which XML 1.0 cannot represent at all, \
-                 so this run cannot write XML; pass --plist-format binary to keep the value",
-                *character as u32
-            ),
+            Error::PlistXmlUnrepresentable {
+                path,
+                character,
+                current,
+            } => {
+                write!(
+                    f,
+                    "`{path}` contains U+{:04X}, which XML 1.0 cannot represent at all, \
+                     so this run cannot write XML; pass --plist-format binary to keep the value",
+                    *character as u32
+                )?;
+                // A value the target already holds is passed through instead of
+                // refused, so say when the target was in no position to license one.
+                // Nothing to say for an absent target (it holds nothing) or an XML
+                // one (it holds this value nowhere the result keeps).
+                match current {
+                    CurrentBytes::Binary => f.write_str(
+                        ". The target is a binary plist, so nothing it holds counts as \
+                         already written -- drop --plist-format xml to keep it binary",
+                    ),
+                    CurrentBytes::Unrecognized => f.write_str(
+                        ". The target was not recognized as an XML plist, so nothing it \
+                         holds counts as already written; a comment or processing \
+                         instruction ahead of its `<?xml` declaration is recognized, \
+                         anything else is not",
+                    ),
+                    CurrentBytes::Absent | CurrentBytes::Xml => Ok(()),
+                }
+            }
             Error::PlistDateOutOfRange { path } => write!(
                 f,
                 "the date at `{path}` falls outside the years an XML plist can \

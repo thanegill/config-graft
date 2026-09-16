@@ -235,8 +235,9 @@ impl Format for Plist {
         // own copy may be pruned, which would leave the byte in the file only
         // because we just wrote it -- and only when the target is already XML, since
         // rewriting a binary plist emits every byte anew.
+        let current = CurrentBytes::classify(current);
         let mut carried = Carried::default();
-        if CurrentBytes::classify(current) == CurrentBytes::Xml {
+        if current == CurrentBytes::Xml {
             let mut in_target = Represented::default();
             let mut in_result = Represented::default();
             collect_represented(target, &mut KeyPath::new(), &mut in_target);
@@ -244,7 +245,7 @@ impl Format for Plist {
             carried = carried_over(&in_target, &in_result);
         }
         let mut kept = Vec::new();
-        check_xml_representable(result, &carried, &mut KeyPath::new(), &mut kept)?;
+        check_xml_representable(result, &carried, current, &mut KeyPath::new(), &mut kept)?;
         Ok(kept)
     }
 
@@ -379,7 +380,7 @@ fn xml_unrepresentable(text: &str) -> Option<char> {
 /// `Absent` and `Unrecognized` are kept apart even though both write XML and carry
 /// nothing: only one of them is a statement about the file's contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CurrentBytes {
+pub(crate) enum CurrentBytes {
     /// Nothing to overwrite: the file is missing, empty, or entirely whitespace.
     Absent,
     Binary,
@@ -501,6 +502,7 @@ fn carried_over(target: &Represented, result: &Represented) -> Carried {
 fn check_xml_representable(
     node: &Node<PlistLeaf>,
     carried: &Carried,
+    current: CurrentBytes,
     path: &mut KeyPath,
     kept: &mut Vec<Warning<PlistLeaf>>,
 ) -> Result<(), Error> {
@@ -528,6 +530,7 @@ fn check_xml_representable(
         Err(Error::PlistXmlUnrepresentable {
             path: path.render(Plist::PATH_SEP),
             character,
+            current,
         })
     };
     match node {
@@ -535,13 +538,13 @@ fn check_xml_representable(
             for (key, value) in m {
                 path.push(key.clone());
                 judge(key, true, path, kept)?;
-                check_xml_representable(value, carried, path, kept)?;
+                check_xml_representable(value, carried, current, path, kept)?;
                 path.pop();
             }
         }
         Node::Array(a) => {
             for element in a {
-                check_xml_representable(element, carried, path, kept)?;
+                check_xml_representable(element, carried, current, path, kept)?;
             }
         }
         Node::Leaf(PlistLeaf::String(text)) => judge(text, false, path, kept)?,
@@ -970,6 +973,32 @@ mod tests {
             CurrentBytes::classify(b"<html>"),
             CurrentBytes::Unrecognized
         );
+    }
+
+    #[test]
+    fn the_refusal_blames_the_target_only_when_the_target_is_to_blame() {
+        let refusal = |current| {
+            Error::PlistXmlUnrepresentable {
+                path: "k".to_string(),
+                character: '\u{1b}',
+                current,
+            }
+            .to_string()
+        };
+
+        // `Unrecognized` is not reachable through a run today -- an unreadable
+        // TARGET is refused before the write is judged -- so this is the only
+        // place its wording is exercised.
+        assert!(refusal(CurrentBytes::Unrecognized).contains("not recognized as an XML plist"));
+        assert!(refusal(CurrentBytes::Binary).contains("binary plist"));
+        for blameless in [CurrentBytes::Absent, CurrentBytes::Xml] {
+            let message = refusal(blameless);
+            assert!(message.contains("U+001B"), "got: {message}");
+            assert!(
+                !message.contains("not recognized") && !message.contains("binary plist"),
+                "{blameless:?} was blamed for the value: {message}"
+            );
+        }
     }
 
     #[test]
