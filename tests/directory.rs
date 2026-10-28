@@ -44,6 +44,25 @@ fn first_apply_creates_tree() {
 }
 
 #[test]
+fn base_given_both_ways_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&desired.join("c.txt"), "top");
+    let desired = desired.to_str().unwrap();
+
+    let out = graft(&[
+        "--base",
+        desired,
+        target.to_str().unwrap(),
+        desired,
+        desired,
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!target.exists(), "a refused run created TARGET");
+}
+
+#[test]
 fn app_owned_file_is_preserved_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");
