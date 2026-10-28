@@ -4,8 +4,8 @@
 //!
 //! Reconciliation is homogeneous -- one format governs TARGET, DESIRED, BASE, and
 //! the output -- so there is never a cross-format conversion. Each format lives in
-//! its own module ([`json`], [`plist`], [`yaml`]); this module holds the shared
-//! [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] selector. The
+//! its own module ([`json`], [`plist`], [`yaml`], [`toml`]); this module holds the
+//! shared [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] tag. The
 //! [`directory`] module is the odd one out: the `directory` subcommand reconciles a
 //! whole tree, which has no single byte stream, so it does **not** implement the
 //! byte-oriented [`Format`] trait -- it provides its own tree reader/writer and
@@ -31,22 +31,21 @@ pub use plist::Plist;
 pub use toml::Toml;
 pub use yaml::Yaml;
 
-/// Which file format a run uses. Selected by the subcommand `main` dispatches on;
-/// each [`Format`] reports its own `KIND` so it can hand back format-specific
-/// errors. The behavior lives in the [`Format`] trait.
+/// Which file format a run uses, as a tag for diagnostics; the behavior lives in
+/// [`Format`], whose `KIND` reports this tag so an error can name the format.
 #[derive(Clone, Copy, Debug)]
 pub enum FormatKind {
     Json,
     Plist,
     Yaml,
     Toml,
-    /// Reconcile a directory *tree* rather than a single file. Not a byte-oriented
-    /// [`Format`]; `main` dispatches it to a separate directory backend.
+    /// A directory *tree* rather than a single file. Not a byte-oriented
+    /// [`Format`]; it tags the directory backend's errors.
     Directory,
 }
 
 /// How many containers a document may nest. The bound is the engine's, not any
-/// one codec's -- `deep_merge`, `compact`, `--diff` and `encode` all recurse over
+/// one codec's -- `deep_merge`, `Display`, `--diff` and `encode` all recurse over
 /// [`Node`] -- so a codec whose parser caps nothing enforces this one instead, and
 /// refuses a deeper document rather than letting the walk abort the process. An
 /// order of magnitude below where a run actually runs out of stack (measured in
@@ -93,7 +92,7 @@ impl FormatKind {
 
 /// A format's I/O boundary: parse bytes into a `Node` of this format's leaf type
 /// and serialize one back to text. Not object-safe (the node type varies per
-/// format), so dispatch is static -- `main` monomorphizes `run::<F>()` per format.
+/// format), so dispatch is static: `main` calls `ByteBackend::<F>::run` per format.
 pub trait Format: ValueCodec {
     /// The `FormatKind` this format corresponds to (for format-specific errors).
     const KIND: FormatKind;
@@ -135,9 +134,9 @@ pub trait Format: ValueCodec {
     ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
         Ok(None)
     }
-    /// Serialize `node` to bytes. `current` is the target's existing on-disk bytes
-    /// (used by YAML to preserve comments; ignored by JSON/plist). Output is bytes
-    /// (not text) so plist can write binary. See [`WriteOpts`] for per-format prefs.
+    /// Serialize `node` to bytes, so plist can write binary. `current` is the
+    /// target's existing on-disk bytes, which YAML and TOML edit in place to keep
+    /// comments and JSON and plist ignore. [`WriteOpts`] holds per-format prefs.
     fn serialize(
         node: &Node<Self::Leaf>,
         current: &[u8],
@@ -158,16 +157,15 @@ pub struct Normalization<L: Leaf> {
 /// but not an `original` can no longer both survive, since array membership is a
 /// set -- but whether that actually loses anything depends on the array strategy and
 /// on whether the array is managed at all, which only the run knows. So
-/// normalization reports what it rewrote and
-/// [`crate::backend::Backend::run`] decides. `because` completes the refusal message
-/// with the format's way out.
+/// normalization reports what it rewrote and [`crate::backend::Backend::run`]
+/// decides whether to warn.
 pub struct Normalized<L: Leaf> {
     pub path: KeyPath,
     pub original: Node<L>,
     pub value: Node<L>,
-    /// Why the value could not be carried as it stood, completing both the
-    /// warning ("... was read as X because <because>") and, when the conflation
-    /// costs something, the refusal.
+    /// Why the value could not be carried as it stood, completing the normalization
+    /// warning (`... was read as X because <because>`) and, when the conflation
+    /// costs something, the collapse warning.
     pub because: &'static str,
 }
 

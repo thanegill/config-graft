@@ -304,13 +304,12 @@ impl Format for Plist {
     }
 }
 
-/// Completes both the refusal and the pass-through report for a byte XML cannot
-/// carry.
+/// Completes the pass-through report for a byte XML cannot carry.
 const XML_UNREPRESENTABLE_REMEDY: &str =
     "pass --plist-format binary (or set `binary = true`) to store it properly";
 
-/// Why an XML run cannot keep a date as it stands -- the tail of both the warning
-/// and, when the floor costs an element, the refusal.
+/// Why an XML run cannot keep a date as it stands -- the tail of the normalization
+/// warning and of the collapse warning.
 const XML_DATE_RESOLUTION: &str =
     "an XML plist carries dates at one-second resolution; pass --plist-format \
      binary to keep the full value";
@@ -556,9 +555,9 @@ fn check_xml_representable(
 }
 
 /// A date as a diagnostic can print it. `to_xml_format` **panics** outside years
-/// 0..=9999, and rendering happens on every path -- including `--plist-binary`,
-/// which is allowed to carry such a date -- so the out-of-range rendering falls back
-/// to seconds from the epoch rather than aborting the run.
+/// 0..=9999, and rendering happens on every path -- including a binary write,
+/// which is allowed to carry such a date -- so the out-of-range rendering falls
+/// back to seconds from the epoch rather than aborting the run.
 fn render_date(date: plist::Date) -> String {
     if date_valid_in_xml(date) {
         return date.to_xml_format();
