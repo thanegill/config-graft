@@ -27,14 +27,14 @@ pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug + std::fmt::Display {
 
 /// Canonical `f64` bit pattern for the float-carrying leaf types' `Eq`/`Hash`.
 ///
-/// Maps `-0.0` to `+0.0`, so signed zeros compare equal, and every `NaN` to one
-/// quiet-NaN pattern, so a `NaN` leaf equals itself and hashes stably -- which a
-/// sound `Eq` and `HashSet` dedup both need. Every other value passes through.
+/// Maps every `NaN` to one quiet-NaN pattern, so a `NaN` leaf equals itself and
+/// hashes stably -- which a sound `Eq` and `HashSet` dedup both need. Every other
+/// value keeps its bits, so `-0.0` and `0.0` differ: the sign survives into
+/// anything that reads the file, so a DESIRED `-0.0` must be able to replace a
+/// `0.0`.
 pub fn canonical_float_bits(f: f64) -> u64 {
     if f.is_nan() {
         0x7ff8_0000_0000_0000
-    } else if f == 0.0 {
-        0.0_f64.to_bits()
     } else {
         f.to_bits()
     }

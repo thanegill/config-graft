@@ -4,7 +4,7 @@ use std::fs;
 use std::process::Command;
 
 mod common;
-use common::{run, stderr_of, BIN};
+use common::{applies_then_settles, run, stderr_of, BIN};
 
 #[test]
 fn creates_missing_target_with_parents() {
@@ -1484,5 +1484,71 @@ fn indent_is_capped_at_the_widest_the_writer_takes() {
     assert!(
         stderr.contains("indent must be at most 255, got 256"),
         "got: {stderr}"
+    );
+}
+
+#[test]
+fn a_declared_negative_zero_replaces_zero() {
+    let written = applies_then_settles(
+        "json",
+        br#"{"z":0.0,"i":0,"app":true}"#,
+        br#"{"z":-0.0,"i":-0}"#,
+        &[],
+        "~ i: 0 => -0\n~ z: 0.0 => -0.0\n",
+    );
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "{\n  \"z\": -0.0,\n  \"i\": -0,\n  \"app\": true\n}\n"
+    );
+}
+
+#[test]
+fn zero_and_negative_zero_are_two_array_members() {
+    let written = applies_then_settles(
+        "json",
+        br#"{"a":[0.0]}"#,
+        br#"{"a":[-0.0]}"#,
+        &["--array-strategy", "set"],
+        "~ a: [0.0] => [0.0,-0.0]\n",
+    );
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "{\n  \"a\": [\n    0.0,\n    -0.0\n  ]\n}\n"
+    );
+}
+
+#[test]
+fn a_managed_negative_zero_the_app_unsigned_is_not_pruned() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    fs::write(&target, r#"{"z":0.0}"#).unwrap();
+    fs::write(&desired, "{}").unwrap();
+    fs::write(&base, r#"{"z":-0.0}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "{\n  \"z\": 0.0\n}\n");
+}
+
+#[test]
+fn an_unmanaged_negative_zero_keeps_its_sign() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"i":-0,"f":-0.0,"e":-0e5}"#).unwrap();
+    fs::write(&desired, r#"{"x":1}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "{\n  \"i\": -0,\n  \"f\": -0.0,\n  \"e\": -0e5,\n  \"x\": 1\n}\n"
     );
 }
