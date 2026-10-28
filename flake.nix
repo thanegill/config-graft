@@ -13,12 +13,13 @@
         "x86_64-linux"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      cargoPackage = (nixpkgs.lib.importTOML ./Cargo.toml).package;
     in
     {
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
-          pname = "config-graft";
-          version = "0.1.1";
+          pname = cargoPackage.name;
+          inherit (cargoPackage) version;
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
