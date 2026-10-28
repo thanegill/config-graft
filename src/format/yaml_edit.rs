@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, Yaml, YamlData};
 
 use super::yaml::YamlLeaf;
-use super::{ValueCodec, Yaml as YamlCodec};
+use super::{Format, ValueCodec, Yaml as YamlCodec};
 use crate::error::Error;
 use crate::value::Node;
 
@@ -32,12 +32,12 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
     let target_map = target.as_map().ok_or(Error::YamlUnsafe)?;
 
     let marked = MarkedYaml::load_from_str(text).map_err(|_| Error::YamlUnsafe)?;
-    let [root] = marked.as_slice() else {
-        return Err(Error::YamlUnsafe);
-    };
-
     let mut edits = Vec::new();
-    diff_map(target_map, result_map, root, text, &mut edits)?;
+    match marked.as_slice() {
+        [root] if !root.data.is_null() => diff_map(target_map, result_map, root, text, &mut edits)?,
+        [] | [_] => edits.extend(append_to_empty(text, result_map)),
+        _ => return Err(Error::YamlUnsafe),
+    }
 
     // Apply right-to-left so earlier byte offsets stay valid.
     edits.sort_by(|a, b| b.start.cmp(&a.start).then(b.end.cmp(&a.end)));
@@ -60,13 +60,31 @@ struct Edit {
     text: String,
 }
 
-/// Parse a single YAML document into a `Node` (same rules as `format::read`).
+/// Parse YAML text into a `Node` by the same rules as reading a file.
 fn parse_node(text: &str) -> Option<Node<YamlLeaf>> {
-    let docs = Yaml::load_from_str(text).ok()?;
-    let [doc] = docs.as_slice() else {
+    YamlCodec::parse(text.as_bytes())
+}
+
+/// The edit that appends every entry of `rmap` to `text`, a target holding no
+/// node (comments only, or a bare `---`); `None` when `rmap` is empty.
+fn append_to_empty(text: &str, rmap: &IndexMap<String, Node<YamlLeaf>>) -> Option<Edit> {
+    if rmap.is_empty() {
         return None;
+    }
+    let mut insert = if text.ends_with('\n') {
+        String::new()
+    } else {
+        String::from("\n")
     };
-    YamlCodec::decode(doc)
+    for (key, value) in rmap {
+        insert.push_str(&emit_entry(key, value, 0));
+        insert.push('\n');
+    }
+    Some(Edit {
+        start: text.len(),
+        end: text.len(),
+        text: insert,
+    })
 }
 
 /// Ordered (key, key-node, value-node) entries of a marked mapping, or `None` if

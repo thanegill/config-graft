@@ -270,8 +270,9 @@ fn check_reports_pending_yaml_change_and_writes_nothing() {
 
 // ----- YAML safety / refusal (never corrupt) -----
 
-/// Assert applying `desired` onto `target` exits 1 and leaves the file unchanged.
-fn yaml_refuses(target_text: &str, desired_text: &str) {
+/// Assert applying `desired` onto `target` exits 1 and leaves the file
+/// unchanged, returning the run's stderr.
+fn yaml_refuses(target_text: &str, desired_text: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.yaml");
     let desired = dir.path().join("desired.yaml");
@@ -284,6 +285,7 @@ fn yaml_refuses(target_text: &str, desired_text: &str) {
         target_text,
         "target must be left byte-unchanged on refusal"
     );
+    String::from_utf8(out.stderr).unwrap()
 }
 
 #[test]
@@ -352,6 +354,103 @@ fn canonical_first_apply_then_preserves_user_comments() {
             .success()
     );
     assert_eq!(fs::read_to_string(&target).unwrap(), "a: 9\nb: 2  # mine\n");
+}
+
+#[test]
+fn comment_only_target_keeps_its_comments() {
+    yaml_golden("# header\n", "a: 1\n", None, "# header\na: 1\n");
+    yaml_golden("# header", "a: 1\n", None, "# header\na: 1\n");
+    yaml_golden(
+        "# header\n\n# more\n",
+        "sec:\n  a: 1\nb: 2\n",
+        None,
+        "# header\n\n# more\nsec:\n  a: 1\nb: 2\n",
+    );
+}
+
+#[test]
+fn bare_document_marker_target_is_an_empty_mapping() {
+    yaml_golden("---\n", "a: 1\n", None, "---\na: 1\n");
+    yaml_golden(
+        "# a\n--- # b\n# c\n",
+        "a: 1\n",
+        None,
+        "# a\n--- # b\n# c\na: 1\n",
+    );
+}
+
+#[test]
+fn comment_only_target_is_unchanged_by_an_empty_desired() {
+    yaml_golden("# header\n", "{}\n", None, "# header\n");
+}
+
+#[test]
+fn null_root_target_is_still_not_a_mapping() {
+    for text in ["null\n", "--- ~\n", "---\n...\n"] {
+        let err = yaml_refuses(text, "a: 1\n");
+        assert!(err.contains("its root is not a mapping"), "{text:?}: {err}");
+    }
+}
+
+#[test]
+fn comment_only_target_reapply_is_a_no_op() {
+    for text in ["# header\n", "---\n"] {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.yaml");
+        let desired = dir.path().join("desired.yaml");
+        fs::write(&target, text).unwrap();
+        fs::write(&desired, "a: 1\n").unwrap();
+        let args = [target.to_str().unwrap(), desired.to_str().unwrap()];
+        assert!(run(&["yaml", args[0], args[1]]).status.success());
+        let check = run(&["yaml", "--check", args[0], args[1]]);
+        assert_eq!(check.status.code(), Some(0), "{text:?}: {check:?}");
+    }
+}
+
+#[test]
+fn comment_only_desired_prunes_managed_keys() {
+    yaml_golden(
+        "a: 1\napp: 2\n",
+        "# nothing managed\n",
+        Some("a: 1\n"),
+        "app: 2\n",
+    );
+}
+
+#[test]
+fn prune_of_every_key_keeps_the_comments() {
+    for desired in ["{}\n", "---\n", "# nothing managed\n"] {
+        yaml_golden("# h\na: 1\n", desired, Some("a: 1\n"), "# h\n");
+        yaml_golden("a: 1\n# tail\n", desired, Some("a: 1\n"), "# tail\n");
+        yaml_golden("---\na: 1\n", desired, Some("a: 1\n"), "---\n");
+    }
+}
+
+#[test]
+fn whitespace_only_desired_is_still_absent() {
+    let err = yaml_refuses("a: 1\n", " \n\n");
+    assert!(err.contains("does not exist or is empty"), "got: {err}");
+}
+
+#[test]
+fn comment_only_desired_that_would_empty_the_target_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let base = dir.path().join("base.yaml");
+    fs::write(&target, "a: 1\n").unwrap();
+    fs::write(&desired, "# nothing managed\n").unwrap();
+    fs::write(&base, "a: 1\n").unwrap();
+    let out = run(&[
+        "yaml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot safely edit this YAML"), "got: {err}");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "a: 1\n");
 }
 
 #[test]
