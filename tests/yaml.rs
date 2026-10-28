@@ -426,3 +426,58 @@ fn a_deeply_nested_target_is_refused_not_aborted() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read_to_string(&target).unwrap(), deep);
 }
+
+#[test]
+fn a_first_apply_keeps_every_float_a_float() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    fs::write(
+        &desired,
+        "a: 1.0\nb: .inf\nc: -.inf\nd: .nan\ne: -0.0\nf: 2.5\ng:\n  - 1.0\n  - 1e300\n",
+    )
+    .unwrap();
+
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "a: 1.0\nb: .inf\nc: -.inf\nd: .nan\ne: -0.0\nf: 2.5\ng:\n  - 1.0\n  - 1.0e+300\n"
+    );
+}
+
+#[test]
+fn an_in_place_edit_writes_a_float_as_a_float() {
+    yaml_golden(
+        "a: 2.0  # keep\nb: 2.5\nz: 1\n",
+        "a: 1.0\nb: .inf\nc: 1e-7\nd:\n  - 1.0\n  - -0.0\n",
+        None,
+        "a: 1.0  # keep\nb: .inf\nz: 1\nc: 1.0e-7\nd:\n  - 1.0\n  - -0.0\n",
+    );
+}
+
+#[test]
+fn a_diff_shows_a_float_as_it_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    fs::write(&target, "a: 1.5\nb: 2.5\n").unwrap();
+    fs::write(&desired, "a: .inf\nb: 1e-7\n").unwrap();
+
+    let out = run(&[
+        "yaml",
+        "--diff",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "~ a: 1.5 => .inf\n~ b: 2.5 => 1.0e-7\n"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "a: .inf\nb: 1.0e-7\n");
+}

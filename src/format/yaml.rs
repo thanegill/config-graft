@@ -66,7 +66,7 @@ impl fmt::Display for YamlLeaf {
             YamlLeaf::Null => f.write_str("null"),
             YamlLeaf::Bool(b) => write!(f, "{b}"),
             YamlLeaf::Int(i) => write!(f, "{i}"),
-            YamlLeaf::Float(v) => f.write_str(&render_f64(*v)),
+            YamlLeaf::Float(v) => f.write_str(&yaml_float(*v)),
             YamlLeaf::String(s) => f.write_str(&quote(s)),
         }
     }
@@ -179,9 +179,40 @@ impl From<&YamlLeaf> for saphyr::Yaml<'static> {
             YamlLeaf::Null => saphyr::Yaml::Value(saphyr::Scalar::Null),
             YamlLeaf::Bool(b) => saphyr::Yaml::Value(saphyr::Scalar::Boolean(*b)),
             YamlLeaf::Int(i) => saphyr::Yaml::Value(saphyr::Scalar::Integer(*i)),
-            YamlLeaf::Float(f) => saphyr::Yaml::Value(saphyr::Scalar::FloatingPoint((*f).into())),
+            YamlLeaf::Float(f) => {
+                saphyr::Yaml::Representation(yaml_float(*f), saphyr::ScalarStyle::Plain, None)
+            }
             YamlLeaf::String(s) => yaml_string(s.clone()),
         }
+    }
+}
+
+/// A float spelled so any YAML reader takes it back as the same float: the
+/// shortest round-tripping digits with a `.` in the mantissa and, when there is
+/// an exponent, an explicit sign on it, both of which a YAML 1.1 reader (PyYAML,
+/// Psych) needs to see a float; or `.inf`, `-.inf` and `.nan`. saphyr's emitter
+/// writes a float through Rust's `Display`, which spells `1.0` as `1` and `-0.0`
+/// as `-0` (integers on the way back in) and infinity as `inf` (a string).
+///
+/// It is emitted as an unresolved representation, which `decode` refuses: an
+/// encoded tree is only ever read back as text.
+fn yaml_float(f: f64) -> Cow<'static, str> {
+    if f.is_nan() {
+        return Cow::Borrowed(".nan");
+    }
+    if f.is_infinite() {
+        return Cow::Borrowed(if f.is_sign_positive() {
+            ".inf"
+        } else {
+            "-.inf"
+        });
+    }
+    let shortest = render_f64(f);
+    match shortest.split_once('e') {
+        Some((mantissa, exponent)) if !mantissa.contains('.') => {
+            Cow::Owned(format!("{mantissa}.0e{exponent}"))
+        }
+        _ => Cow::Owned(shortest),
     }
 }
 
@@ -300,5 +331,145 @@ mod tests {
         // ... without making anything else equal.
         assert_ne!(nan, YamlLeaf::Float(0.0));
         assert_ne!(YamlLeaf::Float(1.0), YamlLeaf::Float(2.0));
+    }
+
+    fn float_document(value: f64) -> Node<YamlLeaf> {
+        Node::Map(IndexMap::from([(
+            "a".to_string(),
+            Node::Leaf(YamlLeaf::Float(value)),
+        )]))
+    }
+
+    /// What `value` reads back as once emitted canonically, with the text emitted.
+    fn float_round_trip(value: f64) -> (String, Option<YamlLeaf>) {
+        let text = write_canonical(&float_document(value));
+        let back = yaml_to_node(&text).map(|node| leaf(&node, "a"));
+        (text, back)
+    }
+
+    /// Whether `text` is in the subset of YAML 1.1's float pattern that
+    /// `yaml_float` emits: a `.` is required, and an exponent must carry a sign.
+    /// Not a general validator -- it also rejects valid 1.1 floats such as `+1.0`,
+    /// `1.0E+5` or `.5`, none of which is emitted.
+    fn is_a_yaml_1_1_float(text: &str) -> bool {
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let unsigned = text.strip_prefix('-').unwrap_or(text);
+        let (mantissa, exponent) = match unsigned.split_once('e') {
+            Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+            None => (unsigned, None),
+        };
+        let Some((whole, fraction)) = mantissa.split_once('.') else {
+            return false;
+        };
+        let signed_exponent =
+            exponent.is_none_or(|e| e.strip_prefix(['+', '-']).is_some_and(digits));
+        digits(whole) && (fraction.is_empty() || digits(fraction)) && signed_exponent
+    }
+
+    fn assert_float_round_trips(value: f64) {
+        match float_round_trip(value) {
+            (text, Some(YamlLeaf::Float(back))) => {
+                assert_eq!(
+                    back.to_bits(),
+                    value.to_bits(),
+                    "{value:?} was emitted as {text:?}"
+                );
+                let spelled = text.trim_start_matches("a: ").trim_end();
+                assert!(
+                    !value.is_finite() || is_a_yaml_1_1_float(spelled),
+                    "{value:?} was emitted as {text:?}, not a YAML 1.1 float"
+                );
+            }
+            (text, other) => panic!("{value:?} was emitted as {text:?} and read back as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_float_is_spelled_as_a_float() {
+        let node = Node::Map(IndexMap::from(
+            [
+                ("one", 1.0),
+                ("negative_zero", -0.0),
+                ("big", 1e300),
+                ("small", 1.5e-7),
+                ("tiny", 1e-7),
+                ("positive_infinity", f64::INFINITY),
+                ("negative_infinity", f64::NEG_INFINITY),
+                ("not_a_number", f64::NAN),
+            ]
+            .map(|(key, value)| (key.to_string(), Node::Leaf(YamlLeaf::Float(value)))),
+        ));
+        assert_eq!(
+            write_canonical(&node),
+            "one: 1.0\nnegative_zero: -0.0\nbig: 1.0e+300\nsmall: 1.5e-7\ntiny: 1.0e-7\n\
+             positive_infinity: .inf\nnegative_infinity: -.inf\nnot_a_number: .nan\n"
+        );
+    }
+
+    #[test]
+    fn a_float_reads_back_as_the_same_float() {
+        for value in [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.5,
+            0.1,
+            1e15,
+            1e16,
+            1e21,
+            -1e-300,
+            5e-324,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_float_round_trips(value);
+        }
+        let (text, back) = float_round_trip(f64::NAN);
+        assert!(
+            matches!(back, Some(YamlLeaf::Float(f)) if f.is_nan()),
+            "NaN was emitted as {text:?} and read back as {back:?}"
+        );
+    }
+
+    /// The same over random bit patterns across the whole `f64` range. These
+    /// almost never have a single significant digit, so the dot rule is covered
+    /// by the decimal grid below instead. Deterministic, so a failure reproduces.
+    #[test]
+    fn a_float_reads_back_as_the_same_float_across_the_range() {
+        // xorshift64*, so the sample is fixed without pulling in an rng crate.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut sampled = 0;
+        while sampled < 20_000 {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let value = f64::from_bits(state.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            if value.is_nan() {
+                continue;
+            }
+            assert_float_round_trips(value);
+            sampled += 1;
+        }
+    }
+
+    /// Every one-digit mantissa at every decimal exponent: the shapes ryu writes
+    /// without a `.`, and its switch between plain and exponent notation.
+    #[test]
+    fn a_one_digit_float_reads_back_as_the_same_float_at_every_exponent() {
+        let mut checked = 0;
+        for exponent in -324..=308 {
+            for digit in 1..=9 {
+                let value: f64 = format!("{digit}e{exponent}").parse().unwrap();
+                if value.is_finite() && value != 0.0 {
+                    assert_float_round_trips(value);
+                    assert_float_round_trips(-value);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 5_000, "only {checked} values checked");
     }
 }
