@@ -44,7 +44,9 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
 
     // Apply right-to-left so earlier byte offsets stay valid.
     edits.sort_by(|a, b| b.start.cmp(&a.start).then(b.end.cmp(&a.end)));
-    if edits.windows(2).any(|pair| pair[1].end > pair[0].start) {
+    if edits.iter().any(|e| e.start > e.end)
+        || edits.windows(2).any(|pair| pair[1].end > pair[0].start)
+    {
         return Err(Error::YamlUnsafe);
     }
     let mut out = text.to_string();
@@ -121,12 +123,19 @@ struct MarkedEntry<'a> {
     value: &'a MarkedYaml<'a>,
     value_start: usize,
     value_end: usize,
+    /// Where the entry's text ends: past its last line of content, including a
+    /// block scalar's trailing blank lines.
+    end: usize,
+    /// `end`, plus the comment lines after a block collection that are indented
+    /// under its key.
+    end_with_comments: usize,
 }
 
 /// Ordered entries of a marked mapping, or `None` if the node is not a
 /// string-keyed mapping or a marker lies outside the text.
 fn marked_entries<'a>(
     node: &'a MarkedYaml<'a>,
+    src: &str,
     offsets: &ByteOffsets,
 ) -> Option<Vec<MarkedEntry<'a>>> {
     let YamlData::Mapping(m) = &node.data else {
@@ -137,15 +146,156 @@ fn marked_entries<'a>(
         let YamlData::Value(Scalar::String(s)) = &k.data else {
             return None;
         };
+        let key_start = offsets.of(k.span.start)?;
+        let end = line_after(src, entry_content_end(k, v, src, offsets)?);
+        let end_with_comments = if is_block_collection(v, src, offsets)? {
+            past_indented_comments(src, key_start, end)
+        } else {
+            end
+        };
         out.push(MarkedEntry {
             key: s.to_string(),
-            key_start: offsets.of(k.span.start)?,
+            key_start,
             value: v,
             value_start: offsets.of(v.span.start)?,
             value_end: offsets.of(v.span.end)?,
+            end,
+            end_with_comments,
         });
     }
     Some(out)
+}
+
+/// Byte offset just past the last content of the entry `key: value`, or `None`
+/// if a marker lies outside the text.
+fn entry_content_end(
+    key: &MarkedYaml,
+    value: &MarkedYaml,
+    src: &str,
+    offsets: &ByteOffsets,
+) -> Option<usize> {
+    if is_empty_leaf(value) {
+        empty_value_end(key, value, src, offsets)
+    } else {
+        content_end(value, src, offsets)
+    }
+}
+
+/// Byte offset just past the last content of `node`, or `None` if a marker lies
+/// outside the text. A block collection's own span runs on to the next token,
+/// past any comments and blank lines in between, so its end is taken from its
+/// deepest last child instead. A flow collection's span stops just before its
+/// closing bracket, which is taken in.
+fn content_end(node: &MarkedYaml, src: &str, offsets: &ByteOffsets) -> Option<usize> {
+    let mut node = node;
+    loop {
+        let span_end = offsets.of(node.span.end)?;
+        if src[span_end..].starts_with(['}', ']']) {
+            return Some(span_end + 1);
+        }
+        node = match &node.data {
+            YamlData::Mapping(m) => match m.iter().next_back() {
+                Some((key, value)) if is_empty_leaf(value) => {
+                    return empty_value_end(key, value, src, offsets)
+                }
+                Some((_, value)) => value,
+                None => return Some(span_end),
+            },
+            YamlData::Sequence(items) => match items.last() {
+                Some(item) if is_empty_leaf(item) => {
+                    return Some(back_over_comments(src, offsets.of(item.span.end)?))
+                }
+                Some(item) => item,
+                None => return Some(span_end),
+            },
+            _ => return Some(span_end),
+        };
+    }
+}
+
+/// Byte offset just past the last token of the entry `key: value`, whose value
+/// has no text of its own (`k:`, `k: !!str`, `k: &a`, `? k`), or `None` if a
+/// marker lies outside the text. saphyr gives such a value an empty span. When
+/// the entry has its own `:` with nothing after it (`k:`, or a bare `:` line),
+/// the span sits on that `:`, which ends the entry. Otherwise it can sit at the
+/// next token, past comments, so it backs up over them but not above the key.
+fn empty_value_end(
+    key: &MarkedYaml,
+    value: &MarkedYaml,
+    src: &str,
+    offsets: &ByteOffsets,
+) -> Option<usize> {
+    let key_end = offsets.of(key.span.end)?;
+    let value_pos = offsets.of(value.span.end)?;
+    let mut rest = src[value_pos..].chars();
+    if rest.next() == Some(':') && rest.next().is_none_or(char::is_whitespace) {
+        return Some(value_pos + 1);
+    }
+    Some(key_end.max(back_over_comments(src, value_pos)))
+}
+
+/// Whether `node` is a scalar, tag or anchor with no text of its own.
+fn is_empty_leaf(node: &MarkedYaml) -> bool {
+    !matches!(node.data, YamlData::Mapping(_) | YamlData::Sequence(_))
+        && node.span.start == node.span.end
+}
+
+/// Whether `node` is a block mapping or sequence, or `None` if a marker lies
+/// outside the text.
+fn is_block_collection(node: &MarkedYaml, src: &str, offsets: &ByteOffsets) -> Option<bool> {
+    if !matches!(node.data, YamlData::Mapping(_) | YamlData::Sequence(_)) {
+        return Some(false);
+    }
+    let span_end = offsets.of(node.span.end)?;
+    Some(!src[span_end..].starts_with(['}', ']']))
+}
+
+/// For an empty value, whose span saphyr may place at the next token: when only
+/// spaces or a comment precede `pos` on its line, the start of the earliest of
+/// the blank or comment-only lines ending there; otherwise `pos`. The walk ends
+/// on an empty sequence item's own `-` line, which is never blank or a comment.
+fn back_over_comments(src: &str, pos: usize) -> usize {
+    let mut start = line_start(src, pos);
+    let before = src[start..pos].trim();
+    if !(before.is_empty() || before.starts_with('#')) {
+        return pos;
+    }
+    while let Some(previous) = start.checked_sub(1).map(|i| line_start(src, i)) {
+        let body = src[previous..start].trim();
+        if !(body.is_empty() || body.starts_with('#')) {
+            break;
+        }
+        start = previous;
+    }
+    start
+}
+
+/// Byte offset just past the line that `content_end` ends. A block scalar ends
+/// after the indentation of the line that follows it, so a `content_end` with
+/// only spaces before it on its line ends where that line starts.
+fn line_after(src: &str, content_end: usize) -> usize {
+    let start = line_start(src, content_end);
+    if src[start..content_end].bytes().all(|b| b == b' ') {
+        start
+    } else {
+        line_end(src, content_end)
+    }
+}
+
+/// `end`, moved past the comment lines that directly follow it and are indented
+/// deeper than the key starting at `key_start`.
+fn past_indented_comments(src: &str, key_start: usize, end: usize) -> usize {
+    let key_indent = indent_of(src, key_start);
+    let mut end = end;
+    loop {
+        let next = line_end(src, end);
+        let line = &src[end..next];
+        let body = line.trim_start_matches(' ');
+        if !body.starts_with('#') || line.len() - body.len() <= key_indent {
+            return end;
+        }
+        end = next;
+    }
 }
 
 /// Diff `tmap` → `rmap` for one mapping (whose marked node is `node`), pushing
@@ -158,18 +308,16 @@ fn diff_map(
     offsets: &ByteOffsets,
     edits: &mut Vec<Edit>,
 ) -> Result<(), Error> {
-    let entries = marked_entries(node, offsets).ok_or(Error::YamlUnsafe)?;
+    let entries = marked_entries(node, src, offsets).ok_or(Error::YamlUnsafe)?;
     let find = |key: &str| entries.iter().find(|entry| entry.key == key);
 
     // Removed keys: delete the whole entry line range.
     for (k, _) in tmap {
         if !rmap.contains_key(k) {
             let entry = find(k).ok_or(Error::YamlUnsafe)?;
-            let start = line_start(src, entry.key_start);
-            let end = line_end(src, entry.value_end);
             edits.push(Edit {
-                start,
-                end,
+                start: line_start(src, entry.key_start),
+                end: entry.end_with_comments,
                 text: String::new(),
             });
         }
@@ -197,7 +345,7 @@ fn diff_map(
                 let frag = emit_entry(k, rv, ind);
                 edits.push(Edit {
                     start: line_start(src, entry.key_start),
-                    end: line_end(src, entry.value_end),
+                    end: entry.end,
                     text: format!("{frag}\n"),
                 });
             }
@@ -210,7 +358,7 @@ fn diff_map(
         // Need an existing sibling to anchor indentation and insertion point.
         let last = entries.last().ok_or(Error::YamlUnsafe)?;
         let ind = indent_of(src, entries[0].key_start);
-        let at = line_end(src, last.value_end);
+        let at = last.end_with_comments;
         let mut text = String::new();
         for k in added {
             text.push_str(&emit_entry(k, &rmap[k], ind));

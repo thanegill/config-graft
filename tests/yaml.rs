@@ -317,6 +317,357 @@ fn nested_addition_after_a_multibyte_comment() {
     );
 }
 
+/// Apply with BASE equal to TARGET, so every key DESIRED drops is pruned.
+fn yaml_prune_golden(target_text: &str, desired_text: &str, expected: &str) {
+    yaml_golden(target_text, desired_text, Some(target_text), expected);
+}
+
+#[test]
+fn prune_of_a_block_collection_keeps_the_next_sibling() {
+    yaml_prune_golden("a:\n  x: 1\n  y: 1\nb: 2\n", "b: 2\n", "b: 2\n");
+    yaml_prune_golden("a:\n  - 1\n  - 2\nb: 2\n", "b: 2\n", "b: 2\n");
+    yaml_prune_golden("a:\n- 1\n- 2\nb: 2\n", "b: 2\n", "b: 2\n");
+    yaml_prune_golden(
+        "top:\n  a:\n    x: 1\n  b: 2\n",
+        "top:\n  b: 2\n",
+        "top:\n  b: 2\n",
+    );
+    yaml_golden(
+        "sec:\n  only: 5\na: 1\n",
+        "a: 1\n",
+        Some("sec:\n  only: 5\n"),
+        "a: 1\n",
+    );
+}
+
+#[test]
+fn prune_of_a_block_collection_keeps_the_comment_above_the_next_sibling() {
+    yaml_prune_golden(
+        "a:\n  x: 1\n# about b\nb: 2\n",
+        "b: 2\n",
+        "# about b\nb: 2\n",
+    );
+    yaml_prune_golden(
+        "a:\n  - 1\n\n# about b\nb: 2\n",
+        "b: 2\n",
+        "\n# about b\nb: 2\n",
+    );
+    yaml_prune_golden(
+        "s: |\n  l1\n# about b\nb: 2\n",
+        "b: 2\n",
+        "# about b\nb: 2\n",
+    );
+    yaml_prune_golden("a:\n# about b\nb: 2\n", "b: 2\n", "# about b\nb: 2\n");
+}
+
+#[test]
+fn prune_of_a_collection_ending_in_a_multiline_flow_value() {
+    yaml_prune_golden("a: {x: 1,\n  y: 2}\nb: 2\n", "b: 2\n", "b: 2\n");
+    yaml_golden(
+        "a:\n  x: [1,\n    2]\n# about b\nb: 2\n",
+        "b: 2\n",
+        Some("a:\n  x: [1,\n    2]\nb: 2\n"),
+        "# about b\nb: 2\n",
+    );
+}
+
+#[test]
+fn prune_of_a_flow_value_closed_on_a_later_line() {
+    yaml_prune_golden("a: {x: 1,\n  y: 2\n  }\nb: 2\n", "b: 2\n", "b: 2\n");
+    yaml_prune_golden(
+        "a:\n  x: [1,\n    2\n    ]\n# about b\nb: 2\n",
+        "b: 2\n",
+        "# about b\nb: 2\n",
+    );
+}
+
+#[test]
+fn prune_of_a_nested_block_scalar_keeps_the_comment_after_it() {
+    yaml_prune_golden(
+        "top:\n  s: |\n    l1\n  # about b\n  b: 2\n",
+        "top:\n  b: 2\n",
+        "top:\n  # about b\n  b: 2\n",
+    );
+    yaml_prune_golden(
+        "top:\n  s: |\n    l1\n\n  b: 2\n",
+        "top:\n  b: 2\n",
+        "top:\n  b: 2\n",
+    );
+}
+
+#[test]
+fn prune_of_a_block_scalar_takes_its_kept_trailing_lines() {
+    yaml_prune_golden("s: |+\n  l1\n\nb: 2\n", "b: 2\n", "b: 2\n");
+}
+
+#[test]
+fn addition_after_a_block_collection_goes_before_a_trailing_comment() {
+    yaml_golden(
+        "a:\n  x: 1\n# tail\n",
+        "z: 1\n",
+        None,
+        "a:\n  x: 1\nz: 1\n# tail\n",
+    );
+}
+
+#[test]
+fn nested_block_collection_before_an_indented_sibling() {
+    let target = "app: true\na:\n  b:\n    c: 1\n  d:\n    e: 2\n";
+    let base = "a:\n  b:\n    c: 1\n  d:\n    e: 2\n";
+    yaml_golden(
+        target,
+        "a:\n  d:\n    e: 2\n",
+        Some(base),
+        "app: true\na:\n  d:\n    e: 2\n",
+    );
+    yaml_golden(
+        target,
+        "a:\n  b: 5\n  d:\n    e: 2\n",
+        Some(base),
+        "app: true\na:\n  b: 5\n  d:\n    e: 2\n",
+    );
+}
+
+#[test]
+fn prune_of_a_block_collection_and_the_key_after_it() {
+    yaml_prune_golden("c: 1\na:\n  x: 1\nb: 1\n", "c: 1\n", "c: 1\n");
+    yaml_prune_golden("a:\n  x: 1\nb: 1\n#xyz\nc: 1\n", "c: 1\n", "#xyz\nc: 1\n");
+}
+
+#[test]
+fn prune_of_an_empty_value_keeps_the_comment_above_the_next_key() {
+    yaml_prune_golden("a: !!str\n# about b\nb: 1\n", "b: 1\n", "# about b\nb: 1\n");
+    yaml_prune_golden("a: &x\n# about b\nb: 1\n", "b: 1\n", "# about b\nb: 1\n");
+    yaml_prune_golden(
+        "a:\n  k: x\n  j: !!str\n# about b\nb: 1\n",
+        "b: 1\n",
+        "# about b\nb: 1\n",
+    );
+    yaml_prune_golden(
+        "a:\n  ? k\n# about b\nb: 1\n",
+        "b: 1\n",
+        "# about b\nb: 1\n",
+    );
+    yaml_prune_golden(
+        "a:\n  - 1\n  - !!str\n# about b\nb: 1\n",
+        "b: 1\n",
+        "# about b\nb: 1\n",
+    );
+    yaml_golden(
+        "m:\n  a: &e\n  # about b\n  b: 1\n",
+        "m:\n  a:\n    n: 1\n",
+        None,
+        "m:\n  a:\n    n: 1\n  # about b\n  b: 1\n",
+    );
+}
+
+#[test]
+fn comments_indented_under_a_block_collection_go_with_it() {
+    yaml_prune_golden(
+        "seqmaps:\n  - name: b\n    v: 2\n    # trailing in item\n# outer\nnext: 1\n",
+        "next: 1\n",
+        "# outer\nnext: 1\n",
+    );
+    yaml_golden(
+        "deep:\n  l1:\n    l2:\n      l3: |\n        text\n\n    # at l2 level\n",
+        "deep:\n  zz: 1\n",
+        None,
+        "deep:\n  l1:\n    l2:\n      l3: |\n        text\n\n    # at l2 level\n  zz: 1\n",
+    );
+}
+
+#[test]
+fn prune_of_a_multiline_key_takes_all_of_it() {
+    yaml_prune_golden(
+        "x: 1\n? \"multi\n  # not a comment\"\nb: 1\n",
+        "x: 1\nb: 1\n",
+        "x: 1\nb: 1\n",
+    );
+    yaml_prune_golden(
+        "a:\n  ? |\n    long\n\n    # content\nb: 1\n",
+        "b: 1\n",
+        "b: 1\n",
+    );
+}
+
+#[test]
+fn a_block_scalar_in_a_sequence_item_goes_whole() {
+    yaml_prune_golden(
+        "a:\n  - k: |\n      t\n      # literal\nb: 1\n",
+        "b: 1\n",
+        "b: 1\n",
+    );
+    yaml_golden(
+        "a:\n  - k: |\n      t\n      # literal\nb: 1\n",
+        "a: 5\nb: 1\n",
+        None,
+        "a: 5\nb: 1\n",
+    );
+}
+
+#[test]
+fn prune_of_a_block_scalar_key_with_a_blank_first_line_is_refused() {
+    for indicator in ["|", ">"] {
+        let target = format!("a:\n  q: 1\n  ? {indicator}\n\n    # k\nb: 1\n");
+        yaml_refuses_with_base(&target, "a:\n  q: 1\nb: 1\n", Some(&target));
+    }
+}
+
+#[test]
+fn prune_of_an_empty_value_keeps_a_comment_at_eof() {
+    yaml_prune_golden("a: 1\nb: !!str\n# tail", "a: 1\n", "a: 1\n# tail");
+    yaml_prune_golden("a: 1\nb:\n  - !!str\n# tail", "a: 1\n", "a: 1\n# tail");
+}
+
+#[test]
+fn a_comment_indented_under_a_scalar_entry_stays() {
+    yaml_prune_golden("a: 1\n  # deeper\nb: 2\n", "b: 2\n", "  # deeper\nb: 2\n");
+    yaml_golden(
+        "a: 1\n  # deeper\nb: 2\n",
+        "a: {n: 1}\n",
+        None,
+        "a:\n  n: 1\n  # deeper\nb: 2\n",
+    );
+    yaml_golden(
+        "a: 1\nb: 2\n  # deeper\n# top\n",
+        "z: 1\n",
+        None,
+        "a: 1\nb: 2\nz: 1\n  # deeper\n# top\n",
+    );
+}
+
+#[test]
+fn addition_after_an_empty_value_goes_before_a_trailing_comment() {
+    yaml_golden(
+        "a: !!str\n# tail\n",
+        "z: 1\n",
+        None,
+        "a: !!str\nz: 1\n# tail\n",
+    );
+}
+
+#[test]
+fn a_document_end_marker_survives_a_prune_or_replacement() {
+    yaml_golden("x:\n  y: 1\n...\n", "x: S\n", None, "x: S\n...\n");
+    yaml_prune_golden("a: 1\ns: |\n  x\n...\n", "a: 1\n", "a: 1\n...\n");
+}
+
+#[test]
+fn prune_of_an_empty_value_takes_a_tag_on_its_own_line() {
+    yaml_prune_golden("c:\n  !!str\nd: 1\ne: 2\n", "d: 1\ne: 2\n", "d: 1\ne: 2\n");
+    yaml_prune_golden(
+        "a:\n  c:\n    !!str\n  d: 1\nz: 2\n",
+        "a:\n  d: 1\nz: 2\n",
+        "a:\n  d: 1\nz: 2\n",
+    );
+    yaml_prune_golden("a:\n  c: 1\n  d:\n    !!str\nz: 2\n", "z: 2\n", "z: 2\n");
+    yaml_prune_golden("x: 1\nc:\n  !!str\n", "x: 1\n", "x: 1\n");
+    yaml_golden("c:\n  !!str\n", "z: 1\n", None, "c:\n  !!str\nz: 1\n");
+    yaml_golden("c:\n  &a\n# t\n", "z: 1\n", None, "c:\n  &a\nz: 1\n# t\n");
+}
+
+#[test]
+fn prune_of_an_explicit_key_with_a_bare_colon_line() {
+    yaml_prune_golden("? k\n:\nb: 1\n", "b: 1\n", "b: 1\n");
+}
+
+#[test]
+fn an_empty_value_before_a_key_that_starts_with_a_colon() {
+    yaml_prune_golden("a: !!str\n:x: 1\n", "\":x\": 1\n", ":x: 1\n");
+    yaml_prune_golden("a: !!str\n:,x: 1\n", "\":,x\": 1\n", ":,x: 1\n");
+    yaml_prune_golden("a: !!str\n:]: 1\n", "\":]\": 1\n", ":]: 1\n");
+    yaml_prune_golden("a: !!str\n:}: 1\n", "\":}\": 1\n", ":}: 1\n");
+    yaml_golden(
+        "p:\n  a: !!str\n:x: 1\n",
+        "p:\n  z: 2\n",
+        None,
+        "p:\n  a: !!str\n  z: 2\n:x: 1\n",
+    );
+}
+
+#[test]
+fn prune_of_a_last_entry_keeps_a_closing_comment() {
+    yaml_prune_golden("a: 1\nb:\n  x: 1\n# tail\n", "a: 1\n", "a: 1\n# tail\n");
+    yaml_prune_golden("a: 1\nb: !!str\n# tail\n", "a: 1\n", "a: 1\n# tail\n");
+    yaml_golden(
+        "a: 1\nb:\n  x: 1\n# tail\n",
+        "a: 1\nb: 5\n",
+        None,
+        "a: 1\nb: 5\n# tail\n",
+    );
+}
+
+#[test]
+fn prune_of_consecutive_block_collections() {
+    yaml_golden(
+        "k: 1\ns1:\n  x: 1\ns2:\n  y: 2\n",
+        "k: 1\n",
+        Some("s1:\n  x: 1\ns2:\n  y: 2\n"),
+        "k: 1\n",
+    );
+}
+
+#[test]
+fn prune_of_a_block_collection_beside_an_edited_sibling() {
+    yaml_prune_golden("a:\n  x: 1\nb: 1\n", "b: €\n", "b: €\n");
+    yaml_prune_golden("a:\n  x: é\nb: 1\n", "b: €\n", "b: €\n");
+    yaml_golden(
+        "# ü\na:\n  x: 1\nb: 1\n",
+        "b: €\n",
+        Some("a:\n  x: 1\nb: 1\n"),
+        "# ü\nb: €\n",
+    );
+    yaml_golden("a:\n  x: 1\nb: 1\n", "a: 5\nb: €\n", None, "a: 5\nb: €\n");
+}
+
+#[test]
+fn prune_of_a_block_collection_holding_multibyte_chars() {
+    yaml_prune_golden("a:\n  x: é\nb: 2\n", "b: 2\n", "b: 2\n");
+    yaml_prune_golden("a:\n  - é\nb: 2\n", "b: 2\n", "b: 2\n");
+    yaml_golden(
+        "# café\na:\n  x: 1\nb: 2\n",
+        "b: 2\n",
+        Some("a:\n  x: 1\nb: 2\n"),
+        "# café\nb: 2\n",
+    );
+}
+
+#[test]
+fn block_collection_replaced_by_a_scalar_keeps_the_next_sibling() {
+    yaml_golden("a:\n  x: 1\nb: 2\n", "a: 5\n", None, "a: 5\nb: 2\n");
+    yaml_golden(
+        "a:\n  x: 1\n# about b\nb: 2\n",
+        "a: 5\n",
+        None,
+        "a: 5\n# about b\nb: 2\n",
+    );
+}
+
+#[test]
+fn addition_after_a_nested_block_collection() {
+    yaml_golden(
+        "top:\n  a:\n    x: 1\nb: 2\n",
+        "top:\n  c: 3\n",
+        None,
+        "top:\n  a:\n    x: 1\n  c: 3\nb: 2\n",
+    );
+    yaml_golden(
+        "a:\n  x:\n    y: é\nb: 1\n",
+        "a:\n  x:\n    y: é\n  zz: 2\nb: 1\n",
+        None,
+        "a:\n  x:\n    y: é\n  zz: 2\nb: 1\n",
+    );
+}
+
+#[test]
+fn prune_of_two_keys_on_one_flow_line_is_refused_not_a_panic() {
+    yaml_refuses_with_base(
+        "{\"a\":1,\"b\":2,\"c\":3}\n",
+        "{\"c\":3}\n",
+        Some("{\"a\":1,\"b\":2,\"c\":3}\n"),
+    );
+}
+
 #[test]
 fn adjacent_prune_and_addition_both_apply() {
     yaml_golden(
@@ -406,21 +757,6 @@ fn yaml_refuses_with_base(
         "target must be left byte-unchanged on refusal"
     );
     String::from_utf8(out.stderr).unwrap()
-}
-
-#[test]
-fn overlapping_edits_are_refused_not_a_panic() {
-    for target in [
-        "a:\n  x: 1\nb: 1\n",
-        "a:\n  x: é\nb: 1\n",
-        "# ü\na:\n  x: 1\nb: 1\n",
-    ] {
-        yaml_refuses_with_base(target, "b: €\n", Some(target));
-        yaml_refuses(target, "a: 5\nb: €\n");
-    }
-    for target in ["c: 1\na:\n  x: 1\nb: 1\n", "a:\n  x: 1\nb: 1\n#xyz\nc: 1\n"] {
-        yaml_refuses_with_base(target, "c: 1\n", Some(target));
-    }
 }
 
 #[test]
