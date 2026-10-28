@@ -793,7 +793,7 @@ fn parse_failure_error_names_json() {
 }
 
 #[test]
-fn plist_binary_flag_is_a_usage_error_for_json() {
+fn plist_format_flag_is_a_usage_error_for_json() {
     // A plist-only flag isn't defined on the `json` subcommand, so clap rejects it
     // structurally at parse time (exit 2), rather than a runtime error message.
     let dir = tempfile::tempdir().unwrap();
@@ -805,9 +805,15 @@ fn plist_binary_flag_is_a_usage_error_for_json() {
         "json",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
-        "--plist-binary",
+        "--plist-format",
+        "xml",
     ]);
     assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unexpected argument '--plist-format'"),
+        "got: {stderr}"
+    );
 }
 
 // ----- number fidelity -----
