@@ -2,6 +2,7 @@
 name = "config-graft"
 version = "0.1.1"
 edition = "2021"
+rust-version = "1.93"
 description = "Three-way reconcile for app-owned JSON, plist, YAML, and TOML files"
 license = "MIT"
 
