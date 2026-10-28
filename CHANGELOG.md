@@ -54,6 +54,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **YAML:** a file of only comments, or a bare `---`, is an empty mapping instead of an error, and its text is kept.
 - **YAML:** pruning or replacing a nested collection or block scalar that has a key after it, or adding a key after one, works and keeps the surrounding comments; it used to refuse, delete comments, or panic.
 - **A privileged rewrite keeps TARGET's owner and group** instead of handing the file to root; a failed chown refuses the write.
+- **A rewrite keeps the setuid, setgid and sticky bits an in-place write by this user would keep on this platform**, instead of silently dropping all three, and warns on stderr, naming the file, its old and new mode and why, when one is dropped.
 - **YAML:** a file holding non-ASCII text can be edited in place; it used to be refused or panic.
 - **A non-UTF-8 BASE path is accepted**, like TARGET and DESIRED.
 - **YAML:** replacing a scalar with a collection, or back, under an explicit `? key` or a tagged or anchored key is written instead of refused, as a plain `key:` at the line's indent.
