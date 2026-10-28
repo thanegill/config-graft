@@ -48,6 +48,7 @@ let
           pkgs
           format
           ;
+        parent = "environment";
         defaultPackage = config.environment.managed.package;
         targetOption = lib.mkOption {
           type = lib.types.str;
@@ -82,6 +83,7 @@ let
     '';
     type = configGraftLib.directoryEntryType {
       inherit lib pkgs;
+      parent = "environment";
       defaultPackage = config.environment.managed.package;
       targetOption = lib.mkOption {
         type = lib.types.str;

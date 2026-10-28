@@ -46,12 +46,14 @@ in
       generated;
 
   # The `attrsOf submodule` type for one format's entries. Every option is the same
-  # on every platform except `target` (relative vs absolute) and the `cfprefsdDomain`
-  # description (per-user vs system), which the caller supplies.
+  # on every platform except `target` (relative vs absolute), the `cfprefsdDomain`
+  # description (per-user vs system) and `package`'s default, which the caller
+  # supplies; `parent` (`home` or `environment`) names that default in the docs.
   entryType =
     {
       lib,
       pkgs,
+      parent,
       defaultPackage,
       format,
       targetOption,
@@ -70,12 +72,12 @@ in
             package = mkOption {
               type = types.package;
               default = defaultPackage;
-              defaultText = literalExpression "config-graft.packages.\${system}.default";
+              defaultText = literalExpression "config.${parent}.managed.package";
               description = ''
                 The config-graft package used to reconcile this entry. Defaults to the
-                module-level `managed.package` (this flake's own build), which the
-                activation script calls by store path, so no overlay or `PATH` entry is
-                needed.
+                module-level {option}`${parent}.managed.package` (itself defaulting to
+                this flake's own build), which the activation script calls by store
+                path, so no overlay or `PATH` entry is needed.
               '';
             };
 
@@ -214,6 +216,7 @@ in
     {
       lib,
       pkgs,
+      parent,
       defaultPackage,
       targetOption,
       sourceDescription,
@@ -231,11 +234,12 @@ in
             package = mkOption {
               type = types.package;
               default = defaultPackage;
-              defaultText = literalExpression "config-graft.packages.\${system}.default";
+              defaultText = literalExpression "config.${parent}.managed.package";
               description = ''
                 The config-graft package used to reconcile this entry. Defaults to the
-                module-level `managed.package` (this flake's own build), called by store
-                path, so no overlay or `PATH` entry is needed.
+                module-level {option}`${parent}.managed.package` (itself defaulting to
+                this flake's own build), called by store path, so no overlay or `PATH`
+                entry is needed.
               '';
             };
 

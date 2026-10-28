@@ -48,6 +48,7 @@ let
           pkgs
           format
           ;
+        parent = "home";
         defaultPackage = config.home.managed.package;
         targetOption = lib.mkOption {
           type = lib.types.str;
@@ -83,6 +84,7 @@ let
     '';
     type = configGraftLib.directoryEntryType {
       inherit lib pkgs;
+      parent = "home";
       defaultPackage = config.home.managed.package;
       targetOption = lib.mkOption {
         type = lib.types.str;
@@ -263,14 +265,15 @@ in
           parent = "home";
         }
       ) byFormat
-      # config-graft reconciles a mutable file in place; `home.file` symlinks an
-      # immutable store path. The same path can't be both, so reject the overlap.
+      # config-graft reconciles a mutable file/tree in place; `home.file` symlinks an
+      # immutable store path. The same path can't be both, so reject the overlap
+      # (byte formats and directories alike).
       ++ map (path: {
         assertion = !(config.home.file ? ${path});
         message = ''
-          `home.file."${path}"` and a config-graft `managed<Format>` entry both
-          manage `${path}`. `home.file` creates an immutable store symlink, while
-          config-graft reconciles a mutable file in place; declare it in one.
+          `home.file."${path}"` and a config-graft `managed<Format>`/`managedDirectory`
+          entry both manage `${path}`. `home.file` creates an immutable store symlink,
+          while config-graft reconciles a mutable path in place; declare it in one.
         '';
       }) managedTargets;
   };
