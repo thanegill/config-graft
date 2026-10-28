@@ -674,7 +674,7 @@ impl From<&PlistLeaf> for plist::Value {
 mod tests {
     use super::*;
     use crate::format::Indent;
-    use crate::reconcile::{reconcile, ArrayStrategy, MergeKeys, Options};
+    use crate::reconcile::{reconcile, Options};
 
     fn pint(i: i64) -> plist::Value {
         plist::Value::Integer(i.into())
@@ -850,16 +850,7 @@ mod tests {
         base.insert("b".to_string(), pint(2));
         let base = Plist::decode(&plist::Value::Dictionary(base)).unwrap();
 
-        let (merged, _) = reconcile(
-            &target,
-            &desired,
-            Some(&base),
-            &Options {
-                prune: true,
-                arrays: ArrayStrategy::Replace,
-                merge_keys: MergeKeys::default(),
-            },
-        );
+        let (merged, _) = reconcile(&target, &desired, Some(&base), &Options::default());
         let m = merged.as_map().unwrap();
         assert_eq!(m.get("a"), Some(&Node::Leaf(PlistLeaf::Int(9)))); // updated
         assert_eq!(m.get("app"), Some(&Node::Leaf(PlistLeaf::Bool(true)))); // app key preserved
