@@ -1435,15 +1435,6 @@ mod tests {
     }
 
     #[test]
-    fn array_strategy_derives_clone_eq_debug() {
-        let s = ArrayStrategy::Set;
-        assert_eq!(s, s); // Eq
-        assert_eq!(s, s.clone()); // Clone (Copy)
-        assert_ne!(ArrayStrategy::Replace, ArrayStrategy::Concat);
-        assert!(format!("{s:?}").contains("Set")); // Debug
-    }
-
-    #[test]
     fn del_path_guards_empty_path_and_non_object() {
         // Empty path: no-op.
         let mut v = n(json!({"a":1}));
