@@ -88,7 +88,9 @@ fn marked_entries<'a>(
 }
 
 /// Diff `tmap` → `rmap` for one mapping (whose marked node is `node`), pushing
-/// edits. Recurses into mappings present on both sides.
+/// edits. Recurses into mappings non-empty on both sides. A mapping the result
+/// empties or fills is re-rendered whole: deleting its last entry would leave
+/// `key:`, which reads as null, and an empty `{}` has no entry to add after.
 fn diff_map(
     tmap: &IndexMap<String, Node<YamlLeaf>>,
     rmap: &IndexMap<String, Node<YamlLeaf>>,
@@ -118,7 +120,9 @@ fn diff_map(
         let Some(tv) = tmap.get(k) else { continue };
         let (_, kn, vn) = find(k).ok_or(Error::YamlUnsafe)?;
         match (tv, rv) {
-            (Node::Map(tc), Node::Map(rc)) => diff_map(tc, rc, vn, src, edits)?,
+            (Node::Map(tc), Node::Map(rc)) if !tc.is_empty() && !rc.is_empty() => {
+                diff_map(tc, rc, vn, src, edits)?
+            }
             _ if tv == rv => {}
             (Node::Leaf(_), Node::Leaf(_)) => {
                 // Scalar → scalar: replace just the value span (keeps any inline
@@ -250,6 +254,18 @@ mod tests {
     fn removes_key_with_its_inline_comment() {
         let out = apply("a: 1\nb: 2  # bye\nc: 3\n", &result("a: 1\nc: 3\n")).unwrap();
         assert_eq!(out, "a: 1\nc: 3\n");
+    }
+
+    #[test]
+    fn empties_a_nested_mapping_to_an_empty_flow_mapping() {
+        let out = apply("a: 1\nb:\n  c: 2\n", &result("a: 1\nb: {}\n")).unwrap();
+        assert_eq!(out, "a: 1\nb: {}\n");
+    }
+
+    #[test]
+    fn fills_an_empty_flow_mapping() {
+        let out = apply("a: {}\nz: 1\n", &result("a:\n  x: 1\nz: 1\n")).unwrap();
+        assert_eq!(out, "a:\n  x: 1\nz: 1\n");
     }
 
     #[test]

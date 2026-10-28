@@ -44,6 +44,68 @@ fn reconciles_in_place_three_way() {
 }
 
 #[test]
+fn an_object_desired_declares_empty_survives_the_prune_and_rerun_is_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    fs::write(&target, r#"{"a":{"b":1},"app":true}"#).unwrap();
+    fs::write(&desired, r#"{"a":{}}"#).unwrap();
+    fs::write(&base, r#"{"a":{"b":1}}"#).unwrap();
+    let paths = [
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ];
+
+    let out = run(&[&["json"], &paths[..]].concat());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = fs::read_to_string(&target).unwrap();
+    assert_eq!(first, "{\n  \"a\": {},\n  \"app\": true\n}\n");
+
+    // The next generation's BASE is this one's DESIRED.
+    fs::copy(&desired, &base).unwrap();
+    let out = run(&[&["json", "--check"], &paths[..]].concat());
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the declared `{{}}` is not re-added"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), first);
+}
+
+#[test]
+fn a_nested_object_desired_declares_empty_survives_the_prune() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    fs::write(&target, r#"{"a":{"b":{"c":1},"d":{"e":2}},"app":true}"#).unwrap();
+    fs::write(&desired, r#"{"a":{"b":{}}}"#).unwrap();
+    fs::write(&base, r#"{"a":{"b":{"c":1},"d":{"e":2}}}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "{\n  \"a\": {\n    \"b\": {}\n  },\n  \"app\": true\n}\n"
+    );
+}
+
+#[test]
 fn check_reports_pending_change_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");

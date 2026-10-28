@@ -371,3 +371,73 @@ fn a_deeply_nested_target_is_refused_not_aborted() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read_to_string(&target).unwrap(), deep);
 }
+
+/// Prune `base` out of `target` towards `desired`, which declares a table that
+/// the prune empties: the write keeps it as `expected`, and the next run, with
+/// `desired` as its BASE, is `--check` clean.
+fn declared_empty_table_survives(
+    target_text: &str,
+    desired_text: &str,
+    base_text: &str,
+    expected: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.toml");
+    let desired = dir.path().join("desired.toml");
+    let base = dir.path().join("base.toml");
+    fs::write(&target, target_text).unwrap();
+    fs::write(&desired, desired_text).unwrap();
+    fs::write(&base, base_text).unwrap();
+    let paths = [
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ];
+
+    let out = run(&[&["toml"], &paths[..]].concat());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), expected);
+
+    fs::copy(&desired, &base).unwrap();
+    let out = run(&[&["toml", "--check"], &paths[..]].concat());
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the declared table is not re-added"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), expected);
+}
+
+#[test]
+fn a_table_desired_declares_empty_survives_the_prune() {
+    declared_empty_table_survives(
+        "app = true\n\n[a]\nb = 1\n",
+        "[a]\n",
+        "[a]\nb = 1\n",
+        "app = true\n\n[a]\n",
+    );
+}
+
+#[test]
+fn a_dotted_table_desired_declares_empty_survives_the_prune() {
+    declared_empty_table_survives(
+        "app = true\na.b = 1\n",
+        "[a]\n",
+        "a.b = 1\n",
+        "app = true\n\n[a]\n",
+    );
+}
+
+#[test]
+fn an_implicit_table_desired_declares_empty_survives_the_prune() {
+    declared_empty_table_survives(
+        "app = true\n[a.b]\nc = 1\n",
+        "[a]\n",
+        "[a.b]\nc = 1\n",
+        "app = true\n\n[a]\n",
+    );
+}

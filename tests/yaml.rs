@@ -197,6 +197,51 @@ fn removal_collapses_empty_parent() {
 }
 
 #[test]
+fn removal_keeps_a_parent_desired_declares_empty_and_reruns_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let base = dir.path().join("base.yaml");
+    fs::write(&target, "a: 1  # keep\nsec:\n  only: 5\n").unwrap();
+    fs::write(&desired, "sec: {}\n").unwrap();
+    fs::write(&base, "sec:\n  only: 5\n").unwrap();
+    let paths = [
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ];
+
+    let out = run(&[&["yaml"], &paths[..]].concat());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = fs::read_to_string(&target).unwrap();
+    assert_eq!(first, "a: 1  # keep\nsec: {}\n");
+
+    fs::copy(&desired, &base).unwrap();
+    let out = run(&[&["yaml", "--check"], &paths[..]].concat());
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), first);
+}
+
+#[test]
+fn filling_an_empty_flow_mapping_rewrites_it_as_a_block() {
+    yaml_golden(
+        "sec: {}\nz: 1  # keep\n",
+        "sec:\n  x: 1\n",
+        None,
+        "sec:\n  x: 1\nz: 1  # keep\n",
+    );
+}
+
+#[test]
 fn top_level_addition_keeps_existing_comment() {
     yaml_golden("a: 1  # c\n", "z: 9\n", None, "a: 1  # c\nz: 9\n");
 }
@@ -270,14 +315,21 @@ fn check_reports_pending_yaml_change_and_writes_nothing() {
 
 // ----- YAML safety / refusal (never corrupt) -----
 
-/// Assert applying `desired` onto `target` exits 1 and leaves the file unchanged.
-fn yaml_refuses(target_text: &str, desired_text: &str) {
+/// Assert applying `desired` onto `target` (optional `base`) exits 1 and leaves
+/// the file unchanged.
+fn yaml_refuses(target_text: &str, desired_text: &str, base_text: Option<&str>) {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.yaml");
     let desired = dir.path().join("desired.yaml");
+    let base = dir.path().join("base.yaml");
     fs::write(&target, target_text).unwrap();
     fs::write(&desired, desired_text).unwrap();
-    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let mut args = vec!["yaml", target.to_str().unwrap(), desired.to_str().unwrap()];
+    if let Some(text) = base_text {
+        fs::write(&base, text).unwrap();
+        args.push(base.to_str().unwrap());
+    }
+    let out = run(&args);
     assert_eq!(out.status.code(), Some(1), "expected refusal (exit 1)");
     assert_eq!(
         fs::read_to_string(&target).unwrap(),
@@ -288,29 +340,41 @@ fn yaml_refuses(target_text: &str, desired_text: &str) {
 
 #[test]
 fn refuses_non_mapping_root_target() {
-    yaml_refuses("- 1\n- 2\n", "a: 1\n");
+    yaml_refuses("- 1\n- 2\n", "a: 1\n", None);
 }
 
 #[test]
 fn refuses_custom_tag_target() {
-    yaml_refuses("a: !mytag 1\nb: 2\n", "b: 3\n");
+    yaml_refuses("a: !mytag 1\nb: 2\n", "b: 3\n", None);
 }
 
 #[test]
 fn refuses_multi_document_target() {
-    yaml_refuses("---\na: 1\n---\nb: 2\n", "a: 9\n");
+    yaml_refuses("---\na: 1\n---\nb: 2\n", "a: 9\n", None);
 }
 
 #[test]
 fn refuses_non_string_key_target() {
-    yaml_refuses("1: a\nb: 2\n", "b: 3\n");
+    yaml_refuses("1: a\nb: 2\n", "b: 3\n", None);
 }
 
 #[test]
 fn refuses_when_an_edit_would_desync_an_alias() {
     // Changing a value inside an anchored mapping would change the aliased copy
     // too; the round-trip backstop catches the mismatch and refuses.
-    yaml_refuses("base: &b\n  x: 1\nuse: *b\n", "base:\n  x: 2\n");
+    yaml_refuses("base: &b\n  x: 1\nuse: *b\n", "base:\n  x: 2\n", None);
+}
+
+/// A block mapping that is not its parent's last entry cannot be emptied in
+/// place: its value span runs into the next entry's line, so the edit would not
+/// round-trip. Pinned so a fix to that flips it on purpose.
+#[test]
+fn emptying_a_block_mapping_that_is_not_last_is_still_refused() {
+    yaml_refuses(
+        "sec:\n  only: 5\napp: true\n",
+        "sec: {}\n",
+        Some("sec:\n  only: 5\n"),
+    );
 }
 
 #[test]
