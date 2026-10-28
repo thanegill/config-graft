@@ -283,9 +283,9 @@ pub(crate) trait Backend {
             .base_flag
             .as_deref()
             .or(args.base.as_deref())
-            .filter(|p| !p.is_empty());
+            .filter(|p| !p.as_os_str().is_empty());
         let mut base = base_path
-            .and_then(|p| Self::read(args, Path::new(p)).ok().flatten())
+            .and_then(|p| Self::read(args, p).ok().flatten())
             .filter(Node::is_map);
         // BASE must be normalized too, or a floored TARGET never equals it and a
         // managed key can never be pruned. BASE is never written, so a failure here
