@@ -44,8 +44,8 @@ pub enum Warning<L: Leaf> {
         /// selector when the array is matched by merge key.
         identity: String,
         /// The node `identity` denotes -- the element itself, or the key field's
-        /// value under a merge key. Carried so a caller can match this warning
-        /// against a normalization record structurally rather than by rendering.
+        /// value under a merge key. Carried so a caller can find the elements it
+        /// denotes structurally rather than by rendering.
         matched: Node<L>,
         /// How many times it appeared in that input, and how many survived.
         held: usize,
