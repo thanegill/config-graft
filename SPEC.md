@@ -95,7 +95,8 @@ config-graft is a pass-through for every value it does not manage, so anywhere i
 
 - a `merge` array with a **contradictory cross-over reorder**, resolved by tie-break rather than agreement (see §5);
 - an input array holding **the same identity twice** — by value, or by `--merge-key` field — where membership is a set and only the first occurrence can survive (see §5);
-- a **value the output encoding cannot render**, rewritten on the way to disk: today only a plist `Date` written as XML, floored to a whole second (§5a).
+- a **value the output encoding cannot render**, rewritten on the way to disk: today only a plist `Date` written as XML, floored to a whole second (§5a);
+- a byte-format **rewrite that drops one of TARGET's setuid, setgid or sticky bits** (§8). This one names the file rather than a key path, and only a run that writes reports it: `--check`, `--stdout` and an unchanged result leave the file's mode alone.
 
 ## 5a. Formats
 
@@ -147,7 +148,7 @@ If the user/app changed the value, it is left intact. With no BASE, nothing is e
 ## 8. Atomicity & formatting
 
 - Write to a temp file in TARGET's directory, `fsync`, then `rename(2)` over TARGET (atomic; no torn writes), then `fsync` TARGET's directory so the new entry is durable across a crash.
-- Preserve TARGET's existing file mode; default `0644` for new files.
+- Preserve TARGET's permission bits, and of its setuid/setgid/sticky bits what an in-place write by the same user would keep. A rewrite that leaves the file with a different owner (uid or gid) clears setuid and setgid. Otherwise a privileged run (euid 0) keeps all three, and an unprivileged one clears setuid, clears setgid only when group-exec is set, and keeps sticky. A warning names the file, with its old and new mode, whenever a bit is dropped. Default `0644` for new files.
 - Deterministic output: stable key ordering (per `--sort-keys`), fixed indentation, single trailing newline. Running twice with the same inputs is a no-op (idempotent) and `--check`-clean; an unchanged result skips the write entirely.
 - **Directory mode (§5b):** each file/symlink is written atomically the same way, with its reconciled metadata set on the temp file *before* the rename (§5b), so an attribute failure refuses cleanly and leaves nothing on disk; a newly-created directory is made with the process umask and then reconciled to DESIRED's mode/owner/xattrs (the per-directory attribute apply is a small sequence of `chmod`/`chown`/`setxattr`, not itself atomic — a crash between them leaves the directory with some attributes applied, which a re-run completes). The *whole-tree* apply is **not one transaction** — a crash mid-apply leaves a partial (though per-file consistent) tree, which a re-run completes idempotently (§10).
 

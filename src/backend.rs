@@ -20,7 +20,7 @@ use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normal
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
-use crate::RunArgs;
+use crate::{ModeChange, RunArgs};
 
 /// Output preferences as the flags asked for them, before any format settles what
 /// depends on the target's bytes.
@@ -490,10 +490,22 @@ impl<F: Format> Backend for ByteBackend<F> {
         output: Option<&[u8]>,
     ) -> Result<(), Error> {
         let output = output.expect("byte backend always produces output");
-        crate::write_atomic(&args.target, output).map_err(|e| Error::Write {
+        let mode_change = crate::write_atomic(&args.target, output).map_err(|e| Error::Write {
             path: args.target.clone(),
             source: e,
-        })
+        })?;
+        if let Some(ModeChange { from, to }) = mode_change {
+            emit::<F::Leaf>(
+                &[Warning::SpecialModeBitsCleared {
+                    path: KeyPath::new(),
+                    file: args.target.clone(),
+                    from,
+                    to,
+                }],
+                F::PATH_SEP,
+            );
+        }
+        Ok(())
     }
 }
 

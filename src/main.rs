@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -323,25 +323,67 @@ fn main() {
     }
 }
 
-/// Atomic in-place write: temp file in the same dir, fsync, then rename over the
-/// target. Preserves the target's existing mode (0644 for new files).
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let mode = fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o777)
-        .unwrap_or(0o644);
-    write_atomic_mode(path, content, mode)
+/// A rewrite that kept fewer of TARGET's setuid/setgid/sticky bits than it had.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ModeChange {
+    pub(crate) from: u32,
+    pub(crate) to: u32,
 }
 
-/// Atomic in-place write with an explicit permission mode (temp file in the same
-/// dir, fsync, set mode, then rename over the target).
-fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
+/// A file's owner, as `(uid, gid)`.
+type Owner = (u32, u32);
+
+pub(crate) const SETUID: u32 = 0o4000;
+pub(crate) const SETGID: u32 = 0o2000;
+pub(crate) const STICKY: u32 = 0o1000;
+const GROUP_EXEC: u32 = 0o010;
+
+/// The mode a rewrite gives a file that had `previous`: its permission bits, and
+/// of setuid/setgid/sticky what an in-place write by the same user would keep. A
+/// new owner keeps neither setuid nor setgid; a privileged writer keeps every bit;
+/// anyone else loses setuid, and setgid too when group-exec is set.
+fn rewritten_mode(previous: u32, previous_owner: Owner, new_owner: Owner, privileged: bool) -> u32 {
+    let previous = previous & 0o7777;
+    if new_owner != previous_owner {
+        return previous & !(SETUID | SETGID);
+    }
+    if privileged {
+        return previous;
+    }
+    let setgid = if previous & GROUP_EXEC != 0 {
+        SETGID
+    } else {
+        0
+    };
+    previous & !(SETUID | setgid)
+}
+
+/// Atomic in-place write: temp file in the same dir, fsync, set its mode, then
+/// rename over the target. A new file gets 0644; a rewrite gets
+/// [`rewritten_mode`], and a [`ModeChange`] is returned when that dropped a bit, for
+/// the caller to report.
+pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<Option<ModeChange>> {
+    let previous = fs::metadata(path).ok();
     let dir = dest_dir(path);
     fs::create_dir_all(&dir)?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
     tmp.write_all(content)?;
     tmp.as_file().sync_all()?;
+    // The temp file is this process's own, so its owner is who the rewrite makes the
+    // file's owner, and a uid of 0 is a privileged writer.
+    let written = tmp.as_file().metadata()?;
+    let change = previous.map(|previous| {
+        let from = previous.mode() & 0o7777;
+        let to = rewritten_mode(
+            from,
+            (previous.uid(), previous.gid()),
+            (written.uid(), written.gid()),
+            written.uid() == 0,
+        );
+        ModeChange { from, to }
+    });
+    let mode = change.as_ref().map_or(0o644, |change| change.to);
     tmp.as_file()
         .set_permissions(fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
@@ -350,7 +392,7 @@ fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<
     // landed, so a filesystem that can't fsync a directory (e.g. some network mounts)
     // must not turn a successful write into an error.
     let _ = fsync_dir(&dir);
-    Ok(())
+    Ok(change.filter(|change| change.to != change.from))
 }
 
 /// fsync a directory so its recent entry changes (renames/creates/unlinks) are
@@ -373,7 +415,7 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 mod tests {
     use std::collections::HashMap;
 
-    use super::parse_merge_keys;
+    use super::{parse_merge_keys, rewritten_mode, Owner};
 
     /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
     /// `&str` literals so the expectations stay readable.
@@ -439,5 +481,35 @@ mod tests {
             scoped,
             HashMap::from([(strings(&["servers"]), strings(&["name", "id"]))])
         );
+    }
+
+    const ALICE: Owner = (501, 20);
+
+    #[test]
+    fn a_new_owner_loses_setuid_and_setgid_but_keeps_sticky() {
+        assert_eq!(rewritten_mode(0o7755, ALICE, (502, 20), false), 0o1755);
+        assert_eq!(rewritten_mode(0o7755, ALICE, (501, 0), false), 0o1755);
+        assert_eq!(rewritten_mode(0o7755, ALICE, (0, 0), true), 0o1755);
+    }
+
+    #[test]
+    fn a_privileged_writer_keeps_every_bit() {
+        assert_eq!(rewritten_mode(0o7755, ALICE, ALICE, true), 0o7755);
+    }
+
+    #[test]
+    fn an_unprivileged_writer_loses_setuid_and_keeps_sticky() {
+        assert_eq!(rewritten_mode(0o5755, ALICE, ALICE, false), 0o1755);
+    }
+
+    #[test]
+    fn an_unprivileged_writer_loses_setgid_only_with_group_exec() {
+        assert_eq!(rewritten_mode(0o2755, ALICE, ALICE, false), 0o0755);
+        assert_eq!(rewritten_mode(0o2745, ALICE, ALICE, false), 0o2745);
+    }
+
+    #[test]
+    fn file_type_bits_are_ignored() {
+        assert_eq!(rewritten_mode(0o100_644, ALICE, ALICE, false), 0o644);
     }
 }
