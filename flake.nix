@@ -18,7 +18,7 @@
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "config-graft";
-          version = "0.1.1";
+          inherit ((pkgs.lib.importTOML ./Cargo.toml).package) version;
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
