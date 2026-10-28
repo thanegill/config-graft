@@ -1,11 +1,12 @@
 # Nix-side tests for the module layer, exposed as flake `checks` so `nix flake
 # check` runs them. `cargo test` covers the engine; nothing there exercises the
 # module's own decisions, so a wrong `binary` default or a re-gated
-# `--plist-binary` would reintroduce issue #33 with the Rust suite fully green
-# (the engine's floor never runs on a binary write).
+# `--plist-format binary` would reintroduce issue #33 with the Rust suite fully
+# green (the engine's floor never runs on a binary write).
 #
-# Everything here is a pure evaluation of `lib/common.nix` -- no platform module,
-# no home-manager input -- so the assertions read as plain expected/actual.
+# Almost everything here is a pure evaluation of `lib/common.nix` -- no platform
+# module, no home-manager input -- so the assertions read as plain
+# expected/actual. `binaryTargetRun` is the exception: it runs the real binary.
 {
   lib,
   pkgs,

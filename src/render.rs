@@ -1,5 +1,5 @@
-//! Everything that decides what a run *shows*, as opposed to what it computes or
-//! writes to disk.
+//! How values and the `--diff` listing look, as opposed to what a run computes or
+//! writes to disk. Warnings render in `warning`, errors in `error`.
 //!
 //! Three format-agnostic primitives -- `quote` (a JSON-escaped string),
 //! `render_f64` (a float as JSON spells it) and `write_separated` (a
@@ -26,9 +26,10 @@ pub fn quote(s: &str) -> String {
         .to_string()
 }
 
-/// A float as JSON renders it: the shortest form that round-trips, via the same
-/// algorithm serde_json emits through. JSON has no NaN or infinity, so those
-/// render as `null`, as every JSON writer does.
+/// A float as JSON renders it: the shortest form that round-trips, via `ryu`, with
+/// serde_json's `+` on a positive exponent (the tests below check it against
+/// serde_json's own output). JSON has no NaN or infinity, so those render as
+/// `null`, as every JSON writer does.
 ///
 /// Hand-rolling this from Rust's `{:?}` is what the shortest round-tripping form
 /// tempts you into, and it is wrong: `{:?}` picks decimal-versus-exponent at

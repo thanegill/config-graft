@@ -34,12 +34,12 @@
 
       # Declarative wrappers exposing `managed{Json,Plist,Yaml,Toml}` -- one per
       # byte format config-graft reconciles -- plus `managedDirectory` for the
-      # `directory` subcommand (reconcile a whole source tree). `home.*` for home-manager,
-      # `environment.*` for NixOS / nix-darwin. The three modules share one
-      # assembly (modules/lib). Each is applied with `self` so entries
-      # default to this flake's build (the activation script calls it by store
-      # path) -- no overlay or `PATH` entry needed; override per entry via
-      # `package`. Each is exposed under both `default` and the named
+      # `directory` subcommand (reconcile a whole source tree). `home.*` for
+      # home-manager, `environment.*` for NixOS / nix-darwin. The three modules
+      # take their shared pieces from modules/lib. Each is applied with `self`
+      # so entries default to this flake's build (the activation script calls it
+      # by store path) -- no overlay or `PATH` entry needed; override per entry
+      # via `package`. Each is exposed under both `default` and the named
       # `config-graft` attribute.
       homeManagerModules = {
         config-graft = import ./modules/home-manager.nix { inherit self; };

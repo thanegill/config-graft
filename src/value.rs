@@ -27,18 +27,13 @@ pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug + std::fmt::Display {
 
 /// Canonical `f64` bit pattern for the float-carrying leaf types' `Eq`/`Hash`.
 ///
-/// Maps `-0.0` to `+0.0` (so signed zeros compare equal, exactly as the old
-/// derived `PartialEq` did) and every `NaN` to one canonical quiet-NaN pattern.
-/// The latter is the *only* behavior change from the old derived `PartialEq`:
-/// there `NaN != NaN`, here a `NaN` leaf equals itself and hashes stably -- which
-/// is required for a sound `Eq` and for `HashSet` dedup to work. Every other
-/// value passes through unchanged, so all non-`NaN` comparisons stay identical.
+/// Maps `-0.0` to `+0.0`, so signed zeros compare equal, and every `NaN` to one
+/// quiet-NaN pattern, so a `NaN` leaf equals itself and hashes stably -- which a
+/// sound `Eq` and `HashSet` dedup both need. Every other value passes through.
 pub fn canonical_float_bits(f: f64) -> u64 {
     if f.is_nan() {
-        // A single canonical quiet NaN, so all NaNs are equal and hash alike.
         0x7ff8_0000_0000_0000
     } else if f == 0.0 {
-        // `-0.0 == 0.0` is true, so both collapse to the `+0.0` bit pattern.
         0.0_f64.to_bits()
     } else {
         f.to_bits()

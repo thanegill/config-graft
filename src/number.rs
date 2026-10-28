@@ -8,8 +8,8 @@
 //!
 //! json-syntax cannot do this for us: it stores numbers lexically and compares them
 //! lexically, so by its own derived `Ord` a `1` is greater than a `0.1e+80` (and its
-//! `Eq` makes `1` differ from `1.0`). Comparison must
-//! go through [`NumberValue`], never through the parser's number type.
+//! `Eq` makes `1` differ from `1.0`). Comparison must go through [`NumberValue`],
+//! never through the parser's number type.
 //!
 //! [`NumberValue`] borrows the literal and allocates nothing, because `Node`
 //! equality and hashing sit inside the array engine's membership scans.
@@ -121,11 +121,9 @@ impl<'a> TryFrom<&'a str> for NumberValue<'a> {
         };
 
         // Drop the fraction's trailing zeros *before* anchoring the exponent at its
-        // last digit. Subtracting the untrimmed length first can underflow on an
-        // extreme exponent even when the trimmed result is perfectly describable,
-        // which left `1.0e-9223372036854775808` without an identity while
-        // `1e-...808` had one -- the same number comparing unequal, and a zero that
-        // did not equal zero.
+        // last digit: subtracting the untrimmed length first can underflow on an
+        // extreme exponent the trimmed literal describes fine, so
+        // `1.0e-9223372036854775808` would compare unequal to `1e-...808`.
         while let Some(trimmed) = fraction.strip_suffix('0') {
             fraction = trimmed;
         }

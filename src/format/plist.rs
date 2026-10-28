@@ -35,10 +35,7 @@ pub enum PlistLeaf {
 }
 
 // `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
-// `Hash`. `Float` compares and hashes via `canonical_float_bits`; the other
-// variants (`plist::Date` is `Eq + Hash`, `Data` is a `Vec<u8>`, `Uid` a `u64`)
-// match the old derived behavior byte-for-byte. Net change from the old derive:
-// two `NaN` floats now compare equal (see `canonical_float_bits`).
+// `Hash`. `Float` compares and hashes via `canonical_float_bits`.
 impl PartialEq for PlistLeaf {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -75,7 +72,8 @@ impl Hash for PlistLeaf {
     }
 }
 
-// `plist::Date` has no `Debug` impl, so `PlistLeaf` can't derive one.
+// Not derived: `plist::Date`'s own `Debug` goes through `to_xml_format`, which
+// panics outside years 0..=9999.
 impl std::fmt::Debug for PlistLeaf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -306,13 +304,12 @@ impl Format for Plist {
     }
 }
 
-/// Completes both the refusal and the pass-through report for a byte XML cannot
-/// carry.
+/// Completes the pass-through report for a byte XML cannot carry.
 const XML_UNREPRESENTABLE_REMEDY: &str =
     "pass --plist-format binary (or set `binary = true`) to store it properly";
 
-/// Why an XML run cannot keep a date as it stands -- the tail of both the warning
-/// and, when the floor costs an element, the refusal.
+/// Why an XML run cannot keep a date as it stands -- the tail of the normalization
+/// warning and of the collapse warning.
 const XML_DATE_RESOLUTION: &str =
     "an XML plist carries dates at one-second resolution; pass --plist-format \
      binary to keep the full value";
@@ -558,9 +555,9 @@ fn check_xml_representable(
 }
 
 /// A date as a diagnostic can print it. `to_xml_format` **panics** outside years
-/// 0..=9999, and rendering happens on every path -- including `--plist-binary`,
-/// which is allowed to carry such a date -- so the out-of-range rendering falls back
-/// to seconds from the epoch rather than aborting the run.
+/// 0..=9999, and rendering happens on every path -- including a binary write,
+/// which is allowed to carry such a date -- so the out-of-range rendering falls
+/// back to seconds from the epoch rather than aborting the run.
 fn render_date(date: plist::Date) -> String {
     if date_valid_in_xml(date) {
         return date.to_xml_format();

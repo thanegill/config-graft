@@ -128,8 +128,7 @@ impl Leaf for JsonLeaf {}
 /// iterative, but its `Value` *drops* recursively, so a limit enforced on the
 /// finished tree -- in `decode`, or anywhere after it -- aborts the process on the
 /// drop it was added to prevent. Nothing deeper than this becomes a `Value`, which
-/// is also what bounds the recursion in `decode`, `deep_merge`, `compact` and
-/// `encode`.
+/// is what bounds the recursion in `decode`, `deep_merge`, `Display` and `encode`.
 fn nests_within_limit(text: &str) -> bool {
     let mut depth = 0usize;
     let mut in_string = false;
