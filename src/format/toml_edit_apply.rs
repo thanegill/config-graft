@@ -38,7 +38,9 @@ pub fn apply(text: &str, result: &Node<TomlLeaf>) -> Result<String, Error> {
 }
 
 /// Reconcile one TOML table toward `desired`, mutating it in place. Recurses into
-/// sub-tables present on both sides so their inner comments survive.
+/// sub-tables present on both sides so their inner comments survive. A sub-table
+/// the result empties is made explicit: a dotted or implicit table with no
+/// entries prints as nothing.
 fn merge_table(table: &mut Table, desired: &IndexMap<String, Node<TomlLeaf>>) {
     // Removed keys: drop the whole entry (toml_edit removes its decor with it).
     let stale: Vec<String> = table
@@ -54,6 +56,10 @@ fn merge_table(table: &mut Table, desired: &IndexMap<String, Node<TomlLeaf>>) {
         // Existing sub-table + desired map: recurse to preserve inner formatting.
         if let (Some(Item::Table(sub)), Node::Map(m)) = (table.get_mut(k), node) {
             merge_table(sub, m);
+            if sub.is_empty() {
+                sub.set_implicit(false);
+                sub.set_dotted(false);
+            }
             continue;
         }
         // Unchanged: leave the item (and all of its decor) untouched.
@@ -96,6 +102,17 @@ mod tests {
     fn no_change_is_byte_identical() {
         let text = "# header\na = 1  # inline\n\n[b]\nc = 2\n";
         assert_eq!(apply(text, &result(text)).unwrap(), text);
+    }
+
+    #[test]
+    fn edits_inside_dotted_and_implicit_tables_keep_their_form() {
+        let text = "app = true\na.b = 1\na.c = 2\n\n[x.y]\nz = 1\n";
+        let out = apply(
+            text,
+            &result("app = true\na.b = 1\na.c = 3\n\n[x.y]\nz = 1\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "app = true\na.b = 1\na.c = 3\n\n[x.y]\nz = 1\n");
     }
 
     #[test]

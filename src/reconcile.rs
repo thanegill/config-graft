@@ -221,6 +221,9 @@ pub fn reconcile<L: Leaf>(
         ancestors.dedup();
         ancestors.sort_by_key(|p| std::cmp::Reverse(p.len()));
         for anc in &ancestors {
+            if desired.get_path(anc).is_some_and(Node::is_map) {
+                continue;
+            }
             if matches!(result.get_path(anc), Some(Node::Map(o)) if o.is_empty()) {
                 result.del_path(anc);
             }
@@ -677,6 +680,45 @@ mod tests {
                 true
             ),
             json!({"z":2})
+        );
+    }
+
+    #[test]
+    fn prune_keeps_an_object_desired_declares_empty() {
+        assert_eq!(
+            reconciled(
+                json!({"a":{"b":1},"app":true}),
+                json!({"a":{}}),
+                Some(json!({"a":{"b":1}})),
+                true
+            ),
+            json!({"a":{},"app":true})
+        );
+    }
+
+    #[test]
+    fn prune_keeps_a_nested_object_desired_declares_empty() {
+        assert_eq!(
+            reconciled(
+                json!({"a":{"b":{"c":1},"d":{"e":2}},"app":true}),
+                json!({"a":{"b":{}}}),
+                Some(json!({"a":{"b":{"c":1},"d":{"e":2}}})),
+                true
+            ),
+            json!({"a":{"b":{}},"app":true})
+        );
+    }
+
+    #[test]
+    fn prune_keeps_an_object_a_keyed_record_declares_empty() {
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s":[{"name":"w","cfg":{"x":1}}]}),
+                json!({"s":[{"name":"w","cfg":{}}]}),
+                Some(json!({"s":[{"name":"w","cfg":{"x":1}}]})),
+                &["name"],
+            ),
+            json!({"s":[{"name":"w","cfg":{}}]})
         );
     }
 
