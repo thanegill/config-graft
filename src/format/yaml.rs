@@ -29,9 +29,7 @@ pub enum YamlLeaf {
 }
 
 // `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
-// `Hash`. `Float` compares and hashes via `canonical_float_bits`; every other
-// variant matches the old derived behavior byte-for-byte. Net change from the
-// derive: two `NaN` floats now compare equal (see `canonical_float_bits`).
+// `Hash`. `Float` compares and hashes via `canonical_float_bits`.
 impl PartialEq for YamlLeaf {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {

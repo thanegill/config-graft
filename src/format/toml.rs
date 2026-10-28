@@ -29,10 +29,8 @@ pub enum TomlLeaf {
 
 // `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
 // `Hash`. `Float` compares and hashes via `canonical_float_bits`. `Datetime` is
-// `Eq` but not `Hash`, so it hashes via its canonical `Display` form (equal
-// datetimes render identically, so this stays consistent with its `PartialEq`);
-// comparison delegates to its own `Eq`. Net change from the old derive: two
-// `NaN` floats now compare equal (see `canonical_float_bits`).
+// `Eq` but not `Hash`, so it hashes via its canonical `Display` form: equal
+// datetimes render identically, which keeps the hash consistent with `Eq`.
 impl PartialEq for TomlLeaf {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {

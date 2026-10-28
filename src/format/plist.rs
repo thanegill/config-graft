@@ -35,10 +35,7 @@ pub enum PlistLeaf {
 }
 
 // `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
-// `Hash`. `Float` compares and hashes via `canonical_float_bits`; the other
-// variants (`plist::Date` is `Eq + Hash`, `Data` is a `Vec<u8>`, `Uid` a `u64`)
-// match the old derived behavior byte-for-byte. Net change from the old derive:
-// two `NaN` floats now compare equal (see `canonical_float_bits`).
+// `Hash`. `Float` compares and hashes via `canonical_float_bits`.
 impl PartialEq for PlistLeaf {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -75,7 +72,8 @@ impl Hash for PlistLeaf {
     }
 }
 
-// `plist::Date` has no `Debug` impl, so `PlistLeaf` can't derive one.
+// Not derived: `plist::Date`'s own `Debug` goes through `to_xml_format`, which
+// panics outside years 0..=9999.
 impl std::fmt::Debug for PlistLeaf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
