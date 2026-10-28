@@ -214,9 +214,8 @@ pub(crate) trait Backend {
     /// (byte formats only -- `None` for a tree, which has no single byte stream) and
     /// whether applying it would change on-disk state. Combined into one call so a
     /// byte backend reads the current target **once**: the comment-preserving
-    /// serialize and the change check share that single snapshot, as the pre-`Backend`
-    /// `run<F>` did (two separate reads could serialize from a stale template if the
-    /// target were edited between them).
+    /// serialize and the change check share one snapshot (two separate reads could
+    /// serialize from a stale template if the target were edited between them).
     fn prepare(
         args: &RunArgs,
         opts: WriteOpts,

@@ -261,8 +261,6 @@ impl Hash for FsLeaf {
 impl Node<FsLeaf> {
     /// This node's directory-attributes map, if it is a [`FsLeaf::DirectoryAttributes`]
     /// leaf -- pulls a directory's own attributes out of its map's reserved entry.
-    /// A directory-format inherent method on the shared `Node` (legal since `Node`
-    /// and `FsLeaf` are crate-local); the generic core stays format-agnostic.
     fn dir_attrs(&self) -> Option<&FsAttrs> {
         match self {
             Node::Leaf(FsLeaf::DirectoryAttributes(a)) => Some(a),
