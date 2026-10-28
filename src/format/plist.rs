@@ -1010,4 +1010,25 @@ mod tests {
         assert!(writes_xml(b"hello"));
         assert!(!writes_xml(b"bplist00"));
     }
+
+    #[test]
+    fn every_nan_is_one_value() {
+        // A sound `Eq` needs NaN to equal itself, and set-union's `HashSet` needs
+        // equal values to hash alike, whatever the NaN's sign or payload bits.
+        use std::hash::DefaultHasher;
+        let hash = |leaf: &PlistLeaf| {
+            let mut hasher = DefaultHasher::new();
+            leaf.hash(&mut hasher);
+            hasher.finish()
+        };
+        let nan = PlistLeaf::Float(f64::NAN);
+        for other in [-f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)] {
+            let other = PlistLeaf::Float(other);
+            assert_eq!(nan, other);
+            assert_eq!(hash(&nan), hash(&other));
+        }
+        // ... without making anything else equal.
+        assert_ne!(nan, PlistLeaf::Float(0.0));
+        assert_ne!(PlistLeaf::Float(1.0), PlistLeaf::Float(2.0));
+    }
 }
