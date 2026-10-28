@@ -590,11 +590,12 @@ impl Backend for Directory {
     }
 
     fn prepare(
-        _args: &RunArgs,
+        args: &RunArgs,
         _opts: WriteOpts,
         target: &Node<FsLeaf>,
         result: &Node<FsLeaf>,
     ) -> Result<Prepared, Error> {
+        directory::refuse_case_collisions(&args.target, target, result, args.case_sensitivity)?;
         // A tree has no byte form; change detection is a structural node compare.
         Ok(Prepared {
             output: None,
