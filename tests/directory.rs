@@ -457,6 +457,124 @@ fn mode_is_set_on_create_and_changed_on_update() {
     assert_eq!(mode_of(&target.join("run.sh")), 0o644);
 }
 
+/// Chmod `path` and everything under it: directories to `dir_mode`, files to
+/// `file_mode`. Each directory is opened before its entries are visited, so a
+/// second call undoes a read-only first one. Best-effort, safe while unwinding.
+fn chmod_tree(path: &Path, dir_mode: u32, file_mode: u32) {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !meta.is_dir() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(file_mode));
+        return;
+    }
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            chmod_tree(&entry.path(), dir_mode, file_mode);
+        }
+    }
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(dir_mode));
+}
+
+/// A tempdir whose read-only trees are opened up again before it is removed.
+struct ScratchDir(tempfile::TempDir);
+
+impl ScratchDir {
+    fn new() -> Self {
+        ScratchDir(tempfile::tempdir().unwrap())
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        chmod_tree(self.0.path(), 0o755, 0o644);
+    }
+}
+
+/// Whether a directory without owner-write refuses its owner here. As root it
+/// doesn't, and the read-only tests would pass with or without the fix.
+fn permissions_enforced(test: &str) -> bool {
+    let dir = ScratchDir::new();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let enforced = fs::write(dir.path().join("probe"), "").is_err();
+    if !enforced {
+        eprintln!("skipping {test}: permissions not enforced");
+    }
+    enforced
+}
+
+#[test]
+fn readonly_tree_is_updated_and_pruned_on_a_later_apply() {
+    if !permissions_enforced("readonly_tree_is_updated_and_pruned_on_a_later_apply") {
+        return;
+    }
+    // A Nix store `source`: directories 0555, files 0444.
+    let dir = ScratchDir::new();
+    let target = dir.path().join("target");
+    let d1 = dir.path().join("d1");
+    let d2 = dir.path().join("d2");
+    write(&d1.join("sub/f"), "one");
+    write(&d1.join("gone/g"), "g");
+    write(&d2.join("sub/f"), "two");
+    chmod_tree(&d1.join("sub"), 0o555, 0o444);
+    chmod_tree(&d1.join("gone"), 0o555, 0o444);
+    chmod_tree(&d2.join("sub"), 0o555, 0o444);
+
+    let first = graft(&[target.to_str().unwrap(), d1.to_str().unwrap()]);
+    assert!(first.status.success(), "{first:?}");
+    let second = graft(&[
+        target.to_str().unwrap(),
+        d2.to_str().unwrap(),
+        d1.to_str().unwrap(),
+    ]);
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(read(&target.join("sub/f")), "two");
+    assert_eq!(mode_of(&target.join("sub")), 0o555);
+    assert!(!target.join("gone").exists());
+    let check = graft(&[
+        "--check",
+        target.to_str().unwrap(),
+        d2.to_str().unwrap(),
+        d1.to_str().unwrap(),
+    ]);
+    assert_eq!(check.status.code(), Some(0), "{check:?}");
+}
+
+#[test]
+fn dropped_readonly_dir_holding_app_files_is_pruned_around_them() {
+    if !permissions_enforced("dropped_readonly_dir_holding_app_files_is_pruned_around_them") {
+        return;
+    }
+    let dir = ScratchDir::new();
+    let target = dir.path().join("target");
+    let d1 = dir.path().join("d1");
+    let d2 = dir.path().join("d2");
+    write(&d1.join("x/f"), "managed");
+    chmod_tree(&d1.join("x"), 0o555, 0o444);
+    fs::create_dir(&d2).unwrap();
+
+    let first = graft(&[target.to_str().unwrap(), d1.to_str().unwrap()]);
+    assert!(first.status.success(), "{first:?}");
+    chmod_tree(&target.join("x"), 0o755, 0o444);
+    write(&target.join("x/app"), "app");
+    fs::set_permissions(target.join("x"), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let second = graft(&[
+        target.to_str().unwrap(),
+        d2.to_str().unwrap(),
+        d1.to_str().unwrap(),
+    ]);
+    assert!(second.status.success(), "{second:?}");
+    assert!(!target.join("x/f").exists());
+    assert_eq!(read(&target.join("x/app")), "app");
+    assert_eq!(mode_of(&target.join("x")), 0o555);
+}
+
 #[test]
 fn empty_declared_dir_is_created() {
     let dir = tempfile::tempdir().unwrap();
