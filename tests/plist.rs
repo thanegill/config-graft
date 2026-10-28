@@ -1006,16 +1006,14 @@ fn a_key_that_renders_like_a_nested_path_does_not_license_a_byte() {
     assert_eq!(fs::read(&target).unwrap(), before);
 }
 
-#[test]
-fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
-    // The reported path escapes at render time only; escaping the segments would
-    // make `get_path` miss the array and silently drop this warning.
+/// Stderr of an XML run where TARGET's `key` holds two dates within one second,
+/// which flooring collapses, so the run warns of a collapse at `key` and succeeds.
+fn collapse_stderr(key: &str) -> Vec<u8> {
     let dir = tempfile::tempdir().unwrap();
-    let key = format!("a{}b", char::from(127u8));
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
     pdict(vec![(
-        &key[..],
+        key,
         plist::Value::Array(vec![
             instant(1_000_000, 200_000_000),
             instant(1_000_000, 700_000_000),
@@ -1024,7 +1022,7 @@ fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
     .to_file_binary(&target)
     .unwrap();
     pdict(vec![(
-        &key[..],
+        key,
         plist::Value::Array(vec![instant(1_000_000, 0)]),
     )])
     .to_file_binary(&desired)
@@ -1037,13 +1035,63 @@ fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
-    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{out:?}");
+    out.stderr
+}
+
+#[test]
+fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
+    // The reported path escapes at render time only; escaping the segments would
+    // make `get_path` miss the array and silently drop this warning.
+    let stderr = collapse_stderr(&format!("a{}b", char::from(127u8)));
+    let err = String::from_utf8_lossy(&stderr);
     assert!(
         err.contains("that normalizing made identical"),
         "the collapse diagnostic was lost: {err}"
     );
     assert!(err.contains(r"a\u{7f}b"), "path not escaped: {err}");
-    assert!(!out.stderr.contains(&127u8), "raw byte reached stderr");
+    assert!(!stderr.contains(&127u8), "raw byte reached stderr");
+}
+
+#[test]
+fn a_quoted_key_still_escapes_a_delete_byte() {
+    let stderr = collapse_stderr(&format!("[a{}b", char::from(127u8)));
+    let err = String::from_utf8_lossy(&stderr);
+    assert!(err.contains(r#""[a\u007fb""#), "path not escaped: {err}");
+    assert!(!stderr.contains(&127u8), "raw byte reached stderr");
+}
+
+#[test]
+fn a_date_refusal_names_its_nested_path_with_a_quoted_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let far_past =
+        std::time::SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(100_000_000_000);
+    pdict(vec![(
+        "outer",
+        pdict(vec![(
+            "[in]",
+            pdict(vec![(
+                "when",
+                plist::Value::Date(plist::Date::from(far_past)),
+            )]),
+        )]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![("a", pint(2))])
+        .to_file_binary(&desired)
+        .unwrap();
+
+    let err = stderr_of(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(err.contains(r#"`outer:"[in]":when`"#), "got: {err}");
 }
 
 #[test]
@@ -1721,4 +1769,22 @@ fn a_deeply_nested_desired_is_refused_not_aborted() {
         "aborted instead of refusing: {out:?}"
     );
     assert_eq!(fs::read(&target).unwrap(), before);
+}
+
+#[test]
+fn a_refusal_quotes_a_key_holding_a_bracket() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    let escape = char::from(0x1b_u8);
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    pdict(vec![(
+        "x",
+        pdict(vec![("[b]", plist::Value::String(format!("a{escape}")))]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains(r#"x:"[b]""#), "got: {err}");
 }
