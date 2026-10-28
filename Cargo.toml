@@ -17,6 +17,10 @@ sha2 = "0.10"
 xattr = "1"
 ryu = "1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Only `pathconf(_PC_CASE_SENSITIVE)`; already in the tree through sha2 and rustix.
+libc = "0.2"
+
 [dev-dependencies]
 # Only the reconcile tests, for their `json!(...)` fixtures.
 serde_json = { version = "1", features = ["preserve_order"] }

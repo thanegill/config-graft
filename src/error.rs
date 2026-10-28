@@ -93,6 +93,12 @@ pub enum Error {
     /// Two sibling names collide when case-folded, so they would map to one file on
     /// a case-insensitive filesystem -- refused rather than silently landing one.
     NameCollision { dir: PathBuf, a: String, b: String },
+    /// The reconciled tree names one entry under two cases, and probing TARGET's
+    /// filesystem for whether those are two files or one failed.
+    CaseSensitivityUnknown {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// A `directory` tree is nested deeper than the supported limit
     /// (refused rather than risk a stack overflow).
     TreeTooDeep(PathBuf),
@@ -229,6 +235,13 @@ impl fmt::Display for Error {
                  map to one file on a case-insensitive filesystem); refusing",
                 dir.display()
             ),
+            Error::CaseSensitivityUnknown { path, source } => write!(
+                f,
+                "cannot tell whether the filesystem holding {} is case-sensitive \
+                 ({source}), and the tree names an entry under two cases; pass \
+                 --case-sensitivity sensitive or insensitive",
+                path.display()
+            ),
             Error::TreeTooDeep(p) => {
                 write!(f, "directory tree nested too deeply at {}", p.display())
             }
@@ -245,7 +258,9 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Write { source, .. } | Error::Read { source, .. } => Some(source),
+            Error::Write { source, .. }
+            | Error::Read { source, .. }
+            | Error::CaseSensitivityUnknown { source, .. } => Some(source),
             Error::StdoutWrite(e) => Some(e),
             Error::PlistSerialize(e) => Some(e),
             _ => None,
