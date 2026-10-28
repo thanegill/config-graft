@@ -198,6 +198,7 @@ A TARGET that exists but is not a directory is a hard error, unlike the single-f
 
 - Each individual file write is atomic (temp-in-same-dir + `fsync` + set attributes + `rename`).
 - Each directory is then `fsync`ed once, after its entry changes settle, so those renames are crash-durable. This is best-effort: a filesystem that can't `fsync` a directory doesn't fail the apply.
+- A managed directory with a read-only mode is updated the same way: owner-write is lifted only while its entries or its own attributes change, then put back (§8).
 - See §8 and §10 for the cross-file-atomicity trade-off.
 
 **Flags.** The `directory` subcommand accepts only `--manage-root` / `--no-owner` / `--xattrs` (which shape the metadata reconcile above) plus the common flags. The byte-format flags don't exist on it: passing `--stdout`, `--indent`, `--plist-format`, `--array-strategy`, or `--sort-keys` is a clap usage error (exit 2), since a tree has no single byte stream, no arrays, and no stored on-disk order.
@@ -235,6 +236,9 @@ If the user/app changed the value, it is left intact. With no BASE, nothing is e
 - **Directory mode (§5b):**
   - Each file/symlink is written atomically the same way, with its reconciled metadata set on the temp file *before* the rename (§5b), so an attribute failure refuses cleanly and leaves nothing on disk.
   - A newly-created directory is made with the process umask and then reconciled to DESIRED's mode/owner/xattrs. The per-directory attribute apply is a small sequence of `chmod`/`chown`/`setxattr`, not itself atomic: a crash between them leaves the directory with some attributes applied, which a re-run completes.
+  - A directory's own attributes are applied *after* its entries. A managed directory whose mode lacks owner-write (e.g. `0555`, as a Nix store `source` has) gets owner-write lifted only while config-graft creates, replaces or removes one of its entries or changes its own attributes; its mode is then put back, or set to DESIRED's, so a read-only directory can be updated on every run, not just the first. That includes a directory DESIRED dropped that stays because it still holds app-created entries.
+  - A directory whose entries and attributes don't change is never `chmod`ed, and one the caller may not `chmod` (another user's) is left to its group and other bits, as before. The root without `--manage-root` is never `chmod`ed, so a read-only unmanaged root still refuses with `EACCES`.
+  - If the walk fails while owner-write is lifted, the mode is put back best-effort; a crash in that window leaves owner-write on, which the next run corrects as mode drift. On Linux a non-root `chmod` clears a directory's setgid bit when the caller isn't in its group, so the lift can drop that bit from such a directory, as applying its attributes already could.
   - The *whole-tree* apply is **not one transaction**: a crash mid-apply leaves a partial (though per-file consistent) tree, which a re-run completes idempotently (§10).
 
 ## 9. Non-goals
