@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **`managedPlist`:** a file entry at its defaults no longer rewrites a binary target as XML ([#43](https://github.com/thanegill/config-graft/issues/43)), so an ESC the app wrote no longer fails activation and sub-second dates aren't floored.
 - **`managedPlist`:** the cfprefsd path always writes binary, and `binary` defaults to `true` for a `cfprefsdDomain` entry.
 - **`managedPlist`:** a binary DESIRED is built with the entry's own `format` generator and `plistutil`, so a `format` override now applies on the binary path too.
+- **directory:** `Foo` and `foo` in one tree are kept where TARGET's filesystem keeps them apart, so a tree refused on Linux before is accepted there. Where the filesystem stores them as one file, the run refuses while writing, after the first is written; `--check` and `--diff` don't report it.
 - **A managed value equal to TARGET's is left as TARGET spells it**, so a JSON `2.50` no longer rewrites `2.5` while `--diff` shows nothing.
 
 ### Removed
@@ -61,6 +62,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **YAML:** replacing a scalar with a collection, or back, under an explicit `? key` or a tagged or anchored key is written instead of refused, as a plain `key:` at the line's indent.
 - **YAML writes floats as floats** (`1.0`, `-0.0`, `.inf`, `.nan`); `1.0` used to become the integer `1` and infinity a string.
 - **directory:** a managed directory with a read-only mode, such as a Nix store `source`'s `0555`, can be updated, pruned or replaced after the first apply instead of failing with `EACCES`; owner-write is lifted only while it changes, then put back.
+- **directory:** a DESIRED name that TARGET's filesystem stores as the same file as an existing entry (`Foo` over `foo` on APFS, or two Unicode spellings) is refused (exit 1) instead of rewriting forever, or, for a case-only rename, deleting the file.
 - **An XML plist with comments before `<?xml` is recognized as XML** ([#44](https://github.com/thanegill/config-graft/issues/44)), so values the app wrote pass through.
 - **The plist refusal says whether the target was binary or not recognized as XML**, since only one is fixed by dropping `--plist-format xml`.
 - **A deeply nested JSON or plist file is refused instead of crashing**; the depth limit rises from 128 to 512 containers.

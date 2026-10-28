@@ -815,23 +815,178 @@ fn no_owner_applies_without_managing_ownership() {
     assert_eq!(check.status.code(), Some(0));
 }
 
+/// Whether `dir`'s filesystem keeps `case-probe` and `CASE-PROBE` apart, found
+/// independently of config-graft.
+fn keeps_case_apart(dir: &Path) -> bool {
+    let probe = dir.join("case-probe");
+    fs::write(&probe, "").unwrap();
+    let apart = !dir.join("CASE-PROBE").exists();
+    fs::remove_file(probe).unwrap();
+    apart
+}
+
 #[test]
-fn refuses_case_fold_sibling_collision() {
+fn new_names_the_filesystem_stores_as_one_file_are_refused_while_writing() {
     let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("target");
     let desired = dir.path().join("desired");
     write(&desired.join("Foo"), "1");
     write(&desired.join("foo"), "2");
-    // On a case-insensitive filesystem the two collapse into one entry; only assert
-    // where both actually landed.
+    // DESIRED can hold both only on a filesystem that keeps case apart.
     if fs::read_dir(&desired).unwrap().count() < 2 {
-        eprintln!("skipping refuses_case_fold_sibling_collision: case-insensitive FS");
+        eprintln!(
+            "skipping new_names_the_filesystem_stores_as_one_file_are_refused_while_writing: \
+             case-insensitive FS"
+        );
         return;
     }
+    // The refusal needs TARGET on a filesystem that folds what DESIRED's keeps
+    // apart: run with TMPDIR on a case-sensitive volume on macOS, where cargo's
+    // own temp dir stays on the default case-insensitive one.
+    let target_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let target = target_dir.path().join("target");
+    fs::create_dir(&target).unwrap();
+    let apart = keeps_case_apart(&target);
+
+    let check = graft(&[
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(check.status.code(), Some(3), "{check:?}");
     let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(1));
+    let written = fs::read_dir(&target).unwrap().count();
+    if apart {
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(read(&target.join("Foo")), "1");
+        assert_eq!(read(&target.join("foo")), "2");
+    } else {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("would be one file"), "got: {err}");
+        assert_eq!(written, 1);
+        assert_eq!(read(&target.join("Foo")), "1");
+    }
+}
+
+/// TARGET holding `foo` and DESIRED declaring `Foo`: only the case differs.
+fn case_only_trees(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let target = dir.join("target");
+    let desired = dir.join("desired");
+    write(&target.join("foo"), "A");
+    write(&desired.join("Foo"), "B");
+    (target, desired)
+}
+
+#[test]
+fn existing_entry_under_another_spelling_follows_the_target_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let (target, desired) = case_only_trees(dir.path());
+    let apart = keeps_case_apart(dir.path());
+
+    if apart {
+        let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(read(&target.join("foo")), "A");
+        assert_eq!(read(&target.join("Foo")), "B");
+        let check = graft(&[
+            "--check",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ]);
+        assert_eq!(check.status.code(), Some(0), "{check:?}");
+        return;
+    }
+    for extra in ["--diff", "--check"] {
+        let out = graft(&[extra, target.to_str().unwrap(), desired.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1), "{extra}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("\"Foo\"") && err.contains("\"foo\""),
+            "got: {err}"
+        );
+        assert!(err.contains("would be one file"), "got: {err}");
+    }
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(read(&target.join("foo")), "A");
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+}
+
+#[test]
+fn existing_entry_under_another_spelling_in_a_subdirectory_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&target.join("sub/bar"), "A");
+    write(&desired.join("sub/Bar"), "B");
+    if keeps_case_apart(dir.path()) {
+        eprintln!(
+            "skipping existing_entry_under_another_spelling_in_a_subdirectory_names_it: \
+             case-sensitive FS"
+        );
+        return;
+    }
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("collide"), "got: {err}");
+    let sub = target.join("sub");
+    assert!(err.contains("would be one file"), "got: {err}");
+    assert!(err.contains(sub.to_str().unwrap()), "got: {err}");
+}
+
+#[test]
+fn case_only_rename_never_deletes_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let [target, desired, base] = ["target", "desired", "base"].map(|name| dir.path().join(name));
+    write(&target.join("foo"), "A");
+    write(&base.join("foo"), "A");
+    write(&desired.join("Foo"), "A");
+    let apart = keeps_case_apart(dir.path());
+
+    let out = graft(&[
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    let names: Vec<_> = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    if apart {
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(names, ["Foo"]);
+    } else {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("would be one file"));
+        assert_eq!(names, ["foo"]);
+    }
+    assert_eq!(read(&target.join("Foo")), "A");
+}
+
+#[test]
+fn unicode_normalization_pair_follows_the_target_filesystem() {
+    // Assumes APFS or a byte-exact filesystem: HFS+ stores names as NFD, so DESIRED
+    // would read back already matching TARGET.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    let acute = char::from_u32(0x301).unwrap();
+    let decomposed = format!("cafe{acute}");
+    let composed = String::from_iter(['c', 'a', 'f', char::from_u32(0xe9).unwrap()]);
+    write(&target.join(&decomposed), "A");
+    write(&desired.join(&composed), "B");
+    let one_file = target.join(&composed).exists();
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    if one_file {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("would be one file"));
+        assert_eq!(read(&target.join(&decomposed)), "A");
+    } else {
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(read(&target.join(&composed)), "B");
+    }
 }
 
 #[test]
