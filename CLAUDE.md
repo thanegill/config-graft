@@ -8,6 +8,7 @@ Three-way reconcile (kubectl-apply-style) for app-owned **JSON / plist / YAML / 
 nix develop --command cargo test     # unit (src) + per-format integration (tests/)
 nix develop --command cargo clippy
 nix develop --command cargo fmt -- --check
+nix develop --command cargo mutants --in-diff <(git diff origin/master)   # mutation-test only the code the diff touches
 nix build                            # hermetic; runs the test suite in checkPhase
 nix flake check                      # the module layer (modules/tests.nix) -- cargo covers none of it
 ```
