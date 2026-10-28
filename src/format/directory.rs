@@ -585,9 +585,102 @@ fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<FsLeaf>>) -> bool {
     walk(cur, &mut Vec::new(), base)
 }
 
-/// Reconcile the entries of one directory: apply its own attributes, create/update
-/// every `want` child, then remove every `cur` child that `want` dropped. `want`
-/// and `cur` are [`FsTree::Dir`]s, so their `entries` cannot contain a directory's
+/// Write access to one directory's entries for the length of its walk.
+///
+/// Creating, renaming over or unlinking an entry needs write permission on the
+/// directory itself, which a managed directory whose desired mode drops owner-write
+/// (`0o555`, typical of a Nix store `source`) stops granting once an apply has set
+/// that mode, and so does setting one of its xattrs. [`EntryAccess::lift`] lifts
+/// owner-write only when the walk is about to change an entry or the directory's
+/// own attributes, so a directory that stays the same is never chmodded;
+/// [`EntryAccess::restore`] puts the mode back once the entries are settled. An
+/// access dropped with owner-write still lifted (an error mid-walk) puts the mode
+/// back best-effort. An unmanaged directory (the root without `--manage-root`) is
+/// never chmodded. Every create, replace or unlink of an entry, and every change
+/// to a directory's own attributes, goes through that directory's `lift` first.
+struct EntryAccess<'a> {
+    dir: &'a Path,
+    state: AccessState,
+}
+
+enum AccessState {
+    /// The directory's mode has not been looked at yet.
+    Unchecked,
+    /// Unmanaged, already writable, not ours to chmod, or settled.
+    NothingToRestore,
+    /// Owner-write was lifted from this mode.
+    Lifted(u32),
+}
+
+impl<'a> EntryAccess<'a> {
+    /// Access to a managed directory, whose mode may be lifted.
+    fn managed(dir: &'a Path) -> Self {
+        EntryAccess {
+            dir,
+            state: AccessState::Unchecked,
+        }
+    }
+
+    /// Access to a directory config-graft must never chmod.
+    fn unmanaged(dir: &'a Path) -> Self {
+        EntryAccess {
+            dir,
+            state: AccessState::NothingToRestore,
+        }
+    }
+
+    /// Make the directory's entries writable, lifting owner-write if its mode
+    /// lacks it. Only the first call looks at the directory. A directory the
+    /// caller may not chmod (another user's) is left as it is, so its group or
+    /// other bits still decide, as they did before any lift.
+    fn lift(&mut self) -> Result<(), Error> {
+        let AccessState::Unchecked = self.state else {
+            return Ok(());
+        };
+        self.state = AccessState::NothingToRestore;
+        let mode = fs::metadata(self.dir)
+            .map_err(|e| Error::read(self.dir, e))?
+            .permissions()
+            .mode()
+            & 0o7777;
+        if mode & 0o200 != 0 {
+            return Ok(());
+        }
+        match fs::set_permissions(self.dir, fs::Permissions::from_mode(mode | 0o200)) {
+            Ok(()) => self.state = AccessState::Lifted(mode),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {}
+            Err(e) => return Err(Error::write(self.dir, e)),
+        }
+        Ok(())
+    }
+
+    /// Put back the mode [`EntryAccess::lift`] lifted owner-write from, if it did.
+    fn restore(&mut self) -> Result<(), Error> {
+        if let AccessState::Lifted(mode) =
+            std::mem::replace(&mut self.state, AccessState::NothingToRestore)
+        {
+            fs::set_permissions(self.dir, fs::Permissions::from_mode(mode))
+                .map_err(|e| Error::write(self.dir, e))?;
+        }
+        Ok(())
+    }
+
+    /// Forget a lifted mode without putting it back: the directory's final mode
+    /// has been applied, or the directory is gone.
+    fn dismiss(&mut self) {
+        self.state = AccessState::NothingToRestore;
+    }
+}
+
+impl Drop for EntryAccess<'_> {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// Reconcile one directory: create/update every `want` child, remove every `cur`
+/// child that `want` dropped, then apply the directory's own attributes. `want` and
+/// `cur` are [`FsTree::Dir`]s, so their `entries` cannot contain a directory's
 /// attributes -- the create/remove loops build paths only from real entry names.
 fn apply_dir(
     dir: &Path,
@@ -605,16 +698,30 @@ fn apply_dir(
         _ => None,
     };
 
+    // A nested directory whose attributes DESIRED dropped, but which stays for the
+    // app's entries, still had them managed: `cur` carries them.
+    let mut access = match (want_attrs, cur_dir.and_then(|(a, _)| a)) {
+        (None, None) => EntryAccess::unmanaged(dir),
+        _ => EntryAccess::managed(dir),
+    };
     let mut changed = false;
     // Create/update this directory's entries, then remove the ones DESIRED dropped.
     for (name, want_child) in want_entries {
         let cur_child = cur_dir.and_then(|(_, e)| e.get(name));
         let base_child = base.and_then(Node::as_map).and_then(|m| m.get(*name));
-        changed |= apply_node(&dir.join(name), cur_child, want_child, base_child, policy)?;
+        changed |= apply_node(
+            &dir.join(name),
+            cur_child,
+            want_child,
+            base_child,
+            policy,
+            &mut access,
+        )?;
     }
     if let Some((_, cur_entries)) = cur_dir {
         for (name, cur_child) in cur_entries {
             if !want_entries.contains_key(name) {
+                access.lift()?;
                 changed |= remove_node(&dir.join(name), cur_child)?;
             }
         }
@@ -622,13 +729,16 @@ fn apply_dir(
     // Apply the directory's *own* attributes last, once its contents are in place:
     // a desired mode can drop owner-write (e.g. `0o555`, typical of a Nix store
     // `source`), which would make writing entries *into* the directory fail with
-    // EACCES if applied first. Absent attrs (the root without `--manage-root`)
-    // leave the directory untouched.
-    if let Some(want_attrs) = want_attrs {
-        if cur_dir.and_then(|(a, _)| a) != Some(want_attrs) {
+    // EACCES if applied first. Absent attrs (the unmanaged root, or a directory
+    // whose attributes DESIRED dropped) are not applied.
+    match want_attrs {
+        Some(want_attrs) if cur_dir.and_then(|(a, _)| a) != Some(want_attrs) => {
+            access.lift()?;
             want_attrs.apply(dir, policy)?;
+            access.dismiss();
             changed = true;
         }
+        _ => access.restore()?,
     }
     // Make this directory's entry changes (renames/creates/unlinks) durable once,
     // after they've all settled (nested directories fsync themselves first). This
@@ -641,13 +751,15 @@ fn apply_dir(
 }
 
 /// Reconcile a single path against its desired node, handling every
-/// create/update/type-change case.
+/// create/update/type-change case. `parent` is the access to the directory holding
+/// `path`, lifted before anything creates, replaces or removes `path`.
 fn apply_node(
     path: &Path,
     cur: Option<&FsTree>,
     want: &FsTree,
     base: Option<&Node<FsLeaf>>,
     policy: AttrPolicy,
+    parent: &mut EntryAccess<'_>,
 ) -> Result<bool, Error> {
     match want {
         FsTree::Dir { .. } => {
@@ -658,12 +770,14 @@ fn apply_node(
                 Some(c @ FsTree::Dir { .. }) => Some(c),
                 // Type change (file/symlink -> directory): drop the leaf first.
                 Some(_) => {
+                    parent.lift()?;
                     path.remove_leaf()?;
                     path.mkdir()?;
                     changed = true;
                     None
                 }
                 None => {
+                    parent.lift()?;
                     path.mkdir()?;
                     changed = true;
                     None
@@ -685,11 +799,12 @@ fn apply_node(
                 ..
             }) if cl == len && cd == digest && ca == attrs => Ok(false),
             Some(cur @ FsTree::Dir { .. }) => {
-                clear_dir_for_leaf(path, cur, base)?;
+                clear_dir_for_leaf(path, cur, base, parent)?;
                 write_file(path, source, attrs, policy)?;
                 Ok(true)
             }
             _ => {
+                parent.lift()?;
                 write_file(path, source, attrs, policy)?;
                 Ok(true)
             }
@@ -697,15 +812,17 @@ fn apply_node(
         FsTree::Symlink { target } => match cur {
             Some(FsTree::Symlink { target: ct }) if ct == target => Ok(false),
             Some(cur @ FsTree::Dir { .. }) => {
-                clear_dir_for_leaf(path, cur, base)?;
+                clear_dir_for_leaf(path, cur, base, parent)?;
                 path.atomic_symlink(target)
                     .map_err(|e| Error::write(path, e))?;
                 Ok(true)
             }
-            _ => path
-                .atomic_symlink(target)
-                .map(|()| true)
-                .map_err(|e| Error::write(path, e)),
+            _ => {
+                parent.lift()?;
+                path.atomic_symlink(target)
+                    .map(|()| true)
+                    .map_err(|e| Error::write(path, e))
+            }
         },
     }
 }
@@ -713,11 +830,18 @@ fn apply_node(
 /// For a directory → file/symlink type change: remove the subtree so the leaf can
 /// take its place, but refuse rather than delete a directory holding app-created
 /// content (entries never in BASE), which the preservation guarantee protects.
-fn clear_dir_for_leaf(path: &Path, cur: &FsTree, base: Option<&Node<FsLeaf>>) -> Result<(), Error> {
+fn clear_dir_for_leaf(
+    path: &Path,
+    cur: &FsTree,
+    base: Option<&Node<FsLeaf>>,
+    parent: &mut EntryAccess<'_>,
+) -> Result<(), Error> {
     if fstree_has_unmanaged(cur, base) {
         return Err(Error::AppDirWouldBeDeleted(path.to_path_buf()));
     }
-    path.remove_tree()
+    parent.lift()?;
+    remove_node(path, cur)?;
+    Ok(())
 }
 
 /// Atomically write a file at `dest`, streaming its bytes from `source` (never
@@ -847,7 +971,7 @@ impl FsAttrs {
 }
 
 /// Filesystem operations local to the directory backend, expressed as methods on
-/// `Path` so call sites read as `path.mkdir()` / `dest.remove_tree()`. `Path` is a
+/// `Path` so call sites read as `path.mkdir()` / `path.remove_leaf()`. `Path` is a
 /// `std` type, so these hang off a private extension trait rather than an inherent
 /// impl; every method is defined and used only within this module.
 trait PathExt {
@@ -860,8 +984,6 @@ trait PathExt {
     fn mkdir(&self) -> Result<(), Error>;
     /// Remove a file or symlink (unlinks the link itself, never its target).
     fn remove_leaf(&self) -> Result<(), Error>;
-    /// Recursively remove a directory subtree (for a directory → leaf type change).
-    fn remove_tree(&self) -> Result<(), Error>;
     /// Atomically create/replace a symlink: make it under a temp name in the same
     /// directory, then rename over `self` (rename atomically replaces a
     /// file/symlink, but not a non-empty directory -- callers handle that type
@@ -903,10 +1025,6 @@ impl PathExt for Path {
         fs::remove_file(self).map_err(|e| Error::write(self, e))
     }
 
-    fn remove_tree(&self) -> Result<(), Error> {
-        fs::remove_dir_all(self).map_err(|e| Error::write(self, e))
-    }
-
     fn atomic_symlink(&self, target: &Path) -> io::Result<()> {
         let dir = crate::dest_dir(self);
         fs::create_dir_all(&dir)?;
@@ -942,6 +1060,8 @@ fn remove_node(path: &Path, node: &FsTree) -> Result<bool, Error> {
         // `entries` holds only real children (the attributes are a separate field),
         // so the recursion builds paths only from actual filenames.
         FsTree::Dir { entries, .. } => {
+            let mut access = EntryAccess::managed(path);
+            access.lift()?;
             for (name, child) in entries {
                 remove_node(&path.join(name), child)?;
             }
@@ -961,6 +1081,7 @@ fn remove_node(path: &Path, node: &FsTree) -> Result<bool, Error> {
                 }
             }
             fs::remove_dir(path).map_err(|e| Error::write(path, e))?;
+            access.dismiss();
         }
         FsTree::File { .. } | FsTree::Symlink { .. } => path.remove_leaf()?,
     }
@@ -1325,19 +1446,299 @@ mod tests {
         // A directory whose desired mode drops owner-write (0o555, typical of a Nix
         // store `source`) must still get its entries written: its own attributes are
         // applied *after* its contents, not before (which would EACCES child writes).
-        let src = tempfile::tempdir().unwrap();
+        let src = ScratchDir::new();
         fs::create_dir(src.path().join("d")).unwrap();
         fs::write(src.path().join("d/f.txt"), "x").unwrap();
         fs::set_permissions(src.path().join("d"), fs::Permissions::from_mode(0o555)).unwrap();
         let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
 
-        let dst = tempfile::tempdir().unwrap();
+        let dst = ScratchDir::new();
         let root = dst.path().join("out");
         apply_tree(&root, None, &want, None, POLICY).unwrap();
         assert_eq!(fs::read_to_string(root.join("d/f.txt")).unwrap(), "x");
         assert_eq!(dir_mode(&root.join("d")), 0o555);
-        // Restore write so the tempdir can be cleaned up.
-        fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A tempdir that gives the directories below it owner-write back before it is
+    /// removed, so read-only ones don't outlive a test, even one that panics.
+    struct ScratchDir(tempfile::TempDir);
+
+    impl ScratchDir {
+        fn new() -> Self {
+            ScratchDir(tempfile::tempdir().unwrap())
+        }
+
+        fn path(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            for_each_subdir(self.path(), &|d| {
+                if let Ok(meta) = fs::metadata(d) {
+                    let mode = meta.permissions().mode() | 0o200;
+                    let _ = fs::set_permissions(d, fs::Permissions::from_mode(mode));
+                }
+            });
+        }
+    }
+
+    /// Call `f` on every directory below `dir`, parents before their children.
+    fn for_each_subdir(dir: &Path, f: &dyn Fn(&Path)) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                f(&path);
+                for_each_subdir(&path, f);
+            }
+        }
+    }
+
+    /// Materialize `specs` like [`tree`], then drop owner-write from every
+    /// directory below `dir` (0o555), as a Nix store `source` has it.
+    fn readonly_tree(dir: &Path, specs: &[(&str, &str, u32)]) -> Node<FsLeaf> {
+        tree(dir, specs);
+        for_each_subdir(dir, &|d| {
+            fs::set_permissions(d, fs::Permissions::from_mode(0o555)).unwrap();
+        });
+        read_tree(dir, false, POLICY).unwrap().unwrap()
+    }
+
+    /// Whether a directory without owner-write refuses its owner here. As root it
+    /// doesn't, and the read-only tests would pass with or without the fix.
+    fn permissions_enforced(test: &str) -> bool {
+        let dir = ScratchDir::new();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let enforced = fs::write(dir.path().join("probe"), "").is_err();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        if !enforced {
+            eprintln!("skipping {test}: permissions not enforced");
+        }
+        enforced
+    }
+
+    fn ctime(path: &Path) -> (i64, i64) {
+        let meta = fs::metadata(path).unwrap();
+        (meta.ctime(), meta.ctime_nsec())
+    }
+
+    #[test]
+    fn readonly_dir_is_updated_on_a_later_apply() {
+        if !permissions_enforced("readonly_dir_is_updated_on_a_later_apply") {
+            return;
+        }
+        let (dst, src1, src2) = (ScratchDir::new(), ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_tree(
+            src1.path(),
+            &[("sub/f", "one", 0o444), ("sub/dropped", "x", 0o444)],
+        );
+        let after = readonly_tree(src2.path(), &[("sub/f", "two", 0o444)]);
+
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        assert!(apply_tree(&root, Some(&cur), &after, None, POLICY).unwrap());
+
+        assert_eq!(fs::read_to_string(root.join("sub/f")).unwrap(), "two");
+        assert_eq!(dir_mode(&root.join("sub")), 0o555);
+        assert_eq!(read_tree(&root, false, POLICY).unwrap().unwrap(), after);
+    }
+
+    #[test]
+    fn readonly_dir_takes_an_xattr_change() {
+        if !permissions_enforced("readonly_dir_takes_an_xattr_change") {
+            return;
+        }
+        let readonly_dir_with_xattr = |src: &Path, value: &[u8]| {
+            let d = src.join("d");
+            fs::create_dir(&d).unwrap();
+            fs::write(d.join("f"), "same").unwrap();
+            let supported = xattr::set(&d, "user.cg", value).is_ok();
+            fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
+            supported.then(|| read_tree(src, false, POLICY).unwrap().unwrap())
+        };
+        let (dst, src1, src2) = (ScratchDir::new(), ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_dir_with_xattr(src1.path(), b"1");
+        let after = readonly_dir_with_xattr(src2.path(), b"2");
+        let (Some(before), Some(after)) = (before, after) else {
+            eprintln!("skipping readonly_dir_takes_an_xattr_change: xattrs unsupported here");
+            return;
+        };
+
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        assert!(apply_tree(&root, Some(&cur), &after, None, POLICY).unwrap());
+
+        assert_eq!(read_tree(&root, false, POLICY).unwrap().unwrap(), after);
+    }
+
+    #[test]
+    fn readonly_dir_is_pruned() {
+        if !permissions_enforced("readonly_dir_is_pruned") {
+            return;
+        }
+        let (dst, src1, src2) = (ScratchDir::new(), ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_tree(
+            src1.path(),
+            &[
+                ("keep/k", "k", 0o444),
+                ("keep/gone", "g", 0o444),
+                ("sub/inner/f", "one", 0o444),
+            ],
+        );
+        let after = readonly_tree(src2.path(), &[("keep/k", "k", 0o444)]);
+
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        assert!(apply_tree(&root, Some(&cur), &after, None, POLICY).unwrap());
+
+        assert_eq!(read_tree(&root, false, POLICY).unwrap().unwrap(), after);
+    }
+
+    #[test]
+    fn readonly_dir_whose_attributes_are_pruned_keeps_its_app_entries() {
+        if !permissions_enforced("readonly_dir_whose_attributes_are_pruned_keeps_its_app_entries") {
+            return;
+        }
+        let (dst, src) = (ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_tree(src.path(), &[("x/f", "managed", 0o444)]);
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        fs::set_permissions(root.join("x"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(root.join("x/app"), "app").unwrap();
+        fs::set_permissions(root.join("x"), fs::Permissions::from_mode(0o555)).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        // What the engine makes of DESIRED dropping `x` while the app's file keeps
+        // it: `x`'s attributes and `x/f` pruned, `x/app` passed through.
+        let mut want = cur.clone();
+        if let Node::Map(entries) = &mut want {
+            if let Some(Node::Map(x)) = entries.get_mut("x") {
+                x.shift_remove(DIR_ATTRS_KEY);
+                x.shift_remove("f");
+            }
+        }
+
+        assert!(apply_tree(&root, Some(&cur), &want, Some(&before), POLICY).unwrap());
+
+        assert!(!root.join("x/f").exists());
+        assert_eq!(fs::read_to_string(root.join("x/app")).unwrap(), "app");
+        assert_eq!(dir_mode(&root.join("x")), 0o555);
+    }
+
+    #[test]
+    fn readonly_dir_is_replaced_by_a_file_or_symlink() {
+        if !permissions_enforced("readonly_dir_is_replaced_by_a_file_or_symlink") {
+            return;
+        }
+        let (dst, src1, src2) = (ScratchDir::new(), ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_tree(
+            src1.path(),
+            &[("p/inner/f", "one", 0o444), ("s/inner/f", "one", 0o444)],
+        );
+        symlink("elsewhere", src2.path().join("s")).unwrap();
+        let after = tree(src2.path(), &[("p", "now a file", 0o644)]);
+
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        assert!(apply_tree(&root, Some(&cur), &after, Some(&before), POLICY).unwrap());
+
+        assert_eq!(fs::read_to_string(root.join("p")).unwrap(), "now a file");
+        assert_eq!(
+            fs::read_link(root.join("s")).unwrap(),
+            Path::new("elsewhere")
+        );
+    }
+
+    #[test]
+    fn readonly_dir_takes_a_mode_change() {
+        if !permissions_enforced("readonly_dir_takes_a_mode_change") {
+            return;
+        }
+        let (dst, src1, src2) = (ScratchDir::new(), ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_tree(src1.path(), &[("d/f", "same", 0o444)]);
+        readonly_tree(src2.path(), &[("d/f", "same", 0o444)]);
+        fs::set_permissions(src2.path().join("d"), fs::Permissions::from_mode(0o500)).unwrap();
+        let after = read_tree(src2.path(), false, POLICY).unwrap().unwrap();
+
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        assert!(apply_tree(&root, Some(&cur), &after, None, POLICY).unwrap());
+
+        assert_eq!(dir_mode(&root.join("d")), 0o500);
+    }
+
+    #[test]
+    fn readonly_dir_whose_entries_are_unchanged_is_not_chmodded() {
+        if !permissions_enforced("readonly_dir_whose_entries_are_unchanged_is_not_chmodded") {
+            return;
+        }
+        let (dst, src1, src2) = (ScratchDir::new(), ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_tree(
+            src1.path(),
+            &[("still/f", "same", 0o444), ("moved/g", "one", 0o444)],
+        );
+        let after = readonly_tree(
+            src2.path(),
+            &[("still/f", "same", 0o444), ("moved/g", "two", 0o444)],
+        );
+
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let still_ctime = ctime(&root.join("still"));
+        assert!(apply_tree(&root, Some(&cur), &after, None, POLICY).unwrap());
+
+        assert_eq!(ctime(&root.join("still")), still_ctime);
+    }
+
+    #[test]
+    fn unmanaged_readonly_root_is_never_chmodded() {
+        if !permissions_enforced("unmanaged_readonly_root_is_never_chmodded") {
+            return;
+        }
+        let (dst, src) = (ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        let want = tree(src.path(), &[("f", "x", 0o644)]);
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+
+        assert!(apply_tree(&root, Some(&cur), &want, None, POLICY).is_err());
+
+        assert_eq!(dir_mode(&root), 0o555);
+        assert!(!root.join("f").exists());
+    }
+
+    #[test]
+    fn failed_apply_restores_readonly_dir_mode() {
+        if !permissions_enforced("failed_apply_restores_readonly_dir_mode") {
+            return;
+        }
+        let (dst, src1, src2) = (ScratchDir::new(), ScratchDir::new(), ScratchDir::new());
+        let root = dst.path().join("out");
+        let before = readonly_tree(src1.path(), &[("sub/f", "one", 0o444)]);
+        let after = readonly_tree(src2.path(), &[("sub/f", "two", 0o444)]);
+        // The new contents can no longer be read, so the write into `sub` fails
+        // after owner-write was lifted for it.
+        let unreadable = src2.path().join("sub/f");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        apply_tree(&root, None, &before, None, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        match apply_tree(&root, Some(&cur), &after, None, POLICY) {
+            Err(Error::Read { path, .. }) => assert_eq!(path, unreadable),
+            other => panic!("expected the read of {unreadable:?} to fail, got {other:?}"),
+        }
+
+        assert_eq!(fs::read_to_string(root.join("sub/f")).unwrap(), "one");
+        assert_eq!(dir_mode(&root.join("sub")), 0o555);
     }
 
     #[test]
