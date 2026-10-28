@@ -1,5 +1,5 @@
-//! Run diagnostics: the things config-graft did to a value that the caller did
-//! not ask for and could not see from the output alone.
+//! Run diagnostics: the things config-graft did to a value, or to TARGET's mode,
+//! that the caller did not ask for and could not see from the output alone.
 //!
 //! A [`Warning`] is produced wherever data changes shape without being a managed
 //! edit, and every one of them prints through [`crate::backend::emit`], so there
@@ -7,8 +7,11 @@
 //!
 //! Warnings are diagnostics only -- they never change the exit code.
 
+use std::path::PathBuf;
+
 use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
+use crate::{SETGID, SETUID, STICKY};
 
 /// Which of a run's inputs a warning is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,6 +88,15 @@ pub enum Warning<L: Leaf> {
         kept: usize,
         because: &'static str,
     },
+    /// A rewrite of `file` kept its permission bits but not every setuid, setgid or
+    /// sticky bit: its mode went `from` -> `to`. About the file rather than a key, so
+    /// `path` is always the document root.
+    SpecialModeBitsCleared {
+        path: KeyPath,
+        file: PathBuf,
+        from: u32,
+        to: u32,
+    },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -96,7 +108,8 @@ impl<L: Leaf> Warning<L> {
             | Warning::ValueNormalized { path, .. }
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
+            | Warning::ArrayCollapsed { path, .. }
+            | Warning::SpecialModeBitsCleared { path, .. } => path,
         }
     }
 
@@ -109,7 +122,8 @@ impl<L: Leaf> Warning<L> {
             | Warning::ValueNormalized { path, .. }
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
+            | Warning::ArrayCollapsed { path, .. }
+            | Warning::SpecialModeBitsCleared { path, .. } => path,
         }
     }
 
@@ -161,6 +175,20 @@ impl<L: Leaf> Warning<L> {
                  identical, and membership is a set, so only {kept} survived; \
                  {because}"
             ),
+            Warning::SpecialModeBitsCleared { file, from, to, .. } => {
+                let cleared: Vec<&str> =
+                    [(SETUID, "setuid"), (SETGID, "setgid"), (STICKY, "sticky")]
+                        .into_iter()
+                        .filter(|(bit, _)| from & !to & bit != 0)
+                        .map(|(_, name)| name)
+                        .collect();
+                format!(
+                    "`{}` had mode 0{from:03o}; the rewrite cleared {}, as an in-place \
+                     write by the same user would, so it is now 0{to:03o}",
+                    file.display(),
+                    cleared.join(" and ")
+                )
+            }
             Warning::MoreValuesNormalized {
                 source,
                 more,
@@ -182,5 +210,26 @@ impl<L: Leaf> Warning<L> {
                 source.label()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::json::JsonLeaf;
+
+    #[test]
+    fn a_mode_change_names_every_bit_it_dropped() {
+        let warning: Warning<JsonLeaf> = Warning::SpecialModeBitsCleared {
+            path: KeyPath::new(),
+            file: PathBuf::from("/x/config.json"),
+            from: 0o7755,
+            to: 0o1755,
+        };
+        assert_eq!(
+            warning.render("."),
+            "`/x/config.json` had mode 07755; the rewrite cleared setuid and setgid, as \
+             an in-place write by the same user would, so it is now 01755"
+        );
     }
 }
