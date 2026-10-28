@@ -136,11 +136,14 @@ impl Format for Yaml {
     fn parse(bytes: &[u8]) -> Option<Node<YamlLeaf>> {
         let text = std::str::from_utf8(bytes).ok()?;
         let docs = saphyr::Yaml::load_from_str(text).ok()?;
-        // Single document only; a multi-doc stream is not reconcilable here.
-        let [doc] = docs.as_slice() else {
-            return None;
-        };
-        Yaml::decode(doc)
+        match docs.as_slice() {
+            [] if bytes.iter().all(u8::is_ascii_whitespace) => None,
+            [] => Some(Node::empty_map()),
+            [doc] if doc.is_null() && is_empty_document(text) => Some(Node::empty_map()),
+            [doc] => Yaml::decode(doc),
+            // A multi-doc stream is not reconcilable here.
+            _ => None,
+        }
     }
 
     fn serialize(
@@ -157,6 +160,15 @@ impl Format for Yaml {
             super::yaml_edit::apply(current, node).map(String::into_bytes)
         }
     }
+}
+
+/// Whether `text` is one document whose marked root has an empty span, as a
+/// bare `---` does. saphyr reads that root as null, the same as an explicit
+/// `null` or `~`, whose spans are not empty. A `---` closed by `...` gets a span
+/// ending at the `...`, so it does not count either.
+fn is_empty_document(text: &str) -> bool {
+    saphyr::MarkedYaml::load_from_str(text)
+        .is_ok_and(|docs| matches!(docs.as_slice(), [root] if root.span.start == root.span.end))
 }
 
 /// Canonical YAML emission, used only when there is no original text to preserve.
@@ -196,13 +208,8 @@ pub(super) fn yaml_string(s: String) -> saphyr::Yaml<'static> {
 mod tests {
     use super::*;
 
-    /// Parse a single YAML document into a `Node` (mirrors `Yaml::parse`).
     fn yaml_to_node(text: &str) -> Option<Node<YamlLeaf>> {
-        let docs = saphyr::Yaml::load_from_str(text).ok()?;
-        let [doc] = docs.as_slice() else {
-            return None;
-        };
-        Yaml::decode(doc)
+        Yaml::parse(text.as_bytes())
     }
 
     /// Emit a `Node` as canonical YAML.
@@ -276,6 +283,13 @@ mod tests {
     #[test]
     fn multi_document_stream_is_rejected() {
         assert!(yaml_to_node("---\na: 1\n---\nb: 2\n").is_none());
+    }
+
+    #[test]
+    fn a_document_with_no_node_is_an_empty_map() {
+        assert_eq!(yaml_to_node("# c\n"), Some(Node::empty_map()));
+        assert_eq!(yaml_to_node("---\n"), Some(Node::empty_map()));
+        assert_eq!(yaml_to_node(" \n"), None);
     }
 
     #[test]
