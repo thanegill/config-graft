@@ -19,7 +19,15 @@
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "config-graft";
           version = "0.1.1";
-          src = ./.;
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./src
+              ./tests
+            ];
+          };
           cargoLock.lockFile = ./Cargo.lock;
           meta.mainProgram = "config-graft";
         };
