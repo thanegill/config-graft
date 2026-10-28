@@ -15,7 +15,7 @@ mod render;
 mod value;
 mod warning;
 use backend::{Backend, ByteBackend, Directory};
-use format::directory::XattrScope;
+use format::directory::{CaseSensitivity, XattrScope};
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use reconcile::{ArrayStrategy, MergeKeys};
 
@@ -161,12 +161,18 @@ pub(crate) struct DirArgs {
     /// conservative allowlist that skips privileged/system namespaces), or `none`.
     #[arg(long = "xattrs", value_name = "SCOPE")]
     xattrs: Option<XattrScope>,
+
+    /// Whether names that differ only by case are two files on TARGET's filesystem:
+    /// `auto` asks the filesystem (default), or `sensitive` / `insensitive`.
+    #[arg(long = "case-sensitivity", value_name = "MODE", default_value = "auto")]
+    case_sensitivity: CaseSensitivity,
 }
 
 /// The resolved options a [`Backend`] run reads, built from whichever subcommand
 /// clap parsed. Flags a given format doesn't expose are filled with today's
 /// defaults (directory: no stdout/sort/array/merge_key/indent/plist_format; byte
-/// formats: no manage_root/no_owner/xattrs), so the backend logic is unchanged.
+/// formats: no manage_root/no_owner/xattrs/case_sensitivity), so the backend
+/// logic is unchanged.
 pub(crate) struct RunArgs {
     pub(crate) target: PathBuf,
     pub(crate) desired: PathBuf,
@@ -184,6 +190,7 @@ pub(crate) struct RunArgs {
     pub(crate) manage_root: bool,
     pub(crate) no_owner: bool,
     pub(crate) xattrs: Option<XattrScope>,
+    pub(crate) case_sensitivity: CaseSensitivity,
 }
 
 /// Parse `--merge-key` specs into [`MergeKeys`]. Each spec is `FIELD` / `f1,f2`
@@ -254,6 +261,7 @@ impl RunArgs {
             manage_root: false,
             no_owner: false,
             xattrs: None,
+            case_sensitivity: CaseSensitivity::default(),
         }
     }
 
@@ -289,6 +297,7 @@ impl RunArgs {
             manage_root: args.manage_root,
             no_owner: args.no_owner,
             xattrs: args.xattrs,
+            case_sensitivity: args.case_sensitivity,
         }
     }
 }

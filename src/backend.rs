@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
-use crate::format::directory::{self, AttrPolicy, FsLeaf};
+use crate::format::directory::{self, AttrPolicy, CaseCheck, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
@@ -520,15 +520,16 @@ impl Backend for Directory {
 
     fn read(args: &RunArgs, path: &Path) -> Result<Option<Node<FsLeaf>>, Error> {
         // A tree is walked, not parsed, so nothing can be rewritten on the way in.
-        directory::read_tree(path, args.manage_root, args.dir_policy())
+        directory::read_tree(path, args.manage_root, args.dir_policy(), args.case_check())
     }
 
     fn prepare(
-        _args: &RunArgs,
+        args: &RunArgs,
         _opts: WriteOpts,
         target: &Node<FsLeaf>,
         result: &Node<FsLeaf>,
     ) -> Result<Prepared, Error> {
+        directory::refuse_case_collisions(&args.target, result, args.case_check())?;
         // A tree has no byte form; change detection is a structural node compare.
         Ok(Prepared {
             output: None,
@@ -556,5 +557,10 @@ impl RunArgs {
             owner: !self.no_owner,
             xattrs: self.xattrs.unwrap_or_default(),
         }
+    }
+
+    /// How a directory run decides whether TARGET's filesystem folds case.
+    fn case_check(&self) -> CaseCheck<'_> {
+        CaseCheck::new(self.case_sensitivity, &self.target)
     }
 }

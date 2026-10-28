@@ -651,10 +651,168 @@ fn refuses_case_fold_sibling_collision() {
         eprintln!("skipping refuses_case_fold_sibling_collision: case-insensitive FS");
         return;
     }
-    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let out = graft(&[
+        "--case-sensitivity",
+        "insensitive",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("collide"), "got: {err}");
+    assert!(!target.exists());
+}
+
+#[test]
+fn case_fold_sibling_pair_is_kept_where_case_is_sensitive() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&desired.join("Foo"), "1");
+    write(&desired.join("foo"), "2");
+    if fs::read_dir(&desired).unwrap().count() < 2 {
+        eprintln!(
+            "skipping case_fold_sibling_pair_is_kept_where_case_is_sensitive: case-insensitive FS"
+        );
+        return;
+    }
+    let out = graft(&[
+        "--case-sensitivity",
+        "sensitive",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read(&target.join("Foo")), "1");
+    assert_eq!(read(&target.join("foo")), "2");
+}
+
+/// Whether `dir`'s filesystem keeps `case-probe` and `CASE-PROBE` apart, found
+/// independently of config-graft's own probe.
+fn keeps_case_apart(dir: &Path) -> bool {
+    let probe = dir.join("case-probe");
+    fs::write(&probe, "").unwrap();
+    let apart = !dir.join("CASE-PROBE").exists();
+    fs::remove_file(probe).unwrap();
+    apart
+}
+
+/// TARGET holding `foo` and DESIRED declaring `Foo`: only the case differs.
+fn case_only_trees(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let target = dir.join("target");
+    let desired = dir.join("desired");
+    write(&target.join("foo"), "A");
+    write(&desired.join("Foo"), "B");
+    (target, desired)
+}
+
+#[test]
+fn case_only_collision_with_target_is_refused_where_case_folds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (target, desired) = case_only_trees(dir.path());
+
+    for extra in [&["--diff"][..], &["--check"][..]] {
+        let mut args = vec!["--case-sensitivity", "insensitive"];
+        args.extend_from_slice(extra);
+        args.extend([target.to_str().unwrap(), desired.to_str().unwrap()]);
+        let out = graft(&args);
+        assert_eq!(out.status.code(), Some(1), "{extra:?}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("\"Foo\"") && err.contains("\"foo\""),
+            "got: {err}"
+        );
+        assert!(err.contains("collide"), "got: {err}");
+    }
+    assert_eq!(read(&target.join("foo")), "A");
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+}
+
+#[test]
+fn case_only_collision_in_a_subdirectory_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&target.join("sub/bar"), "A");
+    write(&desired.join("sub/Bar"), "B");
+
+    let out = graft(&[
+        "--case-sensitivity",
+        "insensitive",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let sub = target.join("sub");
+    assert!(err.contains(sub.to_str().unwrap()), "got: {err}");
+}
+
+#[test]
+fn case_only_pair_across_trees_is_applied_where_case_is_sensitive() {
+    let dir = tempfile::tempdir().unwrap();
+    let (target, desired) = case_only_trees(dir.path());
+    if !keeps_case_apart(dir.path()) {
+        eprintln!("skipping case_only_pair_across_trees_is_applied_where_case_is_sensitive: case-insensitive FS");
+        return;
+    }
+
+    let out = graft(&[
+        "--case-sensitivity",
+        "sensitive",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read(&target.join("foo")), "A");
+    assert_eq!(read(&target.join("Foo")), "B");
+}
+
+#[test]
+fn case_sensitivity_auto_follows_the_target_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let (target, desired) = case_only_trees(dir.path());
+    let sensitive = keeps_case_apart(dir.path());
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    if sensitive {
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(read(&target.join("Foo")), "B");
+        let check = graft(&[
+            "--check",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ]);
+        assert_eq!(check.status.code(), Some(0), "{check:?}");
+    } else {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("collide"));
+        assert_eq!(read(&target.join("foo")), "A");
+    }
+}
+
+#[test]
+fn case_sensitivity_is_a_usage_error_off_the_directory_subcommand() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("t.json");
+    let desired = dir.path().join("d.json");
+    fs::write(&desired, "{}").unwrap();
+    let out = run(&[
+        "json",
+        "--case-sensitivity",
+        "sensitive",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+
+    let bad_value = graft(&[
+        "--case-sensitivity",
+        "maybe",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(bad_value.status.code(), Some(2));
 }
 
 #[test]

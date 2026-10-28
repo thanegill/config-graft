@@ -147,6 +147,53 @@ pub enum XattrScope {
     None,
 }
 
+/// Whether TARGET's filesystem keeps names that differ only by case apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum CaseSensitivity {
+    /// Ask TARGET's filesystem (default).
+    #[default]
+    Auto,
+    /// `Foo` and `foo` are two files.
+    Sensitive,
+    /// `Foo` and `foo` are one file.
+    Insensitive,
+}
+
+/// How a run settles whether two names that differ only by case are one file. The
+/// filesystem is asked only once a tree actually holds such a pair, so a run
+/// without one never probes.
+#[derive(Clone, Copy, Debug)]
+pub enum CaseCheck<'a> {
+    Sensitive,
+    Insensitive,
+    /// Ask the filesystem holding this TARGET.
+    Probe(&'a Path),
+}
+
+impl<'a> CaseCheck<'a> {
+    pub fn new(sensitivity: CaseSensitivity, target: &'a Path) -> Self {
+        match sensitivity {
+            CaseSensitivity::Auto => CaseCheck::Probe(target),
+            CaseSensitivity::Sensitive => CaseCheck::Sensitive,
+            CaseSensitivity::Insensitive => CaseCheck::Insensitive,
+        }
+    }
+
+    /// Whether names that differ only by case land on one file.
+    fn folds_case(self) -> Result<bool, Error> {
+        match self {
+            CaseCheck::Sensitive => Ok(false),
+            CaseCheck::Insensitive => Ok(true),
+            CaseCheck::Probe(target) => is_case_sensitive(target)
+                .map(|sensitive| !sensitive)
+                .map_err(|source| Error::CaseSensitivityUnknown {
+                    path: target.to_path_buf(),
+                    source,
+                }),
+        }
+    }
+}
+
 /// Which file/directory metadata is reconciled. `owner` (uid/gid) is on by default
 /// (`--no-owner` disables it); `xattrs` defaults to [`XattrScope::All`].
 #[derive(Clone, Copy, Debug)]
@@ -300,6 +347,8 @@ impl Leaf for FsLeaf {
 /// - `path` exists but is not a directory ⇒ `Err(NotDirectory)`.
 /// - A FIFO/socket/device anywhere in the tree ⇒ `Err(UnsupportedFileType)`; a
 ///   non-UTF-8 filename ⇒ `Err(NonUtf8Name)`.
+/// - Two sibling names that differ only by case, where `case` says they would be
+///   one file ⇒ `Err(NameCollision)`.
 ///
 /// The root follows a symlink (so a symlinked directory works as a target), but
 /// symlinks *inside* the tree are never followed -- they become `Symlink` leaves.
@@ -309,6 +358,7 @@ pub fn read_tree(
     path: &Path,
     manage_root: bool,
     policy: AttrPolicy,
+    case: CaseCheck<'_>,
 ) -> Result<Option<Node<FsLeaf>>, Error> {
     match fs::metadata(path) {
         Ok(m) if m.is_dir() => {
@@ -321,7 +371,7 @@ pub fn read_tree(
             } else {
                 FsAttrs::new()
             };
-            Ok(Some(read_dir(path, meta, policy, 0)?))
+            Ok(Some(read_dir(path, meta, policy, case, 0)?))
         }
         Ok(_) => Err(Error::NotDirectory(path.to_path_buf())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -341,12 +391,96 @@ fn find_name_collision<'a>(names: impl Iterator<Item = &'a str>) -> Option<(Stri
     None
 }
 
+/// Refuse a reconciled tree in which two sibling names differ only by case, when
+/// `case` says they would be one file. Each input tree is checked as it is read,
+/// so such a pair in the result is DESIRED naming an entry TARGET already holds
+/// under another case: two keys to the engine but one file on disk, so the run
+/// would rewrite it every time and never converge.
+pub fn refuse_case_collisions(
+    dir: &Path,
+    tree: &Node<FsLeaf>,
+    case: CaseCheck<'_>,
+) -> Result<(), Error> {
+    let Node::Map(entries) = tree else {
+        return Ok(());
+    };
+    let entries = || entries.iter().filter(|(name, _)| *name != DIR_ATTRS_KEY);
+    if let Some((a, b)) = find_name_collision(entries().map(|(name, _)| name.as_str())) {
+        if case.folds_case()? {
+            return Err(Error::NameCollision {
+                dir: dir.to_path_buf(),
+                a,
+                b,
+            });
+        }
+    }
+    entries().try_for_each(|(name, child)| refuse_case_collisions(&dir.join(name), child, case))
+}
+
+/// Whether the filesystem that holds `target`, or will hold it on a first apply,
+/// keeps names that differ only by case apart. Asks TARGET's nearest existing
+/// ancestor directory.
+fn is_case_sensitive(target: &Path) -> io::Result<bool> {
+    let dir = nearest_existing_dir(target)?;
+    #[cfg(target_os = "macos")]
+    if let Some(answer) = pathconf_case_sensitive(&dir) {
+        return Ok(answer);
+    }
+    probe_case_sensitive(&dir)
+}
+
+/// `path` itself if it is a directory, else its nearest ancestor that is one.
+fn nearest_existing_dir(path: &Path) -> io::Result<PathBuf> {
+    path.ancestors()
+        .map(|ancestor| {
+            if ancestor.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                ancestor
+            }
+        })
+        .find(|ancestor| fs::metadata(ancestor).is_ok_and(|m| m.is_dir()))
+        .map(Path::to_path_buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no existing ancestor directory"))
+}
+
+/// macOS answers the question directly; `None` when the filesystem doesn't say.
+#[cfg(target_os = "macos")]
+fn pathconf_case_sensitive(dir: &Path) -> Option<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a NUL-terminated string that outlives the call, and
+    // pathconf(2) only reads it.
+    match unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) } {
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    }
+}
+
+/// Create a lower-case file in a scratch directory inside `dir` and look it up by
+/// its upper-case name. The scratch directory sits inside `dir` because Linux
+/// case-folding (ext4/f2fs `+F`) is a per-directory attribute its children
+/// inherit, and it is removed again whether or not the probe succeeds.
+fn probe_case_sensitive(dir: &Path) -> io::Result<bool> {
+    let scratch = tempfile::Builder::new()
+        .prefix(TEMP_PREFIX)
+        .tempdir_in(dir)?;
+    fs::write(scratch.path().join("case-probe"), b"")?;
+    match fs::symlink_metadata(scratch.path().join("CASE-PROBE")) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 /// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
 /// directory's own attributes).
 fn read_dir(
     dir: &Path,
     meta: FsAttrs,
     policy: AttrPolicy,
+    case: CaseCheck<'_>,
     depth: usize,
 ) -> Result<Node<FsLeaf>, Error> {
     if depth > MAX_DEPTH {
@@ -371,11 +505,13 @@ fn read_dir(
         }
     }
     if let Some((a, b)) = find_name_collision(children.iter().map(|(n, _)| n.as_str())) {
-        return Err(Error::NameCollision {
-            dir: dir.to_path_buf(),
-            a,
-            b,
-        });
+        if case.folds_case()? {
+            return Err(Error::NameCollision {
+                dir: dir.to_path_buf(),
+                a,
+                b,
+            });
+        }
     }
 
     let mut map = IndexMap::with_capacity(children.len() + 1);
@@ -389,13 +525,18 @@ fn read_dir(
         );
     }
     for (name, path) in children {
-        map.insert(name, read_node(&path, policy, depth)?);
+        map.insert(name, read_node(&path, policy, case, depth)?);
     }
     Ok(Node::Map(map))
 }
 
 /// Classify one tree entry (not following symlinks).
-fn read_node(path: &Path, policy: AttrPolicy, depth: usize) -> Result<Node<FsLeaf>, Error> {
+fn read_node(
+    path: &Path,
+    policy: AttrPolicy,
+    case: CaseCheck<'_>,
+    depth: usize,
+) -> Result<Node<FsLeaf>, Error> {
     let meta = fs::symlink_metadata(path).map_err(|e| Error::read(path, e))?;
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -403,7 +544,13 @@ fn read_node(path: &Path, policy: AttrPolicy, depth: usize) -> Result<Node<FsLea
         Ok(Node::Leaf(FsLeaf::Symlink { target }))
     } else if ft.is_dir() {
         // A nested directory carries its own attributes (unlike the root).
-        read_dir(path, FsAttrs::read(path, &meta, policy), policy, depth + 1)
+        read_dir(
+            path,
+            FsAttrs::read(path, &meta, policy),
+            policy,
+            case,
+            depth + 1,
+        )
     } else if ft.is_file() {
         Ok(Node::Leaf(FsLeaf::File {
             source: path.to_path_buf(),
@@ -978,6 +1125,9 @@ mod tests {
         xattrs: XattrScope::All,
     };
 
+    /// Refuse a case-only sibling pair wherever the tests run.
+    const CASE: CaseCheck = CaseCheck::Insensitive;
+
     fn attrs(pairs: &[(&str, &str)]) -> FsAttrs {
         pairs
             .iter()
@@ -1008,7 +1158,7 @@ mod tests {
             fs::write(&p, contents).unwrap();
             fs::set_permissions(&p, fs::Permissions::from_mode(*mode)).unwrap();
         }
-        read_tree(dir, false, POLICY).unwrap().unwrap()
+        read_tree(dir, false, POLICY, CASE).unwrap().unwrap()
     }
 
     #[test]
@@ -1133,6 +1283,75 @@ mod tests {
     }
 
     #[test]
+    fn refuse_case_collisions_names_the_nested_pair() {
+        let file = || Node::Leaf(leaf("/x", "x", attrs(&[("mode", "644")])));
+        let dir_attrs = || Node::Leaf(FsLeaf::DirectoryAttributes(attrs(&[("mode", "755")])));
+        let tree = |names: &[&str]| {
+            Node::Map(
+                std::iter::once((DIR_ATTRS_KEY.to_string(), dir_attrs()))
+                    .chain(names.iter().map(|name| (name.to_string(), file())))
+                    .collect(),
+            )
+        };
+        let root = |sub: Node<FsLeaf>| Node::Map([("sub".to_string(), sub)].into_iter().collect());
+
+        let t = Path::new("t");
+        let distinct = root(tree(&["a", "b"]));
+        let folded = root(tree(&["foo", "Foo"]));
+        assert!(refuse_case_collisions(t, &distinct, CaseCheck::Insensitive).is_ok());
+        assert!(refuse_case_collisions(t, &folded, CaseCheck::Sensitive).is_ok());
+        match refuse_case_collisions(t, &folded, CaseCheck::Insensitive) {
+            Err(Error::NameCollision { dir, a, b }) => {
+                assert_eq!(dir, Path::new("t/sub"));
+                assert_eq!((a.as_str(), b.as_str()), ("foo", "Foo"));
+            }
+            other => panic!("expected NameCollision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn case_probe_matches_a_lookup_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lower"), "").unwrap();
+        let folds = dir.path().join("LOWER").exists();
+        fs::remove_file(dir.path().join("lower")).unwrap();
+
+        let missing = dir.path().join("not/yet");
+        assert_eq!(is_case_sensitive(&missing).unwrap(), !folds);
+        assert_eq!(probe_case_sensitive(dir.path()).unwrap(), !folds);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pathconf_agrees_with_the_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            pathconf_case_sensitive(dir.path()),
+            Some(probe_case_sensitive(dir.path()).unwrap())
+        );
+    }
+
+    #[test]
+    fn nearest_existing_dir_walks_up_to_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("file"), "").unwrap();
+        assert_eq!(nearest_existing_dir(dir.path()).unwrap(), dir.path());
+        assert_eq!(
+            nearest_existing_dir(&dir.path().join("a/b")).unwrap(),
+            dir.path()
+        );
+        assert_eq!(
+            nearest_existing_dir(&dir.path().join("file")).unwrap(),
+            dir.path()
+        );
+        assert_eq!(
+            nearest_existing_dir(Path::new("no-such-dir-here")).unwrap(),
+            Path::new(".")
+        );
+    }
+
+    #[test]
     fn fsync_dir_smoke() {
         let dir = tempfile::tempdir().unwrap();
         crate::fsync_dir(dir.path()).unwrap();
@@ -1169,20 +1388,23 @@ mod tests {
             eprintln!("skipping directory_xattrs_converge: xattrs unsupported here");
             return;
         }
-        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
         apply_tree(&root, None, &want, None, POLICY).unwrap();
         // An app adds an in-scope xattr the DESIRED tree doesn't have.
         xattr::set(root.join("d"), "user.b", b"2").unwrap();
-        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap().unwrap();
         assert_ne!(cur, want); // drift detected
 
         apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap();
         // The unmanaged xattr is removed, so the tree converges (re-apply no-op).
         assert!(xattr::get(root.join("d"), "user.b").unwrap().is_none());
-        assert_eq!(read_tree(&root, false, POLICY).unwrap().unwrap(), want);
+        assert_eq!(
+            read_tree(&root, false, POLICY, CASE).unwrap().unwrap(),
+            want
+        );
     }
 
     #[test]
@@ -1197,7 +1419,7 @@ mod tests {
         };
         let src = tempfile::tempdir().unwrap();
         fs::write(src.path().join("f.txt"), "new").unwrap();
-        let want = read_tree(src.path(), false, NONE).unwrap().unwrap();
+        let want = read_tree(src.path(), false, NONE, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -1255,14 +1477,14 @@ mod tests {
     #[test]
     fn read_missing_is_none_non_dir_is_error() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_tree(&dir.path().join("nope"), false, POLICY)
+        assert!(read_tree(&dir.path().join("nope"), false, POLICY, CASE)
             .unwrap()
             .is_none());
 
         let f = dir.path().join("f");
         fs::write(&f, "x").unwrap();
         assert!(matches!(
-            read_tree(&f, false, POLICY),
+            read_tree(&f, false, POLICY, CASE),
             Err(Error::NotDirectory(_))
         ));
     }
@@ -1277,7 +1499,7 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         symlink("/dangling/target", src.path().join("link")).unwrap();
 
-        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -1285,7 +1507,10 @@ mod tests {
         assert!(changed);
 
         // Re-reading the applied tree yields the same Node (round-trip).
-        assert_eq!(read_tree(&root, false, POLICY).unwrap().unwrap(), want);
+        assert_eq!(
+            read_tree(&root, false, POLICY, CASE).unwrap().unwrap(),
+            want
+        );
         // Executable bit preserved.
         assert_eq!(
             fs::metadata(root.join("run.sh")).unwrap().mode() & 0o777,
@@ -1308,7 +1533,7 @@ mod tests {
             &[("sub/only.txt", "v", 0o644), ("keep.txt", "k", 0o644)],
         );
         apply_tree(&root, None, &before, None, POLICY).unwrap();
-        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap().unwrap();
 
         // want drops sub/only.txt entirely; keep.txt stays.
         let src2 = tempfile::tempdir().unwrap();
@@ -1329,7 +1554,7 @@ mod tests {
         fs::create_dir(src.path().join("d")).unwrap();
         fs::write(src.path().join("d/f.txt"), "x").unwrap();
         fs::set_permissions(src.path().join("d"), fs::Permissions::from_mode(0o555)).unwrap();
-        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -1350,7 +1575,7 @@ mod tests {
         let src1 = tempfile::tempdir().unwrap();
         let before = tree(src1.path(), &[("d/f.txt", "v", 0o644)]);
         apply_tree(&root, None, &before, None, POLICY).unwrap();
-        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap().unwrap();
 
         // A leftover temp inside `d` from an interrupted write.
         fs::write(root.join("d").join(".config-graft-tmp.leftover"), "junk").unwrap();
@@ -1369,7 +1594,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let want = tree(src.path(), &[("a.txt", "hello", 0o644)]);
         apply_tree(&root, None, &want, None, POLICY).unwrap();
-        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap().unwrap();
         // Nothing changed on a second apply: `cur` (source under `root`) equals
         // `want` (source under `src`) by content+mode despite different paths.
         assert!(!apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap());
@@ -1382,7 +1607,7 @@ mod tests {
         let src1 = tempfile::tempdir().unwrap();
         let before = tree(src1.path(), &[("p", "iamfile", 0o644)]);
         apply_tree(&root, None, &before, None, POLICY).unwrap();
-        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap().unwrap();
 
         let src2 = tempfile::tempdir().unwrap();
         let after = tree(src2.path(), &[("p/inner.txt", "x", 0o644)]);
@@ -1402,7 +1627,7 @@ mod tests {
             eprintln!("skipping reconciles_extended_attributes: xattrs unsupported here");
             return;
         }
-        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -1414,7 +1639,7 @@ mod tests {
             Some(&b"v1"[..])
         );
         // Idempotent: the reapplied tree carries the same attribute, so no rewrite.
-        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap().unwrap();
         assert!(!apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap());
     }
 
@@ -1428,7 +1653,7 @@ mod tests {
         fs::create_dir(src.path().join("d")).unwrap();
         fs::set_permissions(src.path().join("d"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(src.path().join("d/f.txt"), "x").unwrap();
-        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
@@ -1437,7 +1662,7 @@ mod tests {
 
         // Drift the applied directory's mode; reconcile must detect and fix it.
         fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o755)).unwrap();
-        let cur = read_tree(&root, false, POLICY).unwrap().unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap().unwrap();
         assert_ne!(cur, want); // directory-mode drift is part of the identity
         assert!(apply_tree(&root, Some(&cur), &want, None, POLICY).unwrap());
         assert_eq!(dir_mode(&root.join("d")), 0o700);
@@ -1448,13 +1673,13 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         fs::set_permissions(src.path(), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(src.path().join("f.txt"), "x").unwrap();
-        let want = read_tree(src.path(), false, POLICY).unwrap().unwrap();
+        let want = read_tree(src.path(), false, POLICY, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let cur = read_tree(&root, false, POLICY).unwrap();
+        let cur = read_tree(&root, false, POLICY, CASE).unwrap();
         apply_tree(&root, cur.as_ref(), &want, None, POLICY).unwrap();
         // The root keeps its own 0700 even though the source root was 0755.
         assert_eq!(dir_mode(&root), 0o700);
@@ -1466,13 +1691,13 @@ mod tests {
         fs::set_permissions(src.path(), fs::Permissions::from_mode(0o750)).unwrap();
         fs::write(src.path().join("f.txt"), "x").unwrap();
         // With manage_root, the source root's own mode is part of the tree.
-        let want = read_tree(src.path(), true, POLICY).unwrap().unwrap();
+        let want = read_tree(src.path(), true, POLICY, CASE).unwrap().unwrap();
 
         let dst = tempfile::tempdir().unwrap();
         let root = dst.path().join("out");
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let cur = read_tree(&root, true, POLICY).unwrap();
+        let cur = read_tree(&root, true, POLICY, CASE).unwrap();
         assert!(apply_tree(&root, cur.as_ref(), &want, None, POLICY).unwrap());
         // The root is now reconciled to the source root's 0750.
         assert_eq!(dir_mode(&root), 0o750);
