@@ -39,7 +39,7 @@ config-graft <FORMAT> [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 
 ### Options
 
-- `--base <PATH>` — alternative to the positional BASE.
+- `--base <PATH>` — alternative to the positional BASE. Giving both is a usage error (exit 2), even when one of them is empty.
 - `--no-prune` — deep-merge only; never delete keys (ignore BASE for removals).
 - `--stdout` — write the result to stdout; do not modify TARGET. Byte-format subcommands only (a tree has no single byte stream, so the `directory` subcommand does not expose it).
 - `--diff` — print a human-readable, leaf-level diff of the changes. Key-paths use the format's separator: `.` for JSON/YAML/TOML, `:` for plist (PlistBuddy) — same as the `merge` conflict warning.
