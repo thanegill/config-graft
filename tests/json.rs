@@ -481,6 +481,60 @@ fn no_prune_keeps_dropped_keys() {
 }
 
 #[test]
+fn empty_desired_with_base_prunes_managed_keys_and_keeps_the_rest() {
+    // The contract the Nix modules' orphan-prune leans on: when an entry is removed,
+    // its target is reconciled with an *empty* DESIRED against the entry's last
+    // snapshot as BASE. Every key we grafted (still == BASE in TARGET) is pruned; keys
+    // the app or user added, or edited away from BASE, stay. The file is emptied of
+    // our keys, not deleted.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("empty.json");
+    let base = dir.path().join("base.json");
+    fs::write(&base, r#"{"managed":1,"managedEdited":5}"#).unwrap();
+    fs::write(&target, r#"{"managed":1,"managedEdited":9,"user":2}"#).unwrap();
+    fs::write(&desired, "{}").unwrap();
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(target.exists());
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"managedEdited":9,"user":2}));
+}
+
+#[test]
+fn empty_desired_creates_a_missing_target() {
+    // Characterization, not an endorsement: a missing TARGET is a first apply (SPEC
+    // §7), so even an *empty* DESIRED writes the empty document -- creating the file
+    // and its parent directories. The Nix modules' orphan-prune reconciles against an
+    // empty DESIRED, so this is exactly why it refuses to run on a target that is no
+    // longer there: dropping an entry after deleting its file must not put the file
+    // back. Keep the two in step -- if this ever stops creating the file, the guard in
+    // `mkOrphanPruneScript` is what becomes redundant, not this test.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("gone/config.json");
+    let desired = dir.path().join("empty.json");
+    let base = dir.path().join("base.json");
+    fs::write(&desired, "{}").unwrap();
+    fs::write(&base, r#"{"managed":1}"#).unwrap();
+    assert!(!target.exists());
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert_eq!(fs::read_to_string(&target).unwrap().trim(), "{}");
+}
+
+#[test]
 fn base_flag_form_enables_pruning() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");

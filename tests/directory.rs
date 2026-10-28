@@ -123,6 +123,37 @@ fn prune_collapses_emptied_parent_dir() {
 }
 
 #[test]
+fn empty_desired_tree_prunes_managed_files_and_keeps_the_rest() {
+    // The contract the Nix modules' orphan-prune leans on for `managedDirectory`: a
+    // removed entry reconciles its target against an *empty* DESIRED tree with the
+    // entry's last snapshot as BASE. Files we grafted go, files the app wrote stay,
+    // and the target directory itself survives -- the run carries no `--manage-root`,
+    // so the empty store directory's own attributes are never imposed on it.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("empty");
+    let base = dir.path().join("base");
+    fs::create_dir_all(&desired).unwrap();
+    write(&base.join("managed.txt"), "v1");
+    write(&base.join("sub/nested.txt"), "v2");
+    write(&target.join("managed.txt"), "v1");
+    write(&target.join("sub/nested.txt"), "v2");
+    write(&target.join("app.txt"), "app");
+    let mode_before = mode_of(&target);
+
+    let out = graft(&[
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(!target.join("managed.txt").exists());
+    assert!(!target.join("sub").exists());
+    assert_eq!(read(&target.join("app.txt")), "app");
+    assert_eq!(mode_of(&target), mode_before);
+}
+
+#[test]
 fn no_prune_keeps_dropped_file() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");

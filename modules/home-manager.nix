@@ -11,6 +11,12 @@
 # generation's copy is reachable at `$oldGenPath/home-files/<snapshot>` on the next
 # switch (GC-safe: the old generation is a GC root). Unset $oldGenPath on the first
 # switch -> no pruning.
+#
+# That covers keys dropped from an entry that stays declared. An entry that is
+# *removed* -- its `settings` emptied, or the whole entry deleted -- drives no
+# reconcile at all, so each generation also links a manifest of what it manages and an
+# unconditional activation step prunes whatever the previous manifest listed and this
+# one no longer declares (see `mkOrphanPruneScript`).
 { self }:
 {
   config,
@@ -109,6 +115,14 @@ let
     {
       inherit snapshotRel;
       source = entry.source;
+      pruneRow = configGraftLib.mkDirectoryPruneRow {
+        inherit
+          lib
+          entry
+          target
+          snapshotRel
+          ;
+      };
       script = ''
         _prev=""
         if [[ -v oldGenPath && -e "$oldGenPath/home-files/${snapshotRel}" ]]; then
@@ -175,6 +189,15 @@ let
         in
         {
           inherit snapshotRel desired;
+          pruneRow = configGraftLib.mkPruneRow {
+            inherit
+              lib
+              format
+              entry
+              snapshotRel
+              ;
+            target = "${config.home.homeDirectory}/${entry.target}";
+          };
           script = mkScript {
             inherit
               format
@@ -196,6 +219,15 @@ let
   managedTargets =
     lib.concatMap (x: lib.mapAttrsToList (_: entry: entry.target) x.active) byFormat
     ++ lib.mapAttrsToList (_: entry: entry.target) config.home.managedDirectory;
+
+  # What this generation manages, as the manifest the *next* switch reads to find what
+  # it no longer does. Linked as a `home.file` like the snapshots it points at, so it
+  # rides along in `$oldGenPath/home-files` and is GC-rooted with them.
+  pruneRows =
+    lib.concatMap (x: lib.mapAttrsToList (_: e: e.pruneRow) x.entries) byFormat
+    ++ lib.mapAttrsToList (_: e: e.pruneRow) directoryEntries;
+
+  manifestRel = ".local/state/home-manager/config-graft-manifest";
 in
 {
   options.home =
@@ -222,7 +254,7 @@ in
   config = {
     # Link each DESIRED as a `home.file` snapshot, readable as BASE next switch (a
     # directory DESIRED becomes a symlink to the store tree, which config-graft
-    # follows as the BASE root).
+    # follows as the BASE root), and the manifest naming them alongside.
     home.file = builtins.listToAttrs (
       lib.concatMap (
         x: lib.mapAttrsToList (_: e: lib.nameValuePair e.snapshotRel { source = e.desired; }) x.entries
@@ -230,6 +262,16 @@ in
       ++ lib.mapAttrsToList (
         _: e: lib.nameValuePair e.snapshotRel { source = e.source; }
       ) directoryEntries
+      ++ lib.optional (pruneRows != [ ]) (
+        lib.nameValuePair manifestRel {
+          source = pkgs.writeText "config-graft-manifest" (
+            configGraftLib.mkManifest {
+              inherit lib;
+              rows = pruneRows;
+            }
+          );
+        }
+      )
     );
 
     # One activation entry per format (a static key), defined only when it has entries.
@@ -251,6 +293,29 @@ in
             )
           );
         }
+        # Unconditional, unlike the per-format entries above: the generation that
+        # removes the *last* entry has no active entry to key this off, and is exactly
+        # the one that must still clean up. It reads the previous generation's manifest
+        # and no-ops without one.
+        {
+          name = "managedOrphans";
+          value = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+            ''
+              _cgRoot=""
+              [[ -v oldGenPath ]] && _cgRoot="$oldGenPath/home-files"
+            ''
+            + configGraftLib.mkOrphanPruneScript {
+              inherit
+                lib
+                pkgs
+                formats
+                manifestRel
+                ;
+              package = config.home.managed.package;
+              rows = pruneRows;
+            }
+          );
+        }
       ]
     );
 
@@ -263,6 +328,11 @@ in
           parent = "home";
         }
       ) byFormat
+      ++ configGraftLib.mkManifestAssertions {
+        inherit lib;
+        parent = "home";
+        rows = pruneRows;
+      }
       # config-graft reconciles a mutable file in place; `home.file` symlinks an
       # immutable store path. The same path can't be both, so reject the overlap.
       ++ map (path: {

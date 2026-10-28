@@ -11,6 +11,7 @@
   pkgs,
   common,
   package,
+  formats,
 }:
 let
   # An entry as the submodule would produce it, so `mkEntryReconcileScript` and
@@ -201,20 +202,94 @@ let
       )
     );
 
+  directoryEntry =
+    overrides:
+    {
+      package = pkgs.hello;
+      source = "/source";
+      manageRoot = false;
+      noOwner = false;
+      xattrs = "all";
+    }
+    // overrides;
+
   directoryFlags =
     overrides:
     common.mkDirectoryReconcileScript {
       inherit lib;
-      entry = {
-        package = pkgs.hello;
-        source = "/source";
-        manageRoot = false;
-        noOwner = false;
-        xattrs = "all";
-      }
-      // overrides;
+      entry = directoryEntry overrides;
       target = "/target";
     };
+
+  # The manifest row for one plist entry, rendered as the line the prune reads back.
+  pruneRow =
+    overrides:
+    common.mkManifest {
+      inherit lib;
+      rows = [
+        (common.mkPruneRow {
+          inherit lib;
+          format = {
+            name = "plist";
+          };
+          entry = entry overrides;
+          target = "/target.plist";
+          snapshotRel = "snap/plist";
+        })
+      ];
+    };
+
+  directoryPruneRow =
+    overrides:
+    common.mkManifest {
+      inherit lib;
+      rows = [
+        (common.mkDirectoryPruneRow {
+          inherit lib;
+          entry = directoryEntry overrides;
+          target = "/target";
+          snapshotRel = "snap/directory";
+        })
+      ];
+    };
+
+  # The orphan-prune body for a generation managing exactly `rows`.
+  orphanPrune =
+    rows:
+    common.mkOrphanPruneScript {
+      inherit
+        lib
+        pkgs
+        rows
+        formats
+        ;
+      package = pkgs.hello;
+      manifestRel = "config-graft/manifest";
+    };
+
+  # `mkManifestAssertions` over one row, as the messages of the assertions that
+  # *failed* -- empty means the row is accepted.
+  manifestFailures =
+    row:
+    map (a: a.message) (
+      builtins.filter (a: !a.assertion) (
+        common.mkManifestAssertions {
+          inherit lib;
+          parent = "home";
+          rows = [
+            (
+              {
+                kind = "json";
+                identity = "/target.json";
+                snapshotRel = "snap/target.json";
+                flags = [ ];
+              }
+              // row
+            )
+          ];
+        }
+      )
+    );
 
   # A settings value carrying the ESC 0x1B separator, built via fromJSON so no
   # control byte appears in this file.
@@ -384,6 +459,116 @@ let
         cfprefsdDomain = "com.example.app";
         binary = false;
       };
+    }
+    {
+      name = "a plain file entry's manifest row is keyed by its target";
+      expected = "plist\t/target.plist\tsnap/plist\t\n";
+      actual = pruneRow { binary = false; };
+    }
+    {
+      name = "a `binary` file entry carries `--plist-format binary` into its row";
+      expected = "plist\t/target.plist\tsnap/plist\t--plist-format binary\n";
+      actual = pruneRow { binary = true; };
+    }
+    {
+      # The target is ignored in cfprefsd mode, so the domain is what identifies the
+      # entry across generations -- keying the row by the target would prune a file
+      # the live path never wrote.
+      name = "a cfprefsdDomain entry's row is keyed by its domain, not its target";
+      expected = "domain\tcom.example.app\tsnap/plist\t\n";
+      actual = pruneRow { cfprefsdDomain = "com.example.app"; };
+    }
+    {
+      name = "a directory row carries the attribute policy";
+      expected = "directory\t/target\tsnap/directory\t--no-owner --xattrs safe\n";
+      actual = directoryPruneRow {
+        noOwner = true;
+        xattrs = "safe";
+      };
+    }
+    {
+      # The prune's DESIRED is an empty *store* directory. Managing the root would
+      # reconcile the target's own mode and ownership against that store directory's,
+      # stamping 0555 root-owned onto a tree we are walking away from.
+      name = "a directory row never carries `--manage-root`";
+      expected = false;
+      actual = lib.hasInfix "--manage-root" (directoryPruneRow {
+        manageRoot = true;
+      });
+    }
+    {
+      name = "the orphan-prune skips a unit this generation still manages";
+      expected = true;
+      actual = lib.hasInfix "\nplist\t/target.plist\n" (orphanPrune [
+        (common.mkPruneRow {
+          inherit lib;
+          format = {
+            name = "plist";
+          };
+          entry = entry { binary = false; };
+          target = "/target.plist";
+          snapshotRel = "snap/plist";
+        })
+      ]);
+    }
+    {
+      # Keyed off no active entry, so the generation that removes the last one still
+      # prunes it.
+      name = "the orphan-prune reads the previous manifest with nothing managed";
+      expected = true;
+      actual = lib.hasInfix "config-graft/manifest" (orphanPrune [ ]);
+    }
+    {
+      # Forces the empty-DESIRED tree, whose assertion ties its documents back to
+      # `formats.nix`: a format added there without one fails this.
+      name = "every declared format has an empty DESIRED document";
+      expected = true;
+      actual = lib.hasInfix "config-graft-empty-desired" (orphanPrune [ ]);
+    }
+    {
+      # A missing TARGET is a first apply to the engine, so without this the prune
+      # would write an empty document back to a file the user had deleted -- see
+      # `empty_desired_creates_a_missing_target` in tests/json.rs.
+      name = "the orphan-prune skips a target that no longer exists";
+      expected = true;
+      actual = lib.hasInfix ''[[ "$_cgKind" == domain || -e "$_cgId" ]] || continue'' (orphanPrune [ ]);
+    }
+    {
+      # `defaults export` succeeds and writes an empty plist for a domain that is not
+      # there, so absence has to be asked about directly.
+      name = "the orphan-prune asks whether a domain exists before touching it";
+      expected = true;
+      actual = lib.hasInfix ''/usr/bin/defaults read "$_cgId" >/dev/null 2>&1 || continue'' (
+        orphanPrune [ ]
+      );
+    }
+    {
+      name = "an ordinary target is accepted in the manifest";
+      expected = 0;
+      actual = builtins.length (manifestFailures { });
+    }
+    {
+      name = "a tab in a manifest identity is rejected";
+      expected = 1;
+      actual = builtins.length (manifestFailures {
+        identity = "/tar\tget.json";
+      });
+    }
+    {
+      name = "a newline in a manifest identity is rejected";
+      expected = 1;
+      actual = builtins.length (manifestFailures {
+        identity = "/tar\nget.json";
+      });
+    }
+    {
+      # The snapshot path comes from the entry's attribute name, which `safeName`
+      # only strips slashes from, so it needs the same guard as the target.
+      name = "a tab in a manifest snapshot path is rejected";
+      expected = 1;
+      actual = builtins.length (manifestFailures {
+        snapshotRel = "snap/tar\tget.json";
+      });
     }
   ];
 
