@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{fchown, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{fchown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 mod backend;
 mod error;
 mod format;
+mod mode;
 mod number;
 mod reconcile;
 mod render;
@@ -18,6 +19,7 @@ mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
+use mode::{ModeChange, Modes, Owner, Writer, HOST_SETGID_ON_WRITE};
 use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
@@ -336,36 +338,19 @@ fn main() {
     }
 }
 
-/// A file's owner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Owner {
-    uid: u32,
-    gid: u32,
-}
-
-impl Owner {
-    fn of(metadata: &fs::Metadata) -> Owner {
-        Owner {
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-        }
-    }
-}
-
 /// The owner to give a rewrite's temp file so the file keeps `previous`: only when
-/// the temp file was `written` by root (who alone may hand a file to another owner)
+/// the temp file was `created` by root (who alone may hand a file to another owner)
 /// and as someone else.
-fn owner_to_keep(previous: Owner, written: Owner) -> Option<Owner> {
-    let privileged = written.uid == 0;
-    (privileged && written != previous).then_some(previous)
+fn owner_to_keep(previous: Owner, created: Owner) -> Option<Owner> {
+    let privileged = created.uid == 0;
+    (privileged && created != previous).then_some(previous)
 }
 
-/// Give `file` TARGET's `previous` owner when [`owner_to_keep`] says to, and return
-/// the owner it ends up with.
-fn keep_owner(file: &fs::File, previous: Owner) -> std::io::Result<Owner> {
-    let written = Owner::of(&file.metadata()?);
-    let Some(kept) = owner_to_keep(previous, written) else {
-        return Ok(written);
+/// Give `file`, `created` by this process, TARGET's `previous` owner when
+/// [`owner_to_keep`] says to, and return the owner it ends up with.
+fn keep_owner(file: &fs::File, previous: Owner, created: Owner) -> std::io::Result<Owner> {
+    let Some(kept) = owner_to_keep(previous, created) else {
+        return Ok(created);
     };
     fchown(file, Some(kept.uid), Some(kept.gid)).map_err(|e| {
         std::io::Error::new(
@@ -377,10 +362,11 @@ fn keep_owner(file: &fs::File, previous: Owner) -> std::io::Result<Owner> {
 }
 
 /// Atomic in-place write: temp file in the same dir, fsync, set its owner and mode,
-/// then rename over the target. Keeps the target's permission bits (0644 for a new
-/// file) and, on a privileged run, its owner and group; a failure to keep them
-/// refuses the write.
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+/// then rename over the target. A new file gets 0644; a rewrite keeps TARGET's
+/// owner and group on a privileged run (a failure to keep them refuses the write)
+/// and gets [`mode::rewritten_mode`], and returns the [`ModeChange`] when the
+/// rewrite rule or the system dropped a special bit, for the caller to report.
+pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<Option<ModeChange>> {
     let previous = fs::metadata(path).ok();
     let dir = dest_dir(path);
     fs::create_dir_all(&dir)?;
@@ -388,22 +374,37 @@ pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
     tmp.write_all(content)?;
     tmp.as_file().sync_all()?;
-    if let Some(target_metadata) = &previous {
-        // Before the mode: chown clears setuid and setgid.
-        keep_owner(tmp.as_file(), Owner::of(target_metadata))?;
-    }
-    let mode = previous
-        .as_ref()
-        .map_or(0o644, |m| m.permissions().mode() & 0o777);
-    tmp.as_file()
-        .set_permissions(fs::Permissions::from_mode(mode))?;
+    let rewrite = match &previous {
+        None => None,
+        Some(target_metadata) => {
+            let previous_owner = Owner::of(target_metadata);
+            // The temp file is this process's own: its owner is who created it, and
+            // a uid of 0 is a privileged writer.
+            let created = Owner::of(&tmp.as_file().metadata()?);
+            // Before the mode: chown clears setuid and setgid.
+            let written = keep_owner(tmp.as_file(), previous_owner, created)?;
+            let writer = Writer::of(previous_owner, written, created);
+            let mode = mode::rewritten_mode(target_metadata.mode(), writer, HOST_SETGID_ON_WRITE);
+            Some((target_metadata.mode(), writer, mode))
+        }
+    };
+    let requested = rewrite.map_or(0o644, |(_, _, mode)| mode);
+    mode::set_mode(tmp.as_file(), requested)?;
+    let actual = mode::mode_of(&tmp.as_file().metadata()?);
     tmp.persist(path).map_err(|e| e.error)?;
     // fsync the directory so the rename itself survives a crash (content fsync alone
     // doesn't make the new directory entry durable). Best-effort: the rename already
     // landed, so a filesystem that can't fsync a directory (e.g. some network mounts)
     // must not turn a successful write into an error.
     let _ = fsync_dir(&dir);
-    Ok(())
+    Ok(rewrite.and_then(|(previous, writer, requested)| {
+        let modes = Modes {
+            previous,
+            requested,
+            actual,
+        };
+        ModeChange::between(modes, writer)
+    }))
 }
 
 /// fsync a directory so its recent entry changes (renames/creates/unlinks) are
@@ -426,7 +427,8 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{owner_to_keep, parse_merge_keys, Owner};
+    use super::{owner_to_keep, parse_merge_keys};
+    use crate::mode::Owner;
     use crate::reconcile::Segment;
 
     /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
