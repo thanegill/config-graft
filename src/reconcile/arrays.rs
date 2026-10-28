@@ -7,7 +7,7 @@
 //! every element of both sides is an object carrying it -- by that key, deep-merging
 //! the matched records.
 
-use super::{reconcile, ArrayStrategy, KeyPath, NodeList, Options};
+use super::{reconcile, ArrayStrategy, KeyPath, NodeList, Options, Segment};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
 use std::collections::{HashMap, HashSet};
@@ -24,7 +24,7 @@ pub(super) fn combine<L: Leaf>(
     desired: &[Node<L>],
     base: Option<&Node<L>>,
     opts: &Options,
-    path: &[String],
+    path: &KeyPath,
 ) -> (NodeList<L>, Vec<Warning<L>>) {
     match opts.arrays {
         // Atomic: DESIRED's array wins wholesale.
@@ -162,7 +162,10 @@ fn keyed_merge<L: Leaf>(
             (Some(t), Some(d)) => {
                 let (m, conflicts) = reconcile(&t, &d, find(base, k).as_ref(), opts);
                 let (field, key_value) = k;
-                let selector = format!("[{field}={key_value}]");
+                let selector = Segment::Selector {
+                    field: field.clone(),
+                    value: key_value.to_string(),
+                };
                 for mut c in conflicts {
                     c.path_mut().prepend(selector.clone());
                     nested.push(c);
