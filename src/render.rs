@@ -16,8 +16,7 @@ use std::fmt;
 
 use json_syntax::Print;
 
-use crate::reconcile::{escape_unprintable, KeyPath};
-use crate::value::{Leaf, Node};
+use crate::value::{escape_unprintable, Leaf, ManagedPath, Node};
 
 /// JSON-escape and quote a string, for `--diff` and the leaf `Display` impls.
 pub fn quote(s: &str) -> String {
@@ -89,10 +88,10 @@ impl<L: Leaf> Node<L> {
         // (not the rendered string), so a key that itself contains the format separator
         // can't reorder against a nested path that renders identically; it also keeps a
         // directory's own line (its final segment empty) just before its children.
-        let mut lines: Vec<(KeyPath, String)> = Vec::new();
+        let mut lines: Vec<(ManagedPath, String)> = Vec::new();
 
-        let old_leaves: HashSet<KeyPath> = self.leaf_paths().into_iter().collect();
-        let new_leaves: HashSet<KeyPath> = new.leaf_paths().into_iter().collect();
+        let old_leaves: HashSet<ManagedPath> = self.leaf_paths().into_iter().collect();
+        let new_leaves: HashSet<ManagedPath> = new.leaf_paths().into_iter().collect();
         for path in old_leaves.union(&new_leaves) {
             // Decide the label from the actual node at this path, not the backend:
             // only a directory's own-attributes leaf collapses an empty component to
@@ -132,7 +131,7 @@ impl<L: Leaf> Node<L> {
     /// giving the bare-`/` root line or a trailing-`/` subdirectory line. Any other
     /// empty component is quoted (`""`) so an empty-named key is unambiguous rather
     /// than reading as a directory line.
-    fn diff_label(path: &KeyPath, sep: &str, is_dir_attrs: bool) -> String {
+    fn diff_label(path: &ManagedPath, sep: &str, is_dir_attrs: bool) -> String {
         if is_dir_attrs {
             // Keep the byte-identical tree behavior: a directory's own-attributes
             // leaf's empty final segment gives a trailing `sep` (a subdirectory
@@ -146,7 +145,7 @@ impl<L: Leaf> Node<L> {
             };
         }
         // Any other empty key: diff paths are pure key segments (no `[field=value]`
-        // selectors), so joining with `sep` matches `KeyPath::render`, except that
+        // selectors), so joining with `sep` matches `ManagedPath::render`, except that
         // an empty segment is quoted so `{"": 1}` shows as `""`, not a bare `sep`.
         path.iter()
             .map(|seg| {
