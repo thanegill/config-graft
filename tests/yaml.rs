@@ -232,6 +232,102 @@ fn block_scalar_is_preserved_through_a_sibling_change() {
 }
 
 #[test]
+fn edit_after_a_multibyte_value() {
+    yaml_golden(
+        "name: \"héllo wörld\"\nport: 1\n",
+        "port: 2\n",
+        None,
+        "name: \"héllo wörld\"\nport: 2\n",
+    );
+}
+
+#[test]
+fn edit_after_a_multibyte_comment() {
+    yaml_golden(
+        "# café\nport: 1\nother: x\n",
+        "port: 2\n",
+        None,
+        "# café\nport: 2\nother: x\n",
+    );
+}
+
+#[test]
+fn prune_after_a_multibyte_value() {
+    yaml_golden("a: €\nb: 1\n", "a: €\n", Some("a: €\nb: 1\n"), "a: €\n");
+}
+
+#[test]
+fn edit_of_a_multibyte_value() {
+    yaml_golden(
+        "a: héllo  # ç\nb: 1\n",
+        "a: wörld\n",
+        None,
+        "a: wörld  # ç\nb: 1\n",
+    );
+}
+
+#[test]
+fn addition_after_a_multibyte_last_value() {
+    yaml_golden("a: é\n", "b: 1\n", None, "a: é\nb: 1\n");
+    yaml_golden("s:\n  a: é\n", "s:\n  b: 1\n", None, "s:\n  a: é\n  b: 1\n");
+}
+
+#[test]
+fn edit_after_a_byte_order_mark() {
+    yaml_golden(
+        "\u{feff}a: 1\nb: 2\n",
+        "b: 3\n",
+        None,
+        "\u{feff}a: 1\nb: 3\n",
+    );
+}
+
+#[test]
+fn structural_change_after_a_multibyte_comment() {
+    yaml_golden(
+        "# üü\na: 1\nb: 2\n",
+        "a:\n  n: 1\n",
+        None,
+        "# üü\na:\n  n: 1\nb: 2\n",
+    );
+}
+
+#[test]
+fn edit_after_four_byte_chars() {
+    yaml_golden(
+        "e: \u{1f600}\u{1f600}\u{1f600}\nf: 1\n",
+        "f: 2\n",
+        None,
+        "e: \u{1f600}\u{1f600}\u{1f600}\nf: 2\n",
+    );
+}
+
+#[test]
+fn edit_of_a_multibyte_value_at_eof_without_newline() {
+    yaml_golden("a: 1\nb: é", "b: x\n", None, "a: 1\nb: x");
+}
+
+#[test]
+fn nested_addition_after_a_multibyte_comment() {
+    yaml_golden(
+        "# ü\nsec:\n  a: 1\n",
+        "sec:\n  b: 2\n",
+        None,
+        "# ü\nsec:\n  a: 1\n  b: 2\n",
+    );
+}
+
+#[test]
+fn adjacent_prune_and_addition_both_apply() {
+    yaml_golden(
+        "a: 1\nb: 2\n",
+        "a: 1\nc: 3\n",
+        Some("a: 1\nb: 2\n"),
+        "a: 1\nc: 3\n",
+    );
+}
+
+#[test]
 fn stdout_does_not_modify_yaml_target() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.yaml");
@@ -272,18 +368,53 @@ fn check_reports_pending_yaml_change_and_writes_nothing() {
 
 /// Assert applying `desired` onto `target` exits 1 and leaves the file unchanged.
 fn yaml_refuses(target_text: &str, desired_text: &str) {
+    yaml_refuses_with_base(target_text, desired_text, None);
+}
+
+/// [`yaml_refuses`] with an optional BASE.
+fn yaml_refuses_with_base(target_text: &str, desired_text: &str, base_text: Option<&str>) {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.yaml");
     let desired = dir.path().join("desired.yaml");
     fs::write(&target, target_text).unwrap();
     fs::write(&desired, desired_text).unwrap();
-    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(1), "expected refusal (exit 1)");
+    let mut args = vec![
+        "yaml".to_string(),
+        target.to_str().unwrap().to_string(),
+        desired.to_str().unwrap().to_string(),
+    ];
+    if let Some(b) = base_text {
+        let base = dir.path().join("base.yaml");
+        fs::write(&base, b).unwrap();
+        args.push(base.to_str().unwrap().to_string());
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run(&argv);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "expected refusal (exit 1): {out:?}"
+    );
     assert_eq!(
         fs::read_to_string(&target).unwrap(),
         target_text,
         "target must be left byte-unchanged on refusal"
     );
+}
+
+#[test]
+fn overlapping_edits_are_refused_not_a_panic() {
+    for target in [
+        "a:\n  x: 1\nb: 1\n",
+        "a:\n  x: é\nb: 1\n",
+        "# ü\na:\n  x: 1\nb: 1\n",
+    ] {
+        yaml_refuses_with_base(target, "b: €\n", Some(target));
+        yaml_refuses(target, "a: 5\nb: €\n");
+    }
+    for target in ["c: 1\na:\n  x: 1\nb: 1\n", "a:\n  x: 1\nb: 1\n#xyz\nc: 1\n"] {
+        yaml_refuses_with_base(target, "c: 1\n", Some(target));
+    }
 }
 
 #[test]

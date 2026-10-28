@@ -3,8 +3,8 @@
 //! Instead of re-emitting the reconciled tree (which would drop comments), this
 //! applies the result onto the *original file text* as minimal byte-span edits,
 //! leaving every untouched region -- comments, blank lines, quoting, indentation
-//! -- byte-for-byte intact. saphyr's `MarkedYaml` gives the byte spans of each
-//! key and value; we splice only the changed ranges.
+//! -- byte-for-byte intact. saphyr's `MarkedYaml` gives the span of each key and
+//! value; we splice only the changed ranges.
 //!
 //! Safety: a wrong edit would corrupt a user's config, so we **re-parse the
 //! edited text and refuse to return it unless it parses back to exactly the
@@ -13,7 +13,7 @@
 use std::borrow::Cow;
 
 use indexmap::IndexMap;
-use saphyr::{LoadableYamlNode, MarkedYaml, Scalar, Yaml, YamlData};
+use saphyr::{LoadableYamlNode, MarkedYaml, Marker, Scalar, Yaml, YamlData};
 
 use super::yaml::YamlLeaf;
 use super::{ValueCodec, Yaml as YamlCodec};
@@ -27,7 +27,7 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
     let result_map = result.as_map().ok_or(Error::YamlUnsafe)?;
 
     // Re-parse the original for both the structural tree (authoritative target)
-    // and the marked tree (byte spans). Anything unsupported refuses here.
+    // and the marked tree (spans). Anything unsupported refuses here.
     let target = parse_node(text).ok_or(Error::YamlUnsafe)?;
     let target_map = target.as_map().ok_or(Error::YamlUnsafe)?;
 
@@ -36,11 +36,15 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
         return Err(Error::YamlUnsafe);
     };
 
+    let offsets = ByteOffsets::new(text);
     let mut edits = Vec::new();
-    diff_map(target_map, result_map, root, text, &mut edits)?;
+    diff_map(target_map, result_map, root, text, &offsets, &mut edits)?;
 
     // Apply right-to-left so earlier byte offsets stay valid.
     edits.sort_by(|a, b| b.start.cmp(&a.start).then(b.end.cmp(&a.end)));
+    if edits.windows(2).any(|pair| pair[1].end > pair[0].start) {
+        return Err(Error::YamlUnsafe);
+    }
     let mut out = text.to_string();
     for e in &edits {
         out.replace_range(e.start..e.end, &e.text);
@@ -69,11 +73,42 @@ fn parse_node(text: &str) -> Option<Node<YamlLeaf>> {
     YamlCodec::decode(doc)
 }
 
-/// Ordered (key, key-node, value-node) entries of a marked mapping, or `None` if
-/// the node is not a string-keyed mapping.
+/// The byte offset of every char in a text, plus the text's length.
+///
+/// saphyr's `Marker::index` counts chars, though its doc says bytes, so every
+/// marker is translated here before it is used to slice the text.
+struct ByteOffsets(Vec<usize>);
+
+impl ByteOffsets {
+    fn new(text: &str) -> Self {
+        Self(
+            text.char_indices()
+                .map(|(byte, _)| byte)
+                .chain([text.len()])
+                .collect(),
+        )
+    }
+
+    fn of(&self, marker: Marker) -> Option<usize> {
+        self.0.get(marker.index()).copied()
+    }
+}
+
+/// One entry of a marked mapping, with its spans as byte offsets into the text.
+struct MarkedEntry<'a> {
+    key: String,
+    key_start: usize,
+    value: &'a MarkedYaml<'a>,
+    value_start: usize,
+    value_end: usize,
+}
+
+/// Ordered entries of a marked mapping, or `None` if the node is not a
+/// string-keyed mapping or a marker lies outside the text.
 fn marked_entries<'a>(
     node: &'a MarkedYaml<'a>,
-) -> Option<Vec<(String, &'a MarkedYaml<'a>, &'a MarkedYaml<'a>)>> {
+    offsets: &ByteOffsets,
+) -> Option<Vec<MarkedEntry<'a>>> {
     let YamlData::Mapping(m) = &node.data else {
         return None;
     };
@@ -82,7 +117,13 @@ fn marked_entries<'a>(
         let YamlData::Value(Scalar::String(s)) = &k.data else {
             return None;
         };
-        out.push((s.to_string(), k, v));
+        out.push(MarkedEntry {
+            key: s.to_string(),
+            key_start: offsets.of(k.span.start)?,
+            value: v,
+            value_start: offsets.of(v.span.start)?,
+            value_end: offsets.of(v.span.end)?,
+        });
     }
     Some(out)
 }
@@ -94,17 +135,18 @@ fn diff_map(
     rmap: &IndexMap<String, Node<YamlLeaf>>,
     node: &MarkedYaml,
     src: &str,
+    offsets: &ByteOffsets,
     edits: &mut Vec<Edit>,
 ) -> Result<(), Error> {
-    let entries = marked_entries(node).ok_or(Error::YamlUnsafe)?;
-    let find = |key: &str| entries.iter().find(|(k, _, _)| k == key);
+    let entries = marked_entries(node, offsets).ok_or(Error::YamlUnsafe)?;
+    let find = |key: &str| entries.iter().find(|entry| entry.key == key);
 
     // Removed keys: delete the whole entry line range.
     for (k, _) in tmap {
         if !rmap.contains_key(k) {
-            let (_, kn, vn) = find(k).ok_or(Error::YamlUnsafe)?;
-            let start = line_start(src, kn.span.start.index());
-            let end = line_end(src, vn.span.end.index());
+            let entry = find(k).ok_or(Error::YamlUnsafe)?;
+            let start = line_start(src, entry.key_start);
+            let end = line_end(src, entry.value_end);
             edits.push(Edit {
                 start,
                 end,
@@ -116,26 +158,26 @@ fn diff_map(
     // Changed / recursed keys.
     for (k, rv) in rmap {
         let Some(tv) = tmap.get(k) else { continue };
-        let (_, kn, vn) = find(k).ok_or(Error::YamlUnsafe)?;
+        let entry = find(k).ok_or(Error::YamlUnsafe)?;
         match (tv, rv) {
-            (Node::Map(tc), Node::Map(rc)) => diff_map(tc, rc, vn, src, edits)?,
+            (Node::Map(tc), Node::Map(rc)) => diff_map(tc, rc, entry.value, src, offsets, edits)?,
             _ if tv == rv => {}
             (Node::Leaf(_), Node::Leaf(_)) => {
                 // Scalar → scalar: replace just the value span (keeps any inline
                 // comment, which sits past the value's end).
                 edits.push(Edit {
-                    start: vn.span.start.index(),
-                    end: vn.span.end.index(),
+                    start: entry.value_start,
+                    end: entry.value_end,
                     text: emit_fragment(&YamlCodec::encode(rv)),
                 });
             }
             _ => {
                 // A structural change (to/from a block): re-render the whole entry.
-                let ind = indent_of(src, kn.span.start.index());
+                let ind = indent_of(src, entry.key_start);
                 let frag = emit_entry(k, rv, ind);
                 edits.push(Edit {
-                    start: line_start(src, kn.span.start.index()),
-                    end: line_end(src, vn.span.end.index()),
+                    start: line_start(src, entry.key_start),
+                    end: line_end(src, entry.value_end),
                     text: format!("{frag}\n"),
                 });
             }
@@ -146,9 +188,9 @@ fn diff_map(
     let added: Vec<&String> = rmap.keys().filter(|k| !tmap.contains_key(*k)).collect();
     if !added.is_empty() {
         // Need an existing sibling to anchor indentation and insertion point.
-        let (_, _, last_v) = entries.last().ok_or(Error::YamlUnsafe)?;
-        let ind = indent_of(src, entries[0].1.span.start.index());
-        let at = line_end(src, last_v.span.end.index());
+        let last = entries.last().ok_or(Error::YamlUnsafe)?;
+        let ind = indent_of(src, entries[0].key_start);
+        let at = line_end(src, last.value_end);
         let mut text = String::new();
         for k in added {
             text.push_str(&emit_entry(k, &rmap[k], ind));
@@ -262,6 +304,12 @@ mod tests {
     fn adds_nested_subtree() {
         let out = apply("a: 1\n", &result("a: 1\nnew:\n  deep: 2\n")).unwrap();
         assert_eq!(out, "a: 1\nnew:\n  deep: 2\n");
+    }
+
+    #[test]
+    fn refuses_overlapping_edits() {
+        let out = apply("{a: 1, b: 2}\n", &result("b: é€\n"));
+        assert!(matches!(out, Err(Error::YamlUnsafe)), "got: {out:?}");
     }
 
     #[test]
