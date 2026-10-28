@@ -111,9 +111,7 @@ let
   # and DESIRED. Values only; never used to build config *keys*.
   activeByFormat = map (format: {
     inherit format;
-    active = lib.filterAttrs (
-      _: entry: entry.settings != { } || entry.source != null
-    ) config.environment.${format.optionName};
+    active = lib.filterAttrs (_: configGraftLib.isActive) config.environment.${format.optionName};
   }) formats;
 
   entries = lib.concatMap (
@@ -132,6 +130,17 @@ let
       };
     }) active
   ) activeByFormat;
+
+  # The previous generation's toplevel during activation: the `/run/current-system`
+  # link is swapped to the new one only as activation's last step.
+  prevGenRoot = "/run/current-system";
+
+  # Sets `_prev` to the previous generation's snapshot of an entry, the BASE, or
+  # empty when it has none.
+  prevSnapshot = snapshotRel: ''
+    _prev="${prevGenRoot}/${snapshotRel}"
+    [[ -e "$_prev" ]] || _prev=""
+  '';
 
   # A single activation script for all managed system files. The system activation
   # environment has none of home-manager's helpers, so define pass-through `run` and
@@ -152,24 +161,14 @@ let
     ''
     + lib.concatMapStringsSep "\n" (
       e:
-      ''
-        _prev="/run/current-system/${e.snapshotRel}"
-        [[ -e "$_prev" ]] || _prev=""
-      ''
+      prevSnapshot e.snapshotRel
       + configGraftLib.mkEntryReconcileScript {
         inherit lib;
         inherit (e) format entry desired;
         target = e.entry.target;
       }
     ) entries
-    + lib.concatMapStringsSep "\n" (
-      e:
-      ''
-        _prev="/run/current-system/${e.snapshotRel}"
-        [[ -e "$_prev" ]] || _prev=""
-      ''
-      + e.script
-    ) directoryEntries
+    + lib.concatMapStringsSep "\n" (e: prevSnapshot e.snapshotRel + e.script) directoryEntries
   );
 in
 {
