@@ -64,6 +64,7 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.cargo-llvm-cov
+            pkgs.cargo-mutants
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           # cargo-llvm-cov needs the LLVM tools matching rustc (both LLVM 21 here).
