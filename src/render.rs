@@ -29,7 +29,8 @@ pub fn quote(s: &str) -> String {
 /// A float as JSON renders it: the shortest form that round-trips, via `ryu`, with
 /// serde_json's `+` on a positive exponent (the tests below check it against
 /// serde_json's own output). JSON has no NaN or infinity, so those render as
-/// `null`, as every JSON writer does.
+/// `null`, as every JSON writer does. YAML writes this spelling to disk too, so
+/// its `+` on an exponent is load-bearing there: a YAML 1.1 reader needs it.
 ///
 /// Hand-rolling this from Rust's `{:?}` is what the shortest round-tripping form
 /// tempts you into, and it is wrong: `{:?}` picks decimal-versus-exponent at
