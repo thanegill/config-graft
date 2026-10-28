@@ -42,7 +42,7 @@ config-graft <FORMAT> [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--base <PATH>` — alternative to the positional BASE.
 - `--no-prune` — deep-merge only; never delete keys (ignore BASE for removals).
 - `--stdout` — write the result to stdout; do not modify TARGET. Byte-format subcommands only (a tree has no single byte stream, so the `directory` subcommand does not expose it).
-- `--diff` — print a human-readable, leaf-level diff of the changes. Key-paths use the format's separator: `.` for JSON/YAML/TOML, `:` for plist (PlistBuddy) — same as the `merge` conflict warning.
+- `--diff` — print a human-readable, leaf-level diff of the changes. Key-paths use the format's separator: `.` for JSON/YAML/TOML, `:` for plist (PlistBuddy) — same as the `merge` conflict warning, except that `--diff` labels never quote a key, since they never carry a selector.
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
 - `--indent <N|tab>` — output indentation (default: 2 spaces). **`json` subcommand only** (it is the only subcommand that exposes this option).
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys). Byte-format subcommands (`json`/`yaml`/`toml`/`plist`).
@@ -91,7 +91,7 @@ Keys in `target` that were never in `base` or `desired` are always preserved.
 
 ### Diagnostics
 
-config-graft is a pass-through for every value it does not manage, so anywhere it changes one anyway it says so on stderr, prefixed `config-graft: warning: ` and naming the key path (format-separated: `.`, or `:` for plist, `/` for a tree). Warnings are **diagnostic only** — they never change the exit code, and they are printed in `--check` and `--stdout` runs too, since those report what a write would do. The cases:
+config-graft is a pass-through for every value it does not manage, so anywhere it changes one anyway it says so on stderr, prefixed `config-graft: warning: ` and naming the key path (format-separated: `.`, or `:` for plist, `/` for a tree). In a warning or refusal path, a key that holds a `[` or opens with `"` is shown JSON-quoted (`x."[b]"`), so it cannot read as an element selector and a quoted key cannot be forged. A control byte inside a quoted key is escaped JSON-style (`\u001b`). `--merge-key PATH` takes such a key as written (`x.[b]`), not quoted. Warnings are **diagnostic only** — they never change the exit code, and they are printed in `--check` and `--stdout` runs too, since those report what a write would do. The cases:
 
 - a `merge` array with a **contradictory cross-over reorder**, resolved by tie-break rather than agreement (see §5);
 - an input array holding **the same identity twice** — by value, or by `--merge-key` field — where membership is a set and only the first occurrence can survive (see §5);
@@ -203,9 +203,9 @@ Deep-merge wins; target-only keys survive; deeply nested merge; type changes (ob
 Implemented in **Rust** (this repo):
 
 - `src/value.rs` — the internal value model: a `Leaf` trait and a `Node<L>` generic over it. Each format supplies **its own** leaf type (no single enum mixing every format's value space), so the encoders are total — a JSON node can't hold a plist `Date`, by construction. `Node::Map` carries no side payload, so `Node` derives everything but `Hash`, which is hand-written to hash a map order-independently; a format that needs per-directory metadata (directory mode) stores it as an ordinary leaf under a reserved key rather than on the map itself.
-- `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`, unit-tested against §12. Managed key paths are a `KeyPath` newtype. `src/reconcile/arrays.rs` holds the array strategies, including the three-way `merge`.
+- `src/reconcile.rs` — the pure algorithm (no I/O), generic over `<L: Leaf>`, unit-tested against §12. Managed key paths are a `KeyPath` newtype over typed segments: an object key, or a keyed-record selector that is only ever rendered. `src/reconcile/arrays.rs` holds the array strategies, including the three-way `merge`.
 - `src/number.rs` — what makes two JSON number literals the same number (§5a), so comparison sees through spelling.
-- `src/render.rs` — the `--diff` listing and the compact value tokens it is built from.
+- `src/render.rs` — the `--diff` listing, the compact value tokens it is built from, and the key paths that warnings and refusals name.
 - `src/warning.rs` — the run diagnostics (§5, *Diagnostics*), printed on stderr.
 - `src/format/directory.rs` — the `directory` subcommand backend (§5b): an `FsLeaf` leaf that stores each file as a **content handle** (length + SHA-256 digest + source path + a generic attribute map of mode/owner/xattrs) or a symlink; a recursive `read_tree` (streaming the digest, never buffering the bytes) and a minimal-diff `apply_tree` that streams bytes source→dest and applies attributes atomically, refusing on failure. A directory's own attributes are a `FsLeaf::DirectoryAttributes` leaf under a reserved empty-string key in its map (the write path applies it to the directory rather than creating a file); the root is unmanaged unless `--manage-root`. Not a `Format` (a tree has no byte stream); it plugs into the shared reconcile-run driver via a `Backend` impl, reusing the reconcile engine and diff renderer. Uses the `sha2` and `xattr` crates.
 - `src/format/` — one module per format (`json`/`plist`/`yaml`/`toml`), each defining its leaf enum and implementing `ValueCodec` (native ⇄ `Node`) and `Format` (parse/serialize). `mod.rs` holds those traits, the `FormatKind` tag, `Indent`, and `read_file`.

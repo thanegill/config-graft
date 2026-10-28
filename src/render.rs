@@ -3,20 +3,22 @@
 //!
 //! Three format-agnostic primitives -- `quote` (a JSON-escaped string),
 //! `render_f64` (a float as JSON spells it) and `write_separated` (a
-//! `Display`-based join) -- then the two renderings of a whole [`Node`] built on
-//! top of them: its `Display`, the compact single-line token, and [`Node::diff`],
-//! the leaf-level `+`/`-`/`~` listing behind `--diff`. Each format's leaf
-//! `Display` lives with that format's codec and uses the primitives from here.
+//! `Display`-based join) -- then `escape_unprintable`, shared by every path
+//! label, and [`KeyPath::render`], the key paths that warnings and refusals name;
+//! and the two renderings of a whole [`Node`]: its `Display` (the compact
+//! single-line token) and [`Node::diff`], the leaf-level `+`/`-`/`~` listing
+//! behind `--diff`. Each format's leaf `Display` lives with that format's codec
+//! and uses the primitives from here.
 //!
 //! This output is asserted byte-for-byte by the test suite, so it is deliberately
 //! all in one file: `value` is the model the engine computes over, and `format` is
 //! what reaches disk. Neither of those decides how anything looks.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use json_syntax::Print;
 
-use crate::reconcile::{escape_unprintable, KeyPath};
+use crate::reconcile::{KeyPath, Segment};
 use crate::value::{Leaf, Node};
 
 /// JSON-escape and quote a string, for `--diff` and the leaf `Display` impls.
@@ -70,6 +72,62 @@ pub fn write_separated<T, D: std::fmt::Display>(
     write!(f, "{}", display(first))?;
     items.try_for_each(|item| write!(f, "{sep}{}", display(item)))
 }
+
+/// Escape anything unprintable, so rendering a path cannot emit a control byte into
+/// the reader's terminal. Only *rendering* escapes: a segment stays the real key, or
+/// a path built for display could no longer be looked up.
+fn escape_unprintable(segment: &str) -> String {
+    let unprintable = |c: char| c < '\u{20}' || c == '\u{7f}';
+    if !segment.chars().any(unprintable) {
+        return segment.to_string();
+    }
+    segment
+        .chars()
+        .map(|c| {
+            if unprintable(c) {
+                format!("\\u{{{:x}}}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+impl KeyPath {
+    /// Render as a user-facing string: segments joined by `sep`, or `<root>` for
+    /// the empty path. `sep` is format-specific. A selector attaches directly to
+    /// the preceding key with no separator, e.g. `servers[name="web"]`, so a key
+    /// holding a `[` is quoted (`x."[b]"`) or it would read as one -- and so is a
+    /// key opening with `"`, or a quoted key could be forged.
+    pub fn render(&self, sep: &str) -> String {
+        if self.is_empty() {
+            return "<root>".to_string();
+        }
+        let mut out = String::new();
+        for (i, segment) in self.iter().enumerate() {
+            match segment {
+                Segment::Key(key) => {
+                    if i > 0 {
+                        out.push_str(sep);
+                    }
+                    if key.contains('[') || key.starts_with('"') {
+                        // JSON leaves DEL unescaped; a terminal must not see it.
+                        out.push_str(&quote(key).replace('\u{7f}', "\\u007f"));
+                    } else {
+                        out.push_str(&escape_unprintable(key));
+                    }
+                }
+                Segment::Selector { field, value } => {
+                    let field = escape_unprintable(field);
+                    let value = escape_unprintable(value);
+                    write!(out, "[{field}={value}]").expect("writing to a String");
+                }
+            }
+        }
+        out
+    }
+}
+
 impl<L: Leaf> Node<L> {
     /// A compact, leaf-level diff of `self` (old) against `new` (`+` added, `-`
     /// removed, `~` changed), with path components joined by `sep` (`.` for byte
@@ -134,31 +192,20 @@ impl<L: Leaf> Node<L> {
     /// empty component is quoted (`""`) so an empty-named key is unambiguous rather
     /// than reading as a directory line.
     fn diff_label(path: &KeyPath, sep: &str, is_dir_attrs: bool) -> String {
-        if is_dir_attrs {
-            // Keep the byte-identical tree behavior: a directory's own-attributes
-            // leaf's empty final segment gives a trailing `sep` (a subdirectory
-            // line); the root's own-attributes path is a lone empty segment, whose
-            // rendering is empty, so show a bare `sep` instead of a blank line.
-            let rendered = path.render(sep);
-            return if rendered.is_empty() {
-                sep.to_string()
-            } else {
-                rendered
-            };
-        }
-        // Any other empty key: diff paths are pure key segments (no `[field=value]`
-        // selectors), so joining with `sep` matches `KeyPath::render`, except that
-        // an empty segment is quoted so `{"": 1}` shows as `""`, not a bare `sep`.
-        path.iter()
-            .map(|seg| {
-                if seg.is_empty() {
-                    quote(seg)
-                } else {
-                    escape_unprintable(seg)
-                }
+        let label = path
+            .iter()
+            .map(|segment| match segment {
+                Segment::Key(key) if key.is_empty() && !is_dir_attrs => quote(key),
+                Segment::Key(key) => escape_unprintable(key),
+                Segment::Selector { .. } => unreachable!("a leaf path holds only keys"),
             })
             .collect::<Vec<_>>()
-            .join(sep)
+            .join(sep);
+        if is_dir_attrs && label.is_empty() {
+            sep.to_string()
+        } else {
+            label
+        }
     }
 }
 
@@ -187,7 +234,16 @@ impl<L: Leaf> fmt::Display for Node<L> {
 
 #[cfg(test)]
 mod tests {
-    use super::render_f64;
+    use super::{escape_unprintable, render_f64};
+
+    #[test]
+    fn escape_unprintable_escapes_only_c0_controls_and_delete() {
+        let text: String = ['a', ' ', '~', '\u{1f}', '\u{7f}', '\u{80}']
+            .iter()
+            .collect();
+        assert_eq!(escape_unprintable(&text), "a ~\\u{1f}\\u{7f}\u{80}");
+        assert_eq!(escape_unprintable("plain key"), "plain key");
+    }
 
     /// The boundaries where a writer switches between decimal and exponent
     /// notation, plus the extremes of the type.

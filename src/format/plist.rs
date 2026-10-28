@@ -258,12 +258,8 @@ impl Format for Plist {
         if opts.plist_format == PlistFormat::Binary {
             return Ok(None);
         }
-        let needs_floor = scan_dates(node).map_err(|mut segments| {
-            segments.reverse();
-            let mut path = KeyPath::new();
-            for segment in segments {
-                path.push(segment);
-            }
+        let needs_floor = scan_dates(node).map_err(|segments| {
+            let path: KeyPath = segments.into_iter().rev().collect();
             Error::PlistDateOutOfRange {
                 path: path.render(Plist::PATH_SEP),
             }
@@ -328,7 +324,7 @@ fn floor_dates_to_whole_seconds(
     match node {
         Node::Map(m) => {
             for (key, value) in m.iter_mut() {
-                path.push(key.clone());
+                path.push_key(key.clone());
                 floor_dates_to_whole_seconds(value, path, rewritten)?;
                 path.pop();
             }
@@ -449,7 +445,7 @@ fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Re
     match node {
         Node::Map(m) => {
             for (key, value) in m {
-                path.push(key.clone());
+                path.push_key(key.clone());
                 if xml_unrepresentable(key).is_some() {
                     into.keys.insert((path.clone(), key.clone()));
                 }
@@ -537,7 +533,7 @@ fn check_xml_representable(
     match node {
         Node::Map(m) => {
             for (key, value) in m {
-                path.push(key.clone());
+                path.push_key(key.clone());
                 judge(key, true, path, kept)?;
                 check_xml_representable(value, carried, current, path, kept)?;
                 path.pop();

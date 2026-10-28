@@ -16,33 +16,25 @@ mod arrays;
 /// array-combining strategies produce, and (on a `merge` conflict) report.
 pub type NodeList<L> = Vec<Node<L>>;
 
-/// A managed leaf path: a sequence of object keys (arrays/scalars are atomic
-/// leaves). Distinct from `std::path::Path` -- this addresses keys, not files.
-///
-/// Pruning only ever builds key segments. A conflict path may additionally carry a
-/// `[field=value]` element-selector segment naming a keyed-array record it points
-/// into; such paths are used only for rendering, never for pruning lookups.
+/// One step of a [`KeyPath`].
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct KeyPath(Vec<String>);
-
-/// Escape anything unprintable, so rendering a path cannot emit a control byte into
-/// the reader's terminal. Only *rendering* escapes: a segment stays the real key, or
-/// a path built for display could no longer be looked up.
-pub(crate) fn escape_unprintable(segment: &str) -> String {
-    if !segment.chars().any(|c| c < '\u{20}' || c == '\u{7f}') {
-        return segment.to_string();
-    }
-    segment
-        .chars()
-        .map(|c| {
-            if c < '\u{20}' || c == '\u{7f}' {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+pub enum Segment {
+    /// An object key.
+    Key(String),
+    /// The record of a keyed array that a warning path points into, rendered
+    /// `[field=value]`; `value` is the key value's `--diff` token, so a string is
+    /// already quoted. Only ever rendered, never looked up.
+    Selector { field: String, value: String },
 }
+
+/// A path through a document. Arrays and scalars are atomic leaves. Distinct
+/// from `std::path::Path` -- this addresses keys, not files.
+///
+/// Pruning only ever builds key segments. A warning path may additionally carry a
+/// [`Segment::Selector`] naming a keyed-array record it points into; such paths
+/// are used only for rendering, never for pruning lookups.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct KeyPath(Vec<Segment>);
 
 impl KeyPath {
     /// An empty path (the document root).
@@ -51,48 +43,36 @@ impl KeyPath {
     }
 
     /// Append a key segment.
-    pub(crate) fn push(&mut self, seg: String) {
-        self.0.push(seg);
+    pub(crate) fn push_key(&mut self, key: String) {
+        self.0.push(Segment::Key(key));
     }
 
-    /// Drop the last key segment.
+    /// Drop the last segment.
     pub(crate) fn pop(&mut self) {
         self.0.pop();
     }
 
-    /// Prepend a key segment -- used as a conflict bubbles up out of a subtree,
-    /// gaining its parent key at each level.
-    fn prepend(&mut self, seg: String) {
-        self.0.insert(0, seg);
+    /// Prepend a segment -- used as a conflict bubbles up out of a subtree,
+    /// gaining its parent key (or its record's selector) at each level.
+    fn prepend(&mut self, segment: Segment) {
+        self.0.insert(0, segment);
     }
 
     /// The path of the first `n` segments (a proper ancestor when `n < len`).
     fn prefix(&self, n: usize) -> KeyPath {
         KeyPath(self.0[..n].to_vec())
     }
+}
 
-    /// Render as a user-facing string: key segments joined by `sep`, or `<root>`
-    /// for the empty path. `sep` is format-specific. An element selector segment
-    /// (`[field=value]`, in a conflict path pointing into a keyed record) attaches
-    /// directly to the preceding key with no separator, e.g. `servers[name="web"]`.
-    pub fn render(&self, sep: &str) -> String {
-        if self.0.is_empty() {
-            return "<root>".to_string();
-        }
-        let mut out = String::new();
-        for (i, seg) in self.0.iter().enumerate() {
-            if i > 0 && !seg.starts_with('[') {
-                out.push_str(sep);
-            }
-            out.push_str(&escape_unprintable(seg));
-        }
-        out
+impl FromIterator<String> for KeyPath {
+    fn from_iter<I: IntoIterator<Item = String>>(keys: I) -> KeyPath {
+        KeyPath(keys.into_iter().map(Segment::Key).collect())
     }
 }
 
 impl std::ops::Deref for KeyPath {
-    type Target = [String];
-    fn deref(&self) -> &[String] {
+    type Target = [Segment];
+    fn deref(&self) -> &[Segment] {
         &self.0
     }
 }
@@ -131,13 +111,13 @@ pub struct MergeKeys {
     /// root) -> candidate fields. Arrays are atomic in this path model, so a path
     /// addresses within one array-free subtree; a matched keyed record is its own
     /// subtree, so a scope anchors at the document root or the nearest such record.
-    pub scoped: HashMap<Vec<String>, Vec<String>>,
+    pub scoped: HashMap<KeyPath, Vec<String>>,
 }
 
 impl MergeKeys {
     /// The candidate key fields for an array at `path` (its full path from the
     /// reconcile root): the scoped rule whose path matches exactly, else `global`.
-    pub(crate) fn candidates(&self, path: &[String]) -> &[String] {
+    pub(crate) fn candidates(&self, path: &KeyPath) -> &[String] {
         self.scoped
             .get(path)
             .map_or(self.global.as_slice(), Vec::as_slice)
@@ -240,20 +220,27 @@ impl<L: Leaf> Node<L> {
         out
     }
 
-    /// Value at an object path, if present.
-    pub(crate) fn get_path(&self, path: &[String]) -> Option<&Node<L>> {
+    /// Value at an object path, if present. A selector addresses nothing.
+    pub(crate) fn get_path(&self, path: &[Segment]) -> Option<&Node<L>> {
         let mut cur = self;
-        for key in path {
-            cur = cur.as_map()?.get(key)?;
+        for segment in path {
+            cur = match segment {
+                Segment::Key(key) => cur.as_map()?.get(key)?,
+                Segment::Selector { .. } => return None,
+            };
         }
         Some(cur)
     }
 
     /// Delete the value at an object path, preserving the order of the surviving
-    /// keys; a no-op if the path is empty or not present.
-    fn del_path(&mut self, path: &[String]) {
+    /// keys; a no-op if the path is empty, not present, or holds a selector.
+    fn del_path(&mut self, path: &[Segment]) {
         let Some((first, rest)) = path.split_first() else {
             return;
+        };
+        let first = match first {
+            Segment::Key(key) => key,
+            Segment::Selector { .. } => return,
         };
         let Some(obj) = self.as_map_mut() else {
             return;
@@ -288,7 +275,7 @@ fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
     match v {
         Node::Map(map) => {
             for (k, val) in map {
-                prefix.push(k.clone());
+                prefix.push_key(k.clone());
                 collect(val, prefix, out);
                 prefix.pop();
             }
@@ -324,11 +311,11 @@ pub fn deep_merge<L: Leaf>(
                 for (k, dv) in d {
                     let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
                     if let Some(tv) = t.get_mut(k) {
-                        path.push(k.clone());
+                        path.push_key(k.clone());
                         let sub = deep_merge(tv, dv, bv, opts, path);
                         path.pop();
                         for mut c in sub {
-                            c.path_mut().prepend(k.clone());
+                            c.path_mut().prepend(Segment::Key(k.clone()));
                             warnings.push(c);
                         }
                     } else {
@@ -519,7 +506,7 @@ mod tests {
         let opts = Options {
             merge_keys: MergeKeys {
                 global: Vec::new(),
-                scoped: HashMap::from([(vec!["servers".to_string()], vec!["name".to_string()])]),
+                scoped: HashMap::from([(keys(&["servers"]), vec!["name".to_string()])]),
             },
             ..Options::default()
         };
@@ -543,10 +530,7 @@ mod tests {
         let opts = Options {
             merge_keys: MergeKeys {
                 global: Vec::new(),
-                scoped: HashMap::from([(
-                    vec!["a".to_string(), "items".to_string()],
-                    vec!["id".to_string()],
-                )]),
+                scoped: HashMap::from([(keys(&["a", "items"]), vec!["id".to_string()])]),
             },
             ..Options::default()
         };
@@ -1227,11 +1211,14 @@ mod tests {
         .is_empty());
     }
 
+    /// A path of object keys.
+    fn keys(segments: &[&str]) -> KeyPath {
+        segments.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn keypath_render_uses_the_given_separator() {
-        let mut p = KeyPath::new();
-        p.push("a".to_string());
-        p.push("b".to_string());
+        let p = keys(&["a", "b"]);
         assert_eq!(p.render("."), "a.b");
         assert_eq!(p.render(":"), "a:b");
         assert_eq!(KeyPath::new().render(":"), "<root>"); // empty path
@@ -1311,12 +1298,59 @@ mod tests {
 
     #[test]
     fn keypath_render_attaches_element_selector_to_the_preceding_key() {
-        let mut p = KeyPath::new();
-        p.push("servers".to_string());
-        p.push("[name=\"web\"]".to_string()); // an element selector, no sep before it
-        p.push("tags".to_string());
+        let mut p = keys(&["tags"]);
+        p.prepend(Segment::Selector {
+            field: "name".to_string(),
+            value: "\"web\"".to_string(),
+        });
+        p.prepend(Segment::Key("servers".to_string()));
         assert_eq!(p.render("."), "servers[name=\"web\"].tags");
         assert_eq!(p.render(":"), "servers[name=\"web\"]:tags");
+    }
+
+    #[test]
+    fn keypath_render_quotes_a_key_that_would_read_as_a_selector() {
+        assert_eq!(keys(&["x", "[b]"]).render("."), r#"x."[b]""#);
+        assert_eq!(keys(&["x", "a[b]"]).render(":"), r#"x:"a[b]""#);
+        assert_eq!(keys(&["[b]", "y"]).render("."), r#""[b]".y"#);
+        // A key opening with a quote is quoted too, so `"[b]"` cannot be forged.
+        assert_eq!(keys(&[r#""[b]""#]).render("."), r#""\"[b]\"""#);
+    }
+
+    #[test]
+    fn keypath_render_leaves_other_punctuation_unquoted() {
+        assert_eq!(keys(&["a]", "b=c", r#"d"e"#]).render("."), r#"a].b=c.d"e"#);
+    }
+
+    /// A quoted key escapes a control byte the JSON way, not as the
+    /// `escape_unprintable` form an unquoted key gets.
+    #[test]
+    fn keypath_render_escapes_a_control_byte_in_a_quoted_key_as_json_does() {
+        let escape = char::from(0x1b_u8);
+        let quoted = format!("{escape}[b]");
+        let plain = format!("{escape}b");
+        assert_eq!(keys(&["x", &quoted]).render("."), r#"x."\u001b[b]""#);
+        assert_eq!(keys(&["x", &plain]).render("."), r"x.\u{1b}b");
+    }
+
+    /// JSON leaves DEL raw, which would reach the terminal, so a quoted key
+    /// escapes it too.
+    #[test]
+    fn keypath_render_escapes_a_delete_byte_in_a_quoted_key() {
+        let delete = format!("[{}", char::from(0x7f_u8));
+        assert_eq!(keys(&["x", &delete]).render("."), r#"x."[\u007f""#);
+    }
+
+    #[test]
+    fn a_selector_addresses_nothing() {
+        let v = n(json!({"a":{"b":7}}));
+        let mut p = keys(&["b"]);
+        p.prepend(Segment::Selector {
+            field: "b".to_string(),
+            value: "7".to_string(),
+        });
+        p.prepend(Segment::Key("a".to_string()));
+        assert_eq!(v.get_path(&p), None);
     }
 
     #[test]
@@ -1374,46 +1408,33 @@ mod tests {
     fn candidates_matches_exact_path_else_global() {
         let mk = MergeKeys {
             global: vec!["gid".to_string()],
-            scoped: HashMap::from([(
-                vec!["a".to_string(), "items".to_string()],
-                vec!["id".to_string()],
-            )]),
+            scoped: HashMap::from([(keys(&["a", "items"]), vec!["id".to_string()])]),
         };
-        let p = |segs: &[&str]| segs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         // Exact path -> the scope's fields.
-        assert_eq!(mk.candidates(&p(&["a", "items"])), ["id".to_string()]);
+        assert_eq!(mk.candidates(&keys(&["a", "items"])), ["id".to_string()]);
         // The same leaf name at another depth does NOT match the scope -> global.
-        assert_eq!(mk.candidates(&p(&["items"])), ["gid".to_string()]);
-        assert_eq!(mk.candidates(&p(&["b", "items"])), ["gid".to_string()]);
+        assert_eq!(mk.candidates(&keys(&["items"])), ["gid".to_string()]);
+        assert_eq!(mk.candidates(&keys(&["b", "items"])), ["gid".to_string()]);
     }
 
     #[test]
     fn candidates_empty_without_scope_or_global() {
-        assert!(MergeKeys::default()
-            .candidates(&["x".to_string()])
-            .is_empty());
+        assert!(MergeKeys::default().candidates(&keys(&["x"])).is_empty());
     }
 
     #[test]
     fn leaf_paths_treats_arrays_as_atomic() {
         let mut paths = n(json!({"a":1,"b":{"c":2},"d":[1,2]})).leaf_paths();
         paths.sort();
-        assert_eq!(
-            paths,
-            vec![
-                KeyPath(vec!["a".to_string()]),
-                KeyPath(vec!["b".to_string(), "c".to_string()]),
-                KeyPath(vec!["d".to_string()]),
-            ]
-        );
+        assert_eq!(paths, vec![keys(&["a"]), keys(&["b", "c"]), keys(&["d"])]);
     }
 
     #[test]
     fn get_path_reads_nested_and_misses() {
         let v = n(json!({"a":{"b":7}}));
-        assert_eq!(v.get_path(&["a".into(), "b".into()]), Some(&n(json!(7))));
-        assert_eq!(v.get_path(&["a".into(), "x".into()]), None);
-        assert_eq!(v.get_path(&["nope".into()]), None);
+        assert_eq!(v.get_path(&keys(&["a", "b"])), Some(&n(json!(7))));
+        assert_eq!(v.get_path(&keys(&["a", "x"])), None);
+        assert_eq!(v.get_path(&keys(&["nope"])), None);
     }
 
     #[test]
@@ -1443,12 +1464,12 @@ mod tests {
 
         // Descending into a non-object value: no-op.
         let mut scalar = n(json!(5));
-        scalar.del_path(&["a".to_string()]);
+        scalar.del_path(&keys(&["a"]));
         assert_eq!(scalar, n(json!(5)));
 
         // Happy path still deletes.
         let mut nested = n(json!({"a":{"b":1}}));
-        nested.del_path(&["a".to_string(), "b".to_string()]);
+        nested.del_path(&keys(&["a", "b"]));
         assert_eq!(nested, n(json!({"a":{}})));
     }
 }

@@ -1264,3 +1264,51 @@ fn warnings_are_printed_in_check_and_stdout_runs_too() {
     }
     assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"l":["a"]}"#);
 }
+
+/// Run a reconcile of `desired` over `target` with `flags` and return its stderr.
+fn warnings_of(target: &str, desired: &str, flags: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let target_path = dir.path().join("config.json");
+    let desired_path = dir.path().join("desired.json");
+    fs::write(&target_path, target).unwrap();
+    fs::write(&desired_path, desired).unwrap();
+    let paths = [
+        target_path.to_str().unwrap(),
+        desired_path.to_str().unwrap(),
+    ];
+    let out = run(&[&["json", "--stdout"], flags, &paths[..]].concat());
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stderr).unwrap()
+}
+
+#[test]
+fn a_key_holding_a_bracket_is_quoted_so_it_cannot_read_as_a_selector() {
+    let stderr = warnings_of(
+        r#"{"x":{"[b]":[3],"a[b]":[3],"plain":[3]}}"#,
+        r#"{"x":{"[b]":[1,1],"a[b]":[1,1],"plain":[1,1]}}"#,
+        &["--array-strategy", "set"],
+    );
+    assert!(stderr.contains("array `x.\"[b]\"` in DESIRED"), "{stderr}");
+    assert!(stderr.contains("array `x.\"a[b]\"` in DESIRED"), "{stderr}");
+    assert!(stderr.contains("array `x.plain` in DESIRED"), "{stderr}");
+}
+
+#[test]
+fn a_keyed_record_selector_still_attaches_to_its_array() {
+    let stderr = warnings_of(
+        r#"{"servers":[{"name":"web","tags":["x","y"]}]}"#,
+        r#"{"servers":[{"name":"web","tags":["y","x"]}]}"#,
+        &["--merge-key", "name"],
+    );
+    assert!(stderr.contains("`servers[name=\"web\"].tags`"), "{stderr}");
+}
+
+#[test]
+fn a_merge_key_scope_names_a_bracketed_key_as_written() {
+    let stderr = warnings_of(
+        r#"{"x":{"[s]":[{"n":"w","tags":["a","b"]}]}}"#,
+        r#"{"x":{"[s]":[{"n":"w","tags":["b","a"]}]}}"#,
+        &["--merge-key", "x.[s]=n"],
+    );
+    assert!(stderr.contains("`x.\"[s]\"[n=\"w\"].tags`"), "{stderr}");
+}
