@@ -14,6 +14,10 @@ in
 {
   inherit safeName;
 
+  # Whether a byte-format entry does anything: one with neither `settings` nor
+  # `source` is inert.
+  isActive = entry: entry.settings != { } || entry.source != null;
+
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
   # generated from `settings` by the entry's `pkgs.formats` generator. A plist entry
   # with `binary = true` runs that same generator and converts its output to a binary

@@ -98,6 +98,20 @@ let
     };
   };
 
+  # Where the prior generation's `home.file` links live during activation, as a
+  # shell expression; meaningful only when `oldGenPath` is set.
+  prevGenRoot = "$oldGenPath/home-files";
+
+  # Sets `_prev` to the prior generation's snapshot of an entry, the BASE. Unset
+  # on the first switch (or for a newly added entry), so `_prev` stays empty.
+  prevSnapshot = snapshotRel: ''
+    _prev=""
+    if [[ -v oldGenPath && -e "${prevGenRoot}/${snapshotRel}" ]]; then
+      _prev="${prevGenRoot}/${snapshotRel}"
+      verboseEcho "Pruning against previous snapshot $_prev"
+    fi
+  '';
+
   # Active directory entries (all of them — `source` is required), each with its
   # snapshot path and reconcile script.
   directoryEntries = lib.mapAttrs (
@@ -109,14 +123,8 @@ let
     {
       inherit snapshotRel;
       source = entry.source;
-      script = ''
-        _prev=""
-        if [[ -v oldGenPath && -e "$oldGenPath/home-files/${snapshotRel}" ]]; then
-          _prev="$oldGenPath/home-files/${snapshotRel}"
-          verboseEcho "Pruning against previous snapshot $_prev"
-        fi
-      ''
-      + configGraftLib.mkDirectoryReconcileScript { inherit lib entry target; };
+      script =
+        prevSnapshot snapshotRel + configGraftLib.mkDirectoryReconcileScript { inherit lib entry target; };
     }
   ) config.home.managedDirectory;
 
@@ -132,15 +140,7 @@ let
     let
       target = "${config.home.homeDirectory}/${entry.target}";
     in
-    # Previous run's settings = the prior generation's snapshot. Unset on the first
-    # switch, so PREVIOUS stays empty.
-    ''
-      _prev=""
-      if [[ -v oldGenPath && -e "$oldGenPath/home-files/${snapshotRel}" ]]; then
-        _prev="$oldGenPath/home-files/${snapshotRel}"
-        verboseEcho "Pruning against previous snapshot $_prev"
-      fi
-    ''
+    prevSnapshot snapshotRel
     + configGraftLib.mkEntryReconcileScript {
       inherit
         lib
@@ -155,9 +155,7 @@ let
   byFormat = map (
     format:
     let
-      active = lib.filterAttrs (
-        _: entry: entry.settings != { } || entry.source != null
-      ) config.home.${format.optionName};
+      active = lib.filterAttrs (_: configGraftLib.isActive) config.home.${format.optionName};
 
       entries = lib.mapAttrs (
         name: entry:
