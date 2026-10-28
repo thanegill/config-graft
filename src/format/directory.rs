@@ -88,9 +88,8 @@ impl fmt::Display for FsAttrs {
         };
         write!(f, ", {}:{}", num("uid"), num("gid"))?;
 
-        // Each extended attribute is shown as `name=<digest>` -- a short hash of the
-        // value distinguishes a value or rename change in the diff without dumping
-        // (possibly binary or large) bytes. The map is ordered (`BTreeMap`).
+        // A digest stands in for the value, which may be binary or large. SHA-256,
+        // not a std `Hasher`: `--diff` must be byte-stable across toolchains.
         let mut xattrs = self
             .iter()
             .filter_map(|(k, v)| k.strip_prefix("xattr:").map(|name| (name, v)))
@@ -101,9 +100,10 @@ impl fmt::Display for FsAttrs {
         f.write_str(", xattr[")?;
         write_separated(f, xattrs, ", ", |(name, value)| {
             fmt::from_fn(move |f| {
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                std::hash::Hash::hash(value, &mut h);
-                write!(f, "{name}={:08x}", std::hash::Hasher::finish(&h) as u32)
+                write!(f, "{name}=")?;
+                Sha256::digest(value)[..4]
+                    .iter()
+                    .try_for_each(|byte| write!(f, "{byte:02x}"))
             })
         })?;
         f.write_str("]")
@@ -1020,6 +1020,19 @@ mod tests {
             leaf("/x", "hello world", owner()).to_string(),
             "file(11 bytes, 0755, 501:20)"
         );
+        assert_eq!(
+            FsLeaf::Symlink {
+                target: PathBuf::from("/etc/foo"),
+            }
+            .to_string(),
+            "-> /etc/foo"
+        );
+    }
+
+    #[test]
+    fn render_pins_the_xattr_value_digest() {
+        // The first four bytes of SHA-256("u") and SHA-256(""), from `sha256sum`.
+        // SHA-256("u") starts with a byte below 0x10, so it checks the zero-pad.
         let r = leaf(
             "/x",
             "hi",
@@ -1027,20 +1040,14 @@ mod tests {
                 ("mode", "644"),
                 ("uid", "0"),
                 ("gid", "0"),
-                ("xattr:user.k", "v"),
+                ("xattr:user.empty", ""),
+                ("xattr:user.k", "u"),
             ]),
         )
         .to_string();
-        assert!(
-            r.starts_with("file(2 bytes, 0644, 0:0, xattr[user.k="),
-            "{r}"
-        );
         assert_eq!(
-            FsLeaf::Symlink {
-                target: PathBuf::from("/etc/foo"),
-            }
-            .to_string(),
-            "-> /etc/foo"
+            r,
+            "file(2 bytes, 0644, 0:0, xattr[user.empty=e3b0c442, user.k=0bfe935e])"
         );
     }
 
