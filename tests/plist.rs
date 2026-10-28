@@ -1102,27 +1102,39 @@ fn a_date_outside_the_years_xml_can_spell_is_refused_not_a_panic() {
 fn a_duplicate_is_reported_only_when_the_file_really_held_one() {
     // Normalization can make elements equal that the file distinguished, so the
     // duplicate report must subtract the equalities it introduced -- but not the
-    // repeats the file genuinely held. The three shapes differ only in the array.
+    // repeats the file genuinely held. Only the arrays and the strategy vary.
     let dir = tempfile::tempdir().unwrap();
-    let desired = dir.path().join("desired.plist");
-    pdict(vec![(
-        "l",
-        plist::Value::Array(vec![instant(1_000_000, 0)]),
-    )])
-    .to_file_binary(&desired)
-    .unwrap();
+    let whole = || vec![instant(1_000_000, 0)];
 
-    let reports = |name: &str, elements: Vec<plist::Value>| {
+    let reports_for = |name: &str,
+                       strategy: &str,
+                       target_elements: Vec<plist::Value>,
+                       desired_elements: Vec<plist::Value>| {
         let target = dir.path().join(format!("{name}.plist"));
-        pdict(vec![("l", plist::Value::Array(elements))])
+        let desired = dir.path().join(format!("{name}-desired.plist"));
+        pdict(vec![("l", plist::Value::Array(target_elements))])
             .to_file_binary(&target)
             .unwrap();
-        let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+        pdict(vec![("l", plist::Value::Array(desired_elements))])
+            .to_file_binary(&desired)
+            .unwrap();
+        // Forced, or `follow` keeps the binary target binary and floors nothing.
+        let out = run(&[
+            "plist",
+            "--plist-format",
+            "xml",
+            "--array-strategy",
+            strategy,
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ]);
         String::from_utf8_lossy(&out.stderr)
             .lines()
             .filter(|l| l.contains("times; array membership"))
             .count()
     };
+    let reports =
+        |name: &str, elements: Vec<plist::Value>| reports_for(name, "merge", elements, whole());
 
     // Two different instants floored together: the file held no duplicate.
     assert_eq!(
@@ -1151,6 +1163,70 @@ fn a_duplicate_is_reported_only_when_the_file_really_held_one() {
         reports(
             "untouched",
             vec![instant(1_000_000, 0), instant(1_000_000, 500_000_000)]
+        ),
+        0
+    );
+    // A date inside a nested array floors onto the same value without being an
+    // element of this array, so it must not discount the file's real repeat (#49).
+    assert_eq!(
+        reports(
+            "nested",
+            vec![
+                plist::Value::Array(vec![instant(1_000_000, 200_000_000)]),
+                instant(1_000_000, 700_000_000),
+                instant(1_000_000, 700_000_000)
+            ]
+        ),
+        1
+    );
+    // Two dictionaries that differ only below a second: no element repeated.
+    let dict_at = |nanos| pdict(vec![("k", instant(1_000_000, nanos))]);
+    assert_eq!(
+        reports("dicts", vec![dict_at(200_000_000), dict_at(700_000_000)]),
+        0
+    );
+    // DESIRED is normalized too, and its repeats are counted the same way -- under
+    // `set` as well, which reports only DESIRED's.
+    for strategy in ["merge", "set"] {
+        assert_eq!(
+            reports_for(
+                &format!("desired-distinct-{strategy}"),
+                strategy,
+                whole(),
+                vec![
+                    instant(1_000_000, 200_000_000),
+                    instant(1_000_000, 700_000_000)
+                ]
+            ),
+            0,
+            "{strategy}"
+        );
+        assert_eq!(
+            reports_for(
+                &format!("desired-repeated-{strategy}"),
+                strategy,
+                whole(),
+                vec![
+                    instant(1_000_000, 700_000_000),
+                    instant(1_000_000, 700_000_000)
+                ]
+            ),
+            1,
+            "{strategy}"
+        );
+    }
+    // A genuine repeat that survives as often as the file held it lost nothing:
+    // `set` keeps TARGET's two copies, so DESIRED's discounted pair is all kept.
+    assert_eq!(
+        reports_for(
+            "desired-repeat-all-kept",
+            "set",
+            vec![instant(1_000_000, 0), instant(1_000_000, 0)],
+            vec![
+                instant(1_000_000, 200_000_000),
+                instant(1_000_000, 700_000_000),
+                instant(1_000_000, 700_000_000)
+            ]
         ),
         0
     );

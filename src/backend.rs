@@ -31,11 +31,6 @@ fn requested_write_opts(args: &RunArgs) -> WriteOpts {
     }
 }
 
-/// Per `(array path, resulting value)`: the distinct originals normalization
-/// rewrote into it, and how many records it wrote. The two differ when the same
-/// original repeats, which is what separates a manufactured repeat from a real one.
-type Equalities<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (HashSet<&'a Node<L>>, usize)>;
-
 /// The originals rewritten into each `(array path, resulting value)`, and why.
 type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
 
@@ -254,9 +249,11 @@ pub(crate) trait Backend {
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
+        // Kept as read for the duplicate discount below.
+        let mut desired_as_read = None;
         let desired_risks = match Self::normalize_for_run(args, write_opts, &desired)? {
             Some(normalized) => {
-                desired = normalized.node;
+                desired_as_read = Some(std::mem::replace(&mut desired, normalized.node));
                 normalized.rewritten
             }
             None => Vec::new(),
@@ -269,13 +266,13 @@ pub(crate) trait Backend {
             Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
             None => Node::empty_map(),
         };
-        // `--diff` compares against the node as read, or it shows nothing and
-        // disagrees with the `--check` that compares against the bytes on disk.
-        let mut target_on_disk = None;
+        // Kept as read for the duplicate discount below, and for `--diff`, which
+        // against the normalized node would show nothing and disagree with the
+        // `--check` that compares against the bytes on disk.
+        let mut target_as_read = None;
         let target_risks = match Self::normalize_for_run(args, write_opts, &target)? {
             Some(normalized) => {
-                let as_read = std::mem::replace(&mut target, normalized.node);
-                target_on_disk = args.diff.then_some(as_read);
+                target_as_read = Some(std::mem::replace(&mut target, normalized.node));
                 normalized.rewritten
             }
             None => Vec::new(),
@@ -305,28 +302,12 @@ pub(crate) trait Backend {
             merge_keys: Self::merge_keys(args),
         };
         let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
-        // The engine sees normalized inputs, so two values it made equal look like
-        // one identity the file held twice -- which the file never did.
-        // `n` distinct originals collapsing onto one value introduce `n - 1`
-        // equalities that were not in the file; occurrences beyond that are repeats
-        // the file genuinely held, and those are still worth reporting.
-        // The engine sees normalized inputs, so equalities normalization introduced
-        // reach it as repeats the file "held". Matched on the node, not a rendering:
-        // a rendering that changes would silently start reporting duplicates the
-        // file never had.
-        fn equalities<L: Leaf>(risks: &[Normalized<L>]) -> Equalities<'_, L> {
-            let mut origins: Equalities<'_, L> = HashMap::new();
-            for n in risks {
-                let entry = origins.entry((&n.path, &n.value)).or_default();
-                entry.0.insert(&n.original);
-                entry.1 += 1;
-            }
-            origins
-        }
-        let by_source = [
-            (Source::Target, equalities(&target_risks)),
-            (Source::Desired, equalities(&desired_risks)),
-        ];
+        // The engine sees normalized inputs, so two values normalization made equal
+        // reach it as a repeat the file "held". `n` distinct originals behind one
+        // value introduce `n - 1` equalities the file never had; occurrences beyond
+        // that are repeats it genuinely held, still worth reporting. Only the
+        // array's own elements count, which a normalization record cannot tell from
+        // a nested array's.
         warnings.retain_mut(|w| match w {
             Warning::DuplicateCollapsed {
                 path,
@@ -336,16 +317,30 @@ pub(crate) trait Backend {
                 kept,
                 ..
             } => {
-                let made = by_source
-                    .iter()
-                    .find(|(s, _)| s == source)
-                    .and_then(|(_, o)| o.get(&(&*path, &*matched)))
-                    .map_or(0, |(distinct, records)| {
-                        // An occurrence the records do not account for was already
-                        // equal to this value before normalization touched anything.
-                        let untouched = *held > *records;
-                        distinct.len() - usize::from(!untouched)
-                    });
+                let (normalized, as_read) = match source {
+                    Source::Target => (&target, target_as_read.as_ref()),
+                    Source::Desired => (&desired, desired_as_read.as_ref()),
+                };
+                let made = match (
+                    normalized.get_path(path),
+                    as_read.and_then(|node| node.get_path(path)),
+                ) {
+                    (Some(Node::Array(normalized_elements)), Some(Node::Array(read_elements))) => {
+                        debug_assert_eq!(
+                            normalized_elements.len(),
+                            read_elements.len(),
+                            "normalization resized the array at {path:?}"
+                        );
+                        let originals: HashSet<&Node<Self::Leaf>> = normalized_elements
+                            .iter()
+                            .zip(read_elements)
+                            .filter(|(element, _)| *element == matched)
+                            .map(|(_, original)| original)
+                            .collect();
+                        originals.len().saturating_sub(1)
+                    }
+                    _ => 0,
+                };
                 *held = held.saturating_sub(made);
                 // `value_duplicates` reports a loss, so there has to be one: after
                 // the subtraction the repeat must still outnumber what survived.
@@ -377,7 +372,7 @@ pub(crate) trait Backend {
         // so it should still show what the run would do to a target the writer then
         // turns out to be unable to represent.
         if args.diff {
-            let before = target_on_disk.as_ref().unwrap_or(&target);
+            let before = target_as_read.as_ref().unwrap_or(&target);
             print!("{}", before.diff(&result, Self::COMPONENT_SEPARATOR));
         }
 
