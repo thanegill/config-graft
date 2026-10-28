@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 mod backend;
 mod error;
 mod format;
+mod mode;
 mod number;
 mod reconcile;
 mod render;
@@ -18,6 +19,7 @@ mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
+use mode::{ModeChange, Modes, Owner, Writer, HOST_SETGID_ON_WRITE};
 use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
@@ -336,34 +338,43 @@ fn main() {
     }
 }
 
-/// Atomic in-place write: temp file in the same dir, fsync, then rename over the
-/// target. Preserves the target's existing mode (0644 for new files).
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let mode = fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o777)
-        .unwrap_or(0o644);
-    write_atomic_mode(path, content, mode)
-}
-
-/// Atomic in-place write with an explicit permission mode (temp file in the same
-/// dir, fsync, set mode, then rename over the target).
-fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
+/// Atomic in-place write: temp file in the same dir, fsync, set its mode, then rename
+/// over the target. A new file gets 0644; a rewrite gets [`mode::rewritten_mode`]
+/// for whoever the temp file says is writing, and returns the [`ModeChange`] when the
+/// rewrite rule or the system dropped a special bit, for the caller to report.
+pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<Option<ModeChange>> {
+    let previous = fs::metadata(path).ok();
     let dir = dest_dir(path);
     fs::create_dir_all(&dir)?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
     tmp.write_all(content)?;
     tmp.as_file().sync_all()?;
-    tmp.as_file()
-        .set_permissions(fs::Permissions::from_mode(mode))?;
+    // The temp file is this process's own, so its owner is who the rename leaves
+    // owning the file, and a uid of 0 is a privileged writer.
+    let written = Owner::of(&tmp.as_file().metadata()?);
+    let rewrite = previous.as_ref().map(|previous| {
+        let writer = Writer::of(Owner::of(previous), written);
+        let mode = mode::rewritten_mode(previous.mode(), writer, HOST_SETGID_ON_WRITE);
+        (previous.mode(), writer, mode)
+    });
+    let requested = rewrite.map_or(0o644, |(_, _, mode)| mode);
+    mode::set_mode(tmp.as_file(), requested)?;
+    let actual = mode::mode_of(&tmp.as_file().metadata()?);
     tmp.persist(path).map_err(|e| e.error)?;
     // fsync the directory so the rename itself survives a crash (content fsync alone
     // doesn't make the new directory entry durable). Best-effort: the rename already
     // landed, so a filesystem that can't fsync a directory (e.g. some network mounts)
     // must not turn a successful write into an error.
     let _ = fsync_dir(&dir);
-    Ok(())
+    Ok(rewrite.and_then(|(previous, writer, requested)| {
+        let modes = Modes {
+            previous,
+            requested,
+            actual,
+        };
+        ModeChange::between(modes, writer)
+    }))
 }
 
 /// fsync a directory so its recent entry changes (renames/creates/unlinks) are

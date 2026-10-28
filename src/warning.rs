@@ -1,5 +1,5 @@
-//! Run diagnostics: the things config-graft did to a value that the caller did
-//! not ask for and could not see from the output alone.
+//! Run diagnostics: the things config-graft did to a value, or to TARGET's mode,
+//! that the caller did not ask for and could not see from the output alone.
 //!
 //! A [`Warning`] is produced wherever data changes shape without being a managed
 //! edit, and every one of them prints through [`crate::backend::emit`], so there
@@ -7,6 +7,9 @@
 //!
 //! Warnings are diagnostics only -- they never change the exit code.
 
+use std::path::PathBuf;
+
+use crate::mode::{special_bit_names, ModeCause, ModeChange};
 use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
 
@@ -85,6 +88,14 @@ pub enum Warning<L: Leaf> {
         kept: usize,
         because: &'static str,
     },
+    /// A rewrite of `file` kept its permission bits but not every special bit, as
+    /// `change` says. About the file rather than a key, so `path` is always the
+    /// document root.
+    SpecialModeBitsCleared {
+        path: KeyPath,
+        file: PathBuf,
+        change: ModeChange,
+    },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -96,7 +107,8 @@ impl<L: Leaf> Warning<L> {
             | Warning::ValueNormalized { path, .. }
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
+            | Warning::ArrayCollapsed { path, .. }
+            | Warning::SpecialModeBitsCleared { path, .. } => path,
         }
     }
 
@@ -109,7 +121,8 @@ impl<L: Leaf> Warning<L> {
             | Warning::ValueNormalized { path, .. }
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
+            | Warning::ArrayCollapsed { path, .. }
+            | Warning::SpecialModeBitsCleared { path, .. } => path,
         }
     }
 
@@ -161,6 +174,43 @@ impl<L: Leaf> Warning<L> {
                  identical, and membership is a set, so only {kept} survived; \
                  {because}"
             ),
+            Warning::SpecialModeBitsCleared { file, change, .. } => {
+                let ModeChange {
+                    from,
+                    to,
+                    ruled_out,
+                    cause,
+                    refused,
+                } = change;
+                let mut parts = Vec::new();
+                if *ruled_out != 0 {
+                    let why = match cause {
+                        ModeCause::NewOwner { from, to } => {
+                            format!(" because it would now be owned by {to} instead of {from}")
+                        }
+                        ModeCause::InPlaceWrite => {
+                            ", as an in-place write by this user would on this platform".to_string()
+                        }
+                    };
+                    parts.push(format!("{}{why}", special_bit_names(*ruled_out)));
+                }
+                if *refused != 0 {
+                    let them = if refused.count_ones() > 1 {
+                        "them"
+                    } else {
+                        "it"
+                    };
+                    parts.push(format!(
+                        "{} because this system would not keep {them}",
+                        special_bit_names(*refused)
+                    ));
+                }
+                format!(
+                    "`{}` had mode 0{from:03o}; the rewrite cleared {}, so it is now 0{to:03o}",
+                    file.display(),
+                    parts.join(", and ")
+                )
+            }
             Warning::MoreValuesNormalized {
                 source,
                 more,
@@ -182,5 +232,86 @@ impl<L: Leaf> Warning<L> {
                 source.label()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::json::JsonLeaf;
+    use crate::mode::Owner;
+
+    fn rendered(change: ModeChange) -> String {
+        Warning::<JsonLeaf>::SpecialModeBitsCleared {
+            path: KeyPath::new(),
+            file: PathBuf::from("/x/config.json"),
+            change,
+        }
+        .render(".")
+    }
+
+    #[test]
+    fn a_mode_change_says_what_it_dropped_and_why() {
+        let alice = Owner { uid: 501, gid: 20 };
+        let root = Owner { uid: 0, gid: 0 };
+        assert_eq!(
+            rendered(ModeChange {
+                from: 0o6755,
+                to: 0o755,
+                ruled_out: 0o6000,
+                cause: ModeCause::NewOwner {
+                    from: root,
+                    to: alice
+                },
+                refused: 0,
+            }),
+            "`/x/config.json` had mode 06755; the rewrite cleared setuid and setgid \
+             because it would now be owned by 501:20 instead of 0:0, so it is now 0755"
+        );
+        assert_eq!(
+            rendered(ModeChange {
+                from: 0o4640,
+                to: 0o640,
+                ruled_out: 0o4000,
+                cause: ModeCause::InPlaceWrite,
+                refused: 0,
+            }),
+            "`/x/config.json` had mode 04640; the rewrite cleared setuid, as an in-place \
+             write by this user would on this platform, so it is now 0640"
+        );
+        assert_eq!(
+            rendered(ModeChange {
+                from: 0o5755,
+                to: 0o755,
+                ruled_out: 0o4000,
+                cause: ModeCause::InPlaceWrite,
+                refused: 0o1000,
+            }),
+            "`/x/config.json` had mode 05755; the rewrite cleared setuid, as an in-place \
+             write by this user would on this platform, and sticky because this system \
+             would not keep it, so it is now 0755"
+        );
+        assert_eq!(
+            rendered(ModeChange {
+                from: 0o2740,
+                to: 0o740,
+                ruled_out: 0,
+                cause: ModeCause::InPlaceWrite,
+                refused: 0o2000,
+            }),
+            "`/x/config.json` had mode 02740; the rewrite cleared setgid because this \
+             system would not keep it, so it is now 0740"
+        );
+        assert_eq!(
+            rendered(ModeChange {
+                from: 0o6755,
+                to: 0o755,
+                ruled_out: 0,
+                cause: ModeCause::InPlaceWrite,
+                refused: 0o6000,
+            }),
+            "`/x/config.json` had mode 06755; the rewrite cleared setuid and setgid \
+             because this system would not keep them, so it is now 0755"
+        );
     }
 }
