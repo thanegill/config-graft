@@ -1218,3 +1218,22 @@ fn a_deeply_nested_desired_is_refused_not_aborted() {
     );
     assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#);
 }
+
+#[test]
+fn empty_containers_stay_inline_and_others_expand() {
+    // json-syntax inlines short containers by default; config-graft asks it not
+    // to, so output shape depends only on `--indent`. An empty one must still be
+    // written `{}`/`[]`, or every managed file holding one would be reformatted.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"keep":{}}"#).unwrap();
+    fs::write(&desired, r#"{"a":[],"b":{"c":[1]}}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "{\n  \"keep\": {},\n  \"a\": [],\n  \"b\": {\n    \"c\": [\n      1\n    ]\n  }\n}\n"
+    );
+}
