@@ -169,8 +169,8 @@ impl ValueCodec for Json {
 /// the common case compares without going through the literal; everything else
 /// keeps the source spelling.
 fn number_leaf(literal: &str) -> JsonLeaf {
-    // `-0` parses as `0` and would be written back without its sign -- the one
-    // respelling the lexical codec would otherwise still introduce.
+    // `-0` parses as `0`, which would drop its sign on write (the one respelling
+    // the lexical codec would otherwise still introduce) and make it equal to `0`.
     if literal.starts_with('-') && literal[1..].bytes().all(|b| b == b'0') {
         return JsonLeaf::Number(literal.to_string());
     }
