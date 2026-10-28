@@ -98,7 +98,7 @@ impl std::ops::Deref for KeyPath {
 }
 
 /// How a DESIRED array combines with a TARGET array during the deep-merge.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, ValueEnum)]
 pub enum ArrayStrategy {
     /// DESIRED's array replaces TARGET's wholesale (atomic).
     Replace,
@@ -111,6 +111,7 @@ pub enum ArrayStrategy {
     /// from TARGET first), and order the survivors move-aware so a reordering on
     /// either side is preserved (via a generalized topological sort). Membership by
     /// value; duplicates collapse.
+    #[default]
     Merge,
 }
 
@@ -151,6 +152,17 @@ pub struct Options {
     pub arrays: ArrayStrategy,
     /// Fields that identify object-array elements for keyed `merge` matching.
     pub merge_keys: MergeKeys,
+}
+
+/// The CLI's defaults: prune, `merge` arrays, no merge keys.
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            prune: true,
+            arrays: ArrayStrategy::default(),
+            merge_keys: MergeKeys::default(),
+        }
+    }
 }
 
 /// Reconcile DESIRED into a clone of TARGET, using BASE as the merge ancestor.
@@ -370,32 +382,39 @@ mod tests {
         serde_json::from_str(&Json::encode(node).compact_print().to_string()).unwrap()
     }
 
-    fn reconciled(t: Value, d: Value, b: Option<Value>, prune: bool) -> Value {
-        j(&reconcile(
-            &n(t),
-            &n(d),
-            b.map(n).as_ref(),
-            &Options {
-                prune,
-                arrays: ArrayStrategy::Replace,
-                merge_keys: MergeKeys::default(),
+    /// The default options with `arrays` and the global merge-key candidates set.
+    fn options(arrays: ArrayStrategy, global_keys: &[&str]) -> Options {
+        Options {
+            arrays,
+            merge_keys: MergeKeys {
+                global: global_keys.iter().map(ToString::to_string).collect(),
+                scoped: HashMap::new(),
             },
-        )
-        .0)
+            ..Options::default()
+        }
+    }
+
+    /// Reconcile JSON fixtures, returning the result as JSON and the warnings.
+    fn reconciled_with(
+        t: Value,
+        d: Value,
+        b: Option<Value>,
+        opts: &Options,
+    ) -> (Value, Vec<Warning<JsonLeaf>>) {
+        let (result, warnings) = reconcile(&n(t), &n(d), b.map(n).as_ref(), opts);
+        (j(&result), warnings)
+    }
+
+    fn reconciled(t: Value, d: Value, b: Option<Value>, prune: bool) -> Value {
+        let opts = Options {
+            prune,
+            ..options(ArrayStrategy::Replace, &[])
+        };
+        reconciled_with(t, d, b, &opts).0
     }
 
     fn reconciled_arrays(t: Value, d: Value, arrays: ArrayStrategy) -> Value {
-        j(&reconcile(
-            &n(t),
-            &n(d),
-            None,
-            &Options {
-                prune: true,
-                arrays,
-                merge_keys: MergeKeys::default(),
-            },
-        )
-        .0)
+        reconciled_arrays_base(t, d, None, arrays)
     }
 
     fn reconciled_arrays_base(
@@ -404,17 +423,7 @@ mod tests {
         b: Option<Value>,
         arrays: ArrayStrategy,
     ) -> Value {
-        j(&reconcile(
-            &n(t),
-            &n(d),
-            b.map(n).as_ref(),
-            &Options {
-                prune: true,
-                arrays,
-                merge_keys: MergeKeys::default(),
-            },
-        )
-        .0)
+        reconciled_with(t, d, b, &options(arrays, &[])).0
     }
 
     fn reconciled_keyed(
@@ -423,20 +432,13 @@ mod tests {
         base: Option<Value>,
         global_keys: &[&str],
     ) -> Value {
-        j(&reconcile(
-            &n(target),
-            &n(desired),
-            base.map(n).as_ref(),
-            &Options {
-                prune: true,
-                arrays: ArrayStrategy::Merge,
-                merge_keys: MergeKeys {
-                    global: global_keys.iter().map(|s| s.to_string()).collect(),
-                    scoped: HashMap::new(),
-                },
-            },
+        reconciled_with(
+            target,
+            desired,
+            base,
+            &options(ArrayStrategy::Merge, global_keys),
         )
-        .0)
+        .0
     }
 
     #[test]
@@ -515,20 +517,18 @@ mod tests {
     fn keyed_scoped_applies_only_to_its_path() {
         // The `servers` array (at the document root) is scoped to key by `name`.
         let opts = Options {
-            prune: true,
-            arrays: ArrayStrategy::Merge,
             merge_keys: MergeKeys {
                 global: Vec::new(),
                 scoped: HashMap::from([(vec!["servers".to_string()], vec!["name".to_string()])]),
             },
+            ..Options::default()
         };
-        let out = j(&reconcile(
-            &n(json!({"servers": [{"name": "web", "up": true}]})),
-            &n(json!({"servers": [{"name": "web", "port": 80}]})),
-            Some(&n(json!({"servers": [{"name": "web"}]}))),
+        let (out, _) = reconciled_with(
+            json!({"servers": [{"name": "web", "up": true}]}),
+            json!({"servers": [{"name": "web", "port": 80}]}),
+            Some(json!({"servers": [{"name": "web"}]})),
             &opts,
-        )
-        .0);
+        );
         assert_eq!(
             out,
             json!({"servers": [{"name": "web", "up": true, "port": 80}]})
@@ -541,8 +541,6 @@ mod tests {
         // its record merges in place; the root `items` is value-matched, so the
         // changed record reads as delete+insert (two entries).
         let opts = Options {
-            prune: true,
-            arrays: ArrayStrategy::Merge,
             merge_keys: MergeKeys {
                 global: Vec::new(),
                 scoped: HashMap::from([(
@@ -550,14 +548,14 @@ mod tests {
                     vec!["id".to_string()],
                 )]),
             },
+            ..Options::default()
         };
-        let out = j(&reconcile(
-            &n(json!({"items": [{"id": 1, "x": "old"}], "a": {"items": [{"id": 1, "x": "old"}]}})),
-            &n(json!({"items": [{"id": 1, "x": "new"}], "a": {"items": [{"id": 1, "x": "new"}]}})),
+        let (out, _) = reconciled_with(
+            json!({"items": [{"id": 1, "x": "old"}], "a": {"items": [{"id": 1, "x": "old"}]}}),
+            json!({"items": [{"id": 1, "x": "new"}], "a": {"items": [{"id": 1, "x": "new"}]}}),
             None,
             &opts,
-        )
-        .0);
+        );
         assert_eq!(
             out,
             json!({
@@ -879,17 +877,12 @@ mod tests {
     #[test]
     fn set_merged_list_still_pruned_atomically_when_dropped_unchanged() {
         // With prune + Set, a managed list unchanged from base is removed whole.
-        let result = j(&reconcile(
-            &n(json!({"a":[1,2],"z":9})),
-            &n(json!({})),
-            Some(&n(json!({"a":[1,2]}))),
-            &Options {
-                prune: true,
-                arrays: ArrayStrategy::Set,
-                merge_keys: MergeKeys::default(),
-            },
-        )
-        .0);
+        let result = reconciled_arrays_base(
+            json!({"a":[1,2],"z":9}),
+            json!({}),
+            Some(json!({"a":[1,2]})),
+            ArrayStrategy::Set,
+        );
         assert_eq!(result, json!({"z":9}));
     }
 
@@ -1119,16 +1112,7 @@ mod tests {
     // ----- conflict surfacing -----
 
     fn conflict_paths(t: Value, d: Value, b: Option<Value>, arrays: ArrayStrategy) -> Vec<String> {
-        let (_result, conflicts) = reconcile(
-            &n(t),
-            &n(d),
-            b.map(n).as_ref(),
-            &Options {
-                prune: true,
-                arrays,
-                merge_keys: MergeKeys::default(),
-            },
-        );
+        let (_result, conflicts) = reconciled_with(t, d, b, &options(arrays, &[]));
         conflicts.iter().map(|c| c.path().render(".")).collect()
     }
 
@@ -1138,19 +1122,8 @@ mod tests {
         base: Option<Value>,
         global_keys: &[&str],
     ) -> Vec<String> {
-        let (_result, conflicts) = reconcile(
-            &n(target),
-            &n(desired),
-            base.map(n).as_ref(),
-            &Options {
-                prune: true,
-                arrays: ArrayStrategy::Merge,
-                merge_keys: MergeKeys {
-                    global: global_keys.iter().map(|s| s.to_string()).collect(),
-                    scoped: HashMap::new(),
-                },
-            },
-        );
+        let opts = options(ArrayStrategy::Merge, global_keys);
+        let (_result, conflicts) = reconciled_with(target, desired, base, &opts);
         conflicts.iter().map(|c| c.path().render(".")).collect()
     }
 
@@ -1158,19 +1131,7 @@ mod tests {
 
     /// Every warning a reconcile produced, rendered with `.` separators.
     fn warnings_of(t: Value, d: Value, arrays: ArrayStrategy, global_keys: &[&str]) -> Vec<String> {
-        let (_result, warnings) = reconcile(
-            &n(t),
-            &n(d),
-            None,
-            &Options {
-                prune: true,
-                arrays,
-                merge_keys: MergeKeys {
-                    global: global_keys.iter().map(|s| s.to_string()).collect(),
-                    scoped: HashMap::new(),
-                },
-            },
-        );
+        let (_result, warnings) = reconciled_with(t, d, None, &options(arrays, global_keys));
         warnings.iter().map(|w| w.render(".")).collect()
     }
 
@@ -1279,15 +1240,11 @@ mod tests {
     #[test]
     fn merge_conflict_names_the_conflicting_elements() {
         // The conflict carries the elements caught in the contradictory reorder.
-        let (_result, conflicts) = reconcile(
-            &n(json!({"l": ["x", "y"]})),
-            &n(json!({"l": ["y", "x"]})),
+        let (_result, conflicts) = reconciled_with(
+            json!({"l": ["x", "y"]}),
+            json!({"l": ["y", "x"]}),
             None,
-            &Options {
-                prune: true,
-                arrays: ArrayStrategy::Merge,
-                merge_keys: MergeKeys::default(),
-            },
+            &Options::default(),
         );
         assert_eq!(conflicts.len(), 1);
         let Warning::ContradictoryReorder { elements, .. } = &conflicts[0] else {
@@ -1475,15 +1432,6 @@ mod tests {
             serde_json::to_string(&j(&sorted)).unwrap(),
             r#"{"list":[{"a":2,"b":1}],"n":5}"#
         );
-    }
-
-    #[test]
-    fn array_strategy_derives_clone_eq_debug() {
-        let s = ArrayStrategy::Set;
-        assert_eq!(s, s); // Eq
-        assert_eq!(s, s.clone()); // Clone (Copy)
-        assert_ne!(ArrayStrategy::Replace, ArrayStrategy::Concat);
-        assert!(format!("{s:?}").contains("Set")); // Debug
     }
 
     #[test]

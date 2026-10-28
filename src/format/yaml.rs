@@ -280,4 +280,25 @@ mod tests {
     fn bare_null_document_is_not_a_map() {
         assert_eq!(yaml_to_node("null\n"), Some(Node::Leaf(YamlLeaf::Null)));
     }
+
+    #[test]
+    fn every_nan_is_one_value() {
+        // A sound `Eq` needs NaN to equal itself, and set-union's `HashSet` needs
+        // equal values to hash alike, whatever the NaN's sign or payload bits.
+        use std::hash::DefaultHasher;
+        let hash = |leaf: &YamlLeaf| {
+            let mut hasher = DefaultHasher::new();
+            leaf.hash(&mut hasher);
+            hasher.finish()
+        };
+        let nan = YamlLeaf::Float(f64::NAN);
+        for other in [-f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)] {
+            let other = YamlLeaf::Float(other);
+            assert_eq!(nan, other);
+            assert_eq!(hash(&nan), hash(&other));
+        }
+        // ... without making anything else equal.
+        assert_ne!(nan, YamlLeaf::Float(0.0));
+        assert_ne!(YamlLeaf::Float(1.0), YamlLeaf::Float(2.0));
+    }
 }

@@ -409,3 +409,20 @@ fn indent_flag_is_a_usage_error_for_yaml() {
     ]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn a_deeply_nested_target_is_refused_not_aborted() {
+    // Flow nesting is bounded only by saphyr's own flow-level limit, not the
+    // engine's `MAX_DEPTH`; a parser upgrade that raised it would let the
+    // recursion abort the process.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let deep = format!("a: {}{}\n", "[".repeat(50_000), "]".repeat(50_000));
+    fs::write(&target, &deep).unwrap();
+    fs::write(&desired, "b: 1\n").unwrap();
+
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(fs::read_to_string(&target).unwrap(), deep);
+}

@@ -368,3 +368,76 @@ pub fn dest_dir(path: &Path) -> PathBuf {
         _ => PathBuf::from("."),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::parse_merge_keys;
+
+    /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
+    /// `&str` literals so the expectations stay readable.
+    fn parsed(specs: &[&str], sep: &str) -> (Vec<String>, HashMap<Vec<String>, Vec<String>>) {
+        let keys = parse_merge_keys(&strings(specs), sep);
+        (keys.global, keys.scoped)
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_bare_field_list_is_global_and_trimmed() {
+        let (global, scoped) = parsed(&[" name , id ", "a,,b"], ".");
+        assert_eq!(global, strings(&["name", "id", "a", "b"]));
+        assert!(scoped.is_empty());
+    }
+
+    #[test]
+    fn a_scope_splits_on_the_format_separator() {
+        let (global, scoped) = parsed(&["spec.containers=name"], ".");
+        assert!(global.is_empty());
+        assert_eq!(
+            scoped,
+            HashMap::from([(strings(&["spec", "containers"]), strings(&["name"]))])
+        );
+
+        let (_, plist) = parsed(&["spec:containers=name"], ":");
+        assert_eq!(
+            plist,
+            HashMap::from([(strings(&["spec", "containers"]), strings(&["name"]))])
+        );
+        // The other format's separator is part of the key, not a split.
+        let (_, dotted) = parsed(&["spec:containers=name"], ".");
+        assert_eq!(
+            dotted,
+            HashMap::from([(strings(&["spec:containers"]), strings(&["name"]))])
+        );
+    }
+
+    #[test]
+    fn scope_segments_are_trimmed_and_empty_ones_dropped() {
+        let (_, scoped) = parsed(&[" a . . b = f "], ".");
+        assert_eq!(
+            scoped,
+            HashMap::from([(strings(&["a", "b"]), strings(&["f"]))])
+        );
+    }
+
+    #[test]
+    fn an_empty_scope_is_global_and_an_empty_field_list_is_ignored() {
+        let (global, scoped) = parsed(&["=name", "servers=", "servers= , "], ".");
+        assert_eq!(global, strings(&["name"]));
+        assert!(scoped.is_empty());
+    }
+
+    #[test]
+    fn repeated_specs_extend_the_same_rule() {
+        let (global, scoped) = parsed(&["servers=name", "id", "servers=id", "key"], ".");
+        assert_eq!(global, strings(&["id", "key"]));
+        assert_eq!(
+            scoped,
+            HashMap::from([(strings(&["servers"]), strings(&["name", "id"]))])
+        );
+    }
+}

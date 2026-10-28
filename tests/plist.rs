@@ -268,10 +268,10 @@ fn not_a_mapping_error_names_plist() {
     assert!(err.contains("must be a plist dictionary"), "got: {err}");
 }
 
-// ----- binary output (--plist-binary) -----
+// ----- binary output (--plist-format binary) -----
 
 #[test]
-fn plist_binary_output_is_binary_and_round_trips() {
+fn binary_output_is_binary_and_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
@@ -304,8 +304,8 @@ fn plist_binary_output_is_binary_and_round_trips() {
 #[test]
 fn binary_desired_with_control_char_key_round_trips() {
     // NSUserKeyEquivalents-style: menu-path keys joined by ESC (0x1B), which is
-    // illegal in XML 1.0 and so can only live in a *binary* DESIRED. --plist-binary
-    // keeps the write byte-exact so the control character survives.
+    // illegal in XML 1.0 and so can only live in a *binary* DESIRED. A binary write
+    // keeps it byte-exact so the control character survives.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
@@ -353,7 +353,7 @@ fn binary_desired_with_control_char_key_round_trips() {
 }
 
 #[test]
-fn plist_binary_is_idempotent() {
+fn binary_output_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
@@ -383,7 +383,7 @@ fn plist_binary_is_idempotent() {
 }
 
 #[test]
-fn stdout_plist_binary_writes_binary() {
+fn stdout_with_binary_output_writes_binary() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");
@@ -604,7 +604,7 @@ fn diff_and_check_agree_on_a_fractional_desired_date() {
 }
 
 #[test]
-fn plist_binary_write_keeps_sub_second_dates() {
+fn binary_write_keeps_sub_second_dates() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");
     let desired = dir.path().join("desired.plist");

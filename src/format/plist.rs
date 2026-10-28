@@ -671,7 +671,7 @@ impl From<&PlistLeaf> for plist::Value {
 mod tests {
     use super::*;
     use crate::format::Indent;
-    use crate::reconcile::{reconcile, ArrayStrategy, MergeKeys, Options};
+    use crate::reconcile::{reconcile, Options};
 
     fn pint(i: i64) -> plist::Value {
         plist::Value::Integer(i.into())
@@ -847,16 +847,7 @@ mod tests {
         base.insert("b".to_string(), pint(2));
         let base = Plist::decode(&plist::Value::Dictionary(base)).unwrap();
 
-        let (merged, _) = reconcile(
-            &target,
-            &desired,
-            Some(&base),
-            &Options {
-                prune: true,
-                arrays: ArrayStrategy::Replace,
-                merge_keys: MergeKeys::default(),
-            },
-        );
+        let (merged, _) = reconcile(&target, &desired, Some(&base), &Options::default());
         let m = merged.as_map().unwrap();
         assert_eq!(m.get("a"), Some(&Node::Leaf(PlistLeaf::Int(9)))); // updated
         assert_eq!(m.get("app"), Some(&Node::Leaf(PlistLeaf::Bool(true)))); // app key preserved
@@ -1015,5 +1006,26 @@ mod tests {
         assert!(writes_xml(b""));
         assert!(writes_xml(b"hello"));
         assert!(!writes_xml(b"bplist00"));
+    }
+
+    #[test]
+    fn every_nan_is_one_value() {
+        // A sound `Eq` needs NaN to equal itself, and set-union's `HashSet` needs
+        // equal values to hash alike, whatever the NaN's sign or payload bits.
+        use std::hash::DefaultHasher;
+        let hash = |leaf: &PlistLeaf| {
+            let mut hasher = DefaultHasher::new();
+            leaf.hash(&mut hasher);
+            hasher.finish()
+        };
+        let nan = PlistLeaf::Float(f64::NAN);
+        for other in [-f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)] {
+            let other = PlistLeaf::Float(other);
+            assert_eq!(nan, other);
+            assert_eq!(hash(&nan), hash(&other));
+        }
+        // ... without making anything else equal.
+        assert_ne!(nan, PlistLeaf::Float(0.0));
+        assert_ne!(PlistLeaf::Float(1.0), PlistLeaf::Float(2.0));
     }
 }

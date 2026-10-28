@@ -793,7 +793,7 @@ fn parse_failure_error_names_json() {
 }
 
 #[test]
-fn plist_binary_flag_is_a_usage_error_for_json() {
+fn plist_format_flag_is_a_usage_error_for_json() {
     // A plist-only flag isn't defined on the `json` subcommand, so clap rejects it
     // structurally at parse time (exit 2), rather than a runtime error message.
     let dir = tempfile::tempdir().unwrap();
@@ -805,9 +805,15 @@ fn plist_binary_flag_is_a_usage_error_for_json() {
         "json",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
-        "--plist-binary",
+        "--plist-format",
+        "xml",
     ]);
     assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unexpected argument '--plist-format'"),
+        "got: {stderr}"
+    );
 }
 
 // ----- number fidelity -----
@@ -1211,4 +1217,50 @@ fn a_deeply_nested_desired_is_refused_not_aborted() {
         "aborted instead of refusing: {out:?}"
     );
     assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#);
+}
+
+#[test]
+fn empty_containers_stay_inline_and_others_expand() {
+    // json-syntax inlines short containers by default; config-graft asks it not
+    // to, so output shape depends only on `--indent`. An empty one must still be
+    // written `{}`/`[]`, or every managed file holding one would be reformatted.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"keep":{}}"#).unwrap();
+    fs::write(&desired, r#"{"a":[],"b":{"c":[1]}}"#).unwrap();
+
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "{\n  \"keep\": {},\n  \"a\": [],\n  \"b\": {\n    \"c\": [\n      1\n    ]\n  }\n}\n"
+    );
+}
+
+#[test]
+fn warnings_are_printed_in_check_and_stdout_runs_too() {
+    // SPEC section 5, Diagnostics: those runs report what a write would do, so
+    // they say what it would warn about as well.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"l":["a"]}"#).unwrap();
+    fs::write(&desired, r#"{"l":["b","b"]}"#).unwrap();
+    let warning = "config-graft: warning: array `l` in DESIRED holds \"b\" 2 times";
+
+    for (mode, code) in [("--check", 3), ("--stdout", 0)] {
+        let out = run(&[
+            "json",
+            "--array-strategy",
+            "set",
+            mode,
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(code), "{mode}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(warning), "{mode}: {stderr}");
+    }
+    assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"l":["a"]}"#);
 }

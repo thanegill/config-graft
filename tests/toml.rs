@@ -355,3 +355,19 @@ fn an_empty_desired_prunes_managed_keys_rather_than_failing() {
     );
     assert!(written.contains("user"), "user key was lost: {written}");
 }
+
+#[test]
+fn a_deeply_nested_target_is_refused_not_aborted() {
+    // TOML relies on toml_edit's own nesting limit, not the engine's `MAX_DEPTH`;
+    // a parser upgrade that raised it would let the recursion abort the process.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.toml");
+    let desired = dir.path().join("desired.toml");
+    let deep = format!("a = {}{}\n", "[".repeat(50_000), "]".repeat(50_000));
+    fs::write(&target, &deep).unwrap();
+    fs::write(&desired, "b = 1\n").unwrap();
+
+    let out = run(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(fs::read_to_string(&target).unwrap(), deep);
+}
