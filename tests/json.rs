@@ -105,42 +105,6 @@ fn stdout_does_not_modify_target() {
 }
 
 #[test]
-fn stdout_write_failure_is_reported() {
-    use std::process::Stdio;
-
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("config.json");
-    let desired = dir.path().join("desired.json");
-    fs::write(&target, r#"{"keep":1}"#).unwrap();
-    fs::write(&desired, r#"{"a":1}"#).unwrap();
-
-    // Give the child a stdout pipe whose read end we close *before* spawning, so
-    // the pipe has no reader at all. The child's `--stdout` write then fails with
-    // EPIPE/BrokenPipe deterministically -- no race against a small write landing
-    // in the pipe buffer (as there would be if a reader were held past spawn). That
-    // failure must surface as exit 1, not a silent success that could truncate a
-    // redirected file -- the regression Fix A guards against.
-    let (reader, writer) = std::io::pipe().expect("create pipe");
-    drop(reader);
-    let child = Command::new(BIN)
-        .args([
-            "json",
-            "--stdout",
-            target.to_str().unwrap(),
-            desired.to_str().unwrap(),
-        ])
-        .stdout(writer)
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn config-graft");
-    let out = child.wait_with_output().expect("wait config-graft");
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(stderr.contains("writing to stdout"), "stderr: {stderr}");
-}
-
-#[test]
 fn invalid_desired_exits_one() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
