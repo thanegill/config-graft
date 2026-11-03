@@ -96,6 +96,19 @@ pub enum Error {
     /// A `directory` tree is nested deeper than the supported limit
     /// (refused rather than risk a stack overflow).
     TreeTooDeep(PathBuf),
+    /// TARGET is a symlink, and writing it would replace the link with a regular
+    /// file; `--follow-symlinks` writes through it instead.
+    SymlinkTarget(PathBuf),
+    /// TARGET's symlink chain is too long to be anything but a loop.
+    SymlinkLoop(PathBuf),
+    /// TARGET's symlink chain ends in a directory that does not exist.
+    SymlinkDangling { link: PathBuf, missing: PathBuf },
+    /// Writing the file a symlinked TARGET resolves to failed.
+    WriteThroughSymlink {
+        link: PathBuf,
+        resolved: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl Error {
@@ -232,6 +245,31 @@ impl fmt::Display for Error {
             Error::TreeTooDeep(p) => {
                 write!(f, "directory tree nested too deeply at {}", p.display())
             }
+            Error::SymlinkTarget(link) => write!(
+                f,
+                "{} is a symlink, and writing it would replace the link with a regular \
+                 file; pass --follow-symlinks to write the file it points to instead",
+                link.display()
+            ),
+            Error::SymlinkLoop(link) => {
+                write!(f, "{}: too many levels of symbolic links", link.display())
+            }
+            Error::SymlinkDangling { link, missing } => write!(
+                f,
+                "{} points into {}, which is not an existing directory; refusing to create it",
+                link.display(),
+                missing.display()
+            ),
+            Error::WriteThroughSymlink {
+                link,
+                resolved,
+                source,
+            } => write!(
+                f,
+                "writing {} (through symlink {}): {source}",
+                resolved.display(),
+                link.display()
+            ),
             Error::AppDirWouldBeDeleted(p) => write!(
                 f,
                 "refusing to replace directory {} with a file: it holds entries not \
