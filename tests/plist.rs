@@ -829,24 +829,40 @@ fn a_collapse_across_target_and_desired_warns() {
 
 #[test]
 fn normalization_does_not_warn_where_nothing_is_dropped() {
-    // The three shapes the check cannot judge, and so must stay quiet about: a
-    // scalar date on both sides, a date inside an array of dicts (unreachable by
-    // key path), and a managed array the user removed from DESIRED.
+    // The four shapes the check cannot judge, and so must stay quiet about: a scalar
+    // date on both sides, a date inside an array of dicts (unreachable by key path),
+    // a date inside an array of arrays (filed under the outer array, which holds no
+    // copy of it), and a managed array the user removed from DESIRED.
     let dir = tempfile::tempdir().unwrap();
-    let quiet = |name: &str, target_value: plist::Value, desired: plist::Value| {
+    let quiet = |name: &str,
+                 target_value: plist::Value,
+                 desired: plist::Value,
+                 base: Option<plist::Value>| {
         let target = dir.path().join(format!("{name}-t.plist"));
         let desired_path = dir.path().join(format!("{name}-d.plist"));
+        let base_path = dir.path().join(format!("{name}-b.plist"));
         pdict(vec![(name, target_value), ("a", pint(1))])
             .to_file_binary(&target)
             .unwrap();
         desired.to_file_binary(&desired_path).unwrap();
-        let out = run(&[
+        let mut args = vec![
             "plist",
+            "--plist-format",
+            "xml",
             target.to_str().unwrap(),
             desired_path.to_str().unwrap(),
-        ]);
-        assert!(out.status.success(), "{name} failed the run");
+        ];
+        if let Some(base) = base {
+            base.to_file_binary(&base_path).unwrap();
+            args.push(base_path.to_str().unwrap());
+        }
+        let out = run(&args);
         let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{name} failed the run:\n{err}");
+        assert!(
+            err.contains("was read as"),
+            "{name} floored nothing, so it tests nothing:\n{err}"
+        );
         assert!(
             !err.contains("normalizing made identical"),
             "{name} warned about a collapse that did not happen:\n{err}"
@@ -858,6 +874,7 @@ fn normalization_does_not_warn_where_nothing_is_dropped() {
         "d",
         instant(1_000_000, 300_000_000),
         pdict(vec![("d", instant(1_000_000, 700_000_000))]),
+        None,
     );
     // Dates inside an array of dicts, with the array unmanaged.
     quiet(
@@ -867,6 +884,28 @@ fn normalization_does_not_warn_where_nothing_is_dropped() {
             pdict(vec![("d", instant(1_000_000, 700_000_000))]),
         ]),
         pdict(vec![("a", pint(2))]),
+        None,
+    );
+    // Dates inside an array of arrays, with the array unmanaged.
+    quiet(
+        "n",
+        plist::Value::Array(vec![
+            plist::Value::Array(vec![instant(1_000_000, 300_000_000)]),
+            plist::Value::Array(vec![instant(1_000_000, 700_000_000)]),
+        ]),
+        pdict(vec![("a", pint(2))]),
+        None,
+    );
+    // A managed array DESIRED dropped: pruned, not collapsed.
+    let pruned = plist::Value::Array(vec![
+        instant(1_000_000, 300_000_000),
+        instant(1_000_000, 700_000_000),
+    ]);
+    quiet(
+        "l",
+        pruned.clone(),
+        pdict(vec![("a", pint(2))]),
+        Some(pdict(vec![("l", pruned), ("a", pint(1))])),
     );
 }
 
