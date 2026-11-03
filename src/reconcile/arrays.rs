@@ -214,6 +214,7 @@ fn value_duplicates<L: Leaf>(seq: &[Node<L>], out: &[Node<L>], source: Source) -
             source,
             identity: element.to_string(),
             matched: element.clone(),
+            key: None,
             held: held[element],
             kept,
         });
@@ -247,6 +248,7 @@ fn key_duplicates<L: Leaf>(
             source,
             identity: format!("[{field}={value}]"),
             matched: (*value).clone(),
+            key: Some(field.clone()),
             held: held[ident],
             kept: out
                 .iter()
@@ -514,11 +516,12 @@ fn gts_order(
     (out, conflict_ids)
 }
 
+type Ident<L> = (String, Node<L>);
+
 /// The identity of `e` for keyed matching: the first `keys` field it carries, as
 /// `(field, value)` (the field disambiguates `name:"x"` from `id:"x"`). `None` if
 /// `e` isn't an object with a candidate field.
-type Ident<L> = (String, Node<L>);
-fn identity<L: Leaf>(e: &Node<L>, keys: &[String]) -> Option<Ident<L>> {
+pub(crate) fn identity<L: Leaf>(e: &Node<L>, keys: &[String]) -> Option<Ident<L>> {
     let map = e.as_map()?;
     keys.iter()
         .find_map(|f| map.get(f).map(|v| (f.clone(), v.clone())))
