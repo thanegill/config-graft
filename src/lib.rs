@@ -14,6 +14,7 @@ mod mode;
 mod number;
 mod reconcile;
 mod render;
+mod symlink;
 mod value;
 mod warning;
 use backend::{Backend, ByteBackend, Directory};
@@ -21,6 +22,7 @@ use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use mode::{ModeChange, Modes, Owner, Writer, HOST_SETGID_ON_WRITE};
 use reconcile::{ArrayStrategy, ManagedPath, MergeKeys};
+use symlink::SymlinkPolicy;
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, and TOML files, or a
 /// directory tree.
@@ -139,6 +141,12 @@ pub(crate) struct ByteArgs {
     #[arg(long)]
     stdout: bool,
 
+    /// When TARGET is a symlink, write the file it resolves to. Reading always
+    /// follows the link; this flag governs only the write. Without it, a write to a
+    /// symlinked TARGET is refused rather than replacing the link.
+    #[arg(long = "follow-symlinks")]
+    follow_symlinks: bool,
+
     /// How DESIRED arrays combine with TARGET arrays: merge (three-way,
     /// move-aware against BASE; the default), replace (atomic), concat (append),
     /// or set (two-way union, ignoring order and duplicates).
@@ -215,8 +223,8 @@ pub(crate) struct DirArgs {
 
 /// The resolved options a [`Backend`] run reads, built from whichever subcommand
 /// clap parsed. Flags a given format doesn't expose are filled with today's
-/// defaults (directory: no stdout/array/merge_key/indent/plist_format; byte
-/// formats: no manage_root/no_owner/xattrs), so the backend logic is unchanged.
+/// defaults (directory: no stdout/symlinks/array/merge_key/indent/plist_format;
+/// byte formats: no manage_root/no_owner/xattrs), so the backend logic is unchanged.
 pub(crate) struct RunArgs {
     pub(crate) target: PathBuf,
     pub(crate) desired: PathBuf,
@@ -224,6 +232,7 @@ pub(crate) struct RunArgs {
     pub(crate) base_flag: Option<PathBuf>,
     pub(crate) no_prune: bool,
     pub(crate) stdout: bool,
+    pub(crate) symlinks: SymlinkPolicy,
     pub(crate) diff: bool,
     pub(crate) check: bool,
     pub(crate) indent: Indent,
@@ -295,6 +304,11 @@ impl RunArgs {
             base_flag,
             no_prune,
             stdout: byte.stdout,
+            symlinks: if byte.follow_symlinks {
+                SymlinkPolicy::Follow
+            } else {
+                SymlinkPolicy::Refuse
+            },
             diff,
             check,
             indent,
@@ -307,8 +321,8 @@ impl RunArgs {
         }
     }
 
-    /// A [`RunArgs`] from the `directory` subcommand's flags. The byte-only shaping
-    /// fields (stdout/array_strategy/merge_key/indent/plist_format) take their
+    /// A [`RunArgs`] from the `directory` subcommand's flags. The byte-only fields
+    /// (stdout/symlinks/array_strategy/merge_key/indent/plist_format) take their
     /// inert defaults -- a tree exposes none of them.
     fn from_dir(args: DirArgs) -> RunArgs {
         let CommonArgs {
@@ -325,6 +339,7 @@ impl RunArgs {
             base_flag,
             no_prune,
             stdout: false,
+            symlinks: SymlinkPolicy::Refuse,
             diff,
             check,
             indent: Indent::default(),

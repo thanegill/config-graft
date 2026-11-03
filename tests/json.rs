@@ -850,7 +850,7 @@ fn a_privileged_rewrite_keeps_the_owner() {
 
 #[test]
 fn a_rewrite_keeps_what_an_in_place_write_would_and_says_what_it_drops() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
@@ -898,16 +898,7 @@ fn a_rewrite_keeps_what_an_in_place_write_would_and_says_what_it_drops() {
         String::from_utf8_lossy(&rewritten.stderr)
     );
 
-    // A privileged run keeps setuid, and the Nix build sandbox refuses to set it or
-    // silently drops it, so this half runs only unprivileged under plain `cargo test`.
-    if fs::metadata(&target).unwrap().uid() == 0 {
-        return;
-    }
-    match fs::set_permissions(&target, fs::Permissions::from_mode(0o4640)) {
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
-        set => set.unwrap(),
-    }
-    if mode_of() != 0o4640 {
+    if !common::set_setuid_mode(&target, 0o4640) {
         return;
     }
     fs::write(&desired, r#"{"b":4}"#).unwrap();
