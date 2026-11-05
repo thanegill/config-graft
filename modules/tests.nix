@@ -40,27 +40,42 @@ let
       target = "/target.plist";
     };
 
+  plistEntryType =
+    parent:
+    common.entryType {
+      inherit lib pkgs parent;
+      defaultPackage = pkgs.hello;
+      format = {
+        name = "plist";
+        fileExtension = "plist";
+        settingsExample = { };
+      };
+      targetOption = lib.mkOption { type = lib.types.str; };
+      cfprefsdDescription = "test";
+    };
+
+  directoryEntryType =
+    parent:
+    common.directoryEntryType {
+      inherit lib pkgs parent;
+      defaultPackage = pkgs.hello;
+      targetOption = lib.mkOption { type = lib.types.str; };
+      sourceDescription = "test";
+    };
+
+  # The documented default of an entry's `package` option, as the manual renders it.
+  packageDefaultText = type: (type.getSubOptions [ ]).package.defaultText.text;
+
   # `binary`'s default is computed from `cfprefsdDomain`, so it has to be observed
   # through an evaluated submodule rather than the plain attrset above.
   resolvedBinary =
     overrides:
     let
-      entryType = common.entryType {
-        inherit lib pkgs;
-        defaultPackage = pkgs.hello;
-        format = {
-          name = "plist";
-          fileExtension = "plist";
-          settingsExample = { };
-        };
-        targetOption = lib.mkOption { type = lib.types.str; };
-        cfprefsdDescription = "test";
-      };
       evaluated = lib.evalModules {
         modules = [
           {
             options.entries = lib.mkOption {
-              type = entryType;
+              type = plistEntryType "home";
               default = { };
             };
           }
@@ -385,6 +400,26 @@ let
         cfprefsdDomain = "com.example.app";
         binary = false;
       };
+    }
+    {
+      name = "a home entry documents its package default as the module's";
+      expected = "config.home.managed.package";
+      actual = packageDefaultText (plistEntryType "home");
+    }
+    {
+      name = "a system entry documents its package default as the module's";
+      expected = "config.environment.managed.package";
+      actual = packageDefaultText (plistEntryType "environment");
+    }
+    {
+      name = "a home managedDirectory entry documents its package default as the module's";
+      expected = "config.home.managed.package";
+      actual = packageDefaultText (directoryEntryType "home");
+    }
+    {
+      name = "a system managedDirectory entry documents its package default as the module's";
+      expected = "config.environment.managed.package";
+      actual = packageDefaultText (directoryEntryType "environment");
     }
   ];
 
