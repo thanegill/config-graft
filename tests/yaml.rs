@@ -945,9 +945,62 @@ fn parse_failure_error_names_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("c.yaml");
     let desired = dir.path().join("d.yaml");
-    fs::write(&desired, "1: a\n").unwrap();
+    fs::write(&desired, "a: [1\n").unwrap();
     let err = stderr_of(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(err.contains("not valid YAML"), "got: {err}");
+    assert!(err.contains("DESIRED at"), "got: {err}");
+    assert!(
+        err.contains("is not valid YAML (line 2, column 1: "),
+        "got: {err}"
+    );
+}
+
+/// The stderr of a run with `text` as TARGET or as DESIRED, the other side a
+/// plain mapping. Asserts the TARGET was left untouched.
+fn yaml_stderr(text: &str, side: Side) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("c.yaml");
+    let desired = dir.path().join("d.yaml");
+    let (target_text, desired_text) = match side {
+        Side::Target => (text, "a: 1\n"),
+        Side::Desired => ("a: 1\n", text),
+    };
+    fs::write(&target, target_text).unwrap();
+    fs::write(&desired, desired_text).unwrap();
+    let err = stderr_of(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(fs::read_to_string(&target).unwrap(), target_text);
+    err
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Side {
+    Target,
+    Desired,
+}
+
+#[test]
+fn valid_yaml_the_codec_cannot_model_is_named_not_called_invalid() {
+    for side in [Side::Target, Side::Desired] {
+        let err = yaml_stderr("1: a\nb: !custom x\n", side);
+        assert!(
+            err.contains("is valid YAML but config-graft cannot reconcile a mapping key that is not a string"),
+            "{side:?}: {err}"
+        );
+        assert!(!err.contains("not valid YAML"), "{side:?}: {err}");
+
+        let err = yaml_stderr("a: !custom x\n", side);
+        assert!(
+            err.contains("is valid YAML but config-graft cannot reconcile a tagged value"),
+            "{side:?}: {err}"
+        );
+
+        let err = yaml_stderr("a: 1\n---\nb: 2\n", side);
+        assert!(
+            err.contains("is valid YAML but config-graft cannot reconcile more than one document"),
+            "{side:?}: {err}"
+        );
+    }
+    assert!(yaml_stderr("1: a\n", Side::Desired).contains("DESIRED at"));
+    assert!(yaml_stderr("1: a\n", Side::Target).contains("refusing to treat it as empty"));
 }
 
 #[test]
@@ -1092,6 +1145,11 @@ fn assert_refused_as_too_deep(text: &str, as_desired: bool) {
         Some(1),
         "aborted instead of refusing: {:?}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("nests deeper than the 512 levels config-graft reads"),
+        "got: {err}"
     );
     assert_eq!(fs::read_to_string(&target).unwrap(), target_text);
 }

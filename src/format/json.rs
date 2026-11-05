@@ -6,7 +6,7 @@ use json_syntax::{Parse, Print};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use super::{Format, FormatKind, Indent, ValueCodec, WriteOpts, MAX_DEPTH};
+use super::{Format, FormatKind, Indent, ParseFailure, ValueCodec, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::number::NumberValue;
 use crate::render::quote;
@@ -129,9 +129,9 @@ impl ValueCodec for Json {
     type Leaf = JsonLeaf;
     type Value<'a> = json_syntax::Value;
 
-    fn decode(value: &json_syntax::Value) -> Option<Node<JsonLeaf>> {
+    fn decode(value: &json_syntax::Value) -> Result<Node<JsonLeaf>, ParseFailure> {
         use json_syntax::Value;
-        Some(match value {
+        Ok(match value {
             Value::Object(o) => {
                 let mut map = IndexMap::with_capacity(o.len());
                 for entry in o.iter() {
@@ -141,7 +141,7 @@ impl ValueCodec for Json {
                 }
                 Node::Map(map)
             }
-            Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect::<Option<_>>()?),
+            Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect::<Result<_, _>>()?),
             Value::Null => Node::Leaf(JsonLeaf::Null),
             Value::Boolean(b) => Node::Leaf(JsonLeaf::Bool(*b)),
             Value::String(s) => Node::Leaf(JsonLeaf::String(s.to_string())),
@@ -187,12 +187,14 @@ impl Format for Json {
     const KIND: FormatKind = FormatKind::Json;
     const PATH_SEP: &'static str = ".";
 
-    fn parse(bytes: &[u8]) -> Option<Node<JsonLeaf>> {
-        let text = std::str::from_utf8(bytes).ok()?;
+    fn parse(bytes: &[u8]) -> Result<Node<JsonLeaf>, ParseFailure> {
+        let text =
+            std::str::from_utf8(bytes).map_err(|error| ParseFailure::not_utf8(bytes, error))?;
         if !nests_within_limit(text) {
-            return None;
+            return Err(ParseFailure::TooDeep);
         }
-        let (value, _) = json_syntax::Value::parse_str(text).ok()?;
+        let (value, _) = json_syntax::Value::parse_str(text)
+            .map_err(|error| ParseFailure::syntax_at(text, error.position(), error))?;
         Json::decode(&value)
     }
 
@@ -260,19 +262,25 @@ mod tests {
 
     #[test]
     fn nesting_is_capped_before_the_tree_is_built() {
-        assert!(Json::parse(nested(MAX_DEPTH).as_bytes()).is_some());
-        assert!(Json::parse(nested(MAX_DEPTH + 1).as_bytes()).is_none());
+        assert!(Json::parse(nested(MAX_DEPTH).as_bytes()).is_ok());
+        assert!(matches!(
+            Json::parse(nested(MAX_DEPTH + 1).as_bytes()),
+            Err(ParseFailure::TooDeep)
+        ));
         // Deep enough that dropping the parsed tree would abort the process, so
         // reaching this assertion at all is the thing being tested.
-        assert!(Json::parse(nested(50_000).as_bytes()).is_none());
+        assert!(matches!(
+            Json::parse(nested(50_000).as_bytes()),
+            Err(ParseFailure::TooDeep)
+        ));
     }
 
     #[test]
     fn brackets_inside_a_string_are_not_nesting() {
         let braces = "{".repeat(MAX_DEPTH * 2);
         let escaped_quote = format!(r#"{{"a":"\"{braces}"}}"#);
-        assert!(Json::parse(format!(r#"{{"a":"{braces}"}}"#).as_bytes()).is_some());
-        assert!(Json::parse(escaped_quote.as_bytes()).is_some());
+        assert!(Json::parse(format!(r#"{{"a":"{braces}"}}"#).as_bytes()).is_ok());
+        assert!(Json::parse(escaped_quote.as_bytes()).is_ok());
     }
 
     #[test]
@@ -280,14 +288,14 @@ mod tests {
         // Depth is the deepest path, not the count of brackets: a flat array of
         // objects must not be read as one nest per element.
         let siblings = format!("[{}]", vec!["{\"a\":1}"; MAX_DEPTH * 4].join(","));
-        assert!(Json::parse(siblings.as_bytes()).is_some());
+        assert!(Json::parse(siblings.as_bytes()).is_ok());
     }
 
     #[test]
     fn decode_is_total() {
-        assert!(Json::decode(&value("null")).is_some());
-        assert!(Json::decode(&value("[1, 2, 3]")).is_some());
-        assert!(Json::decode(&value(r#""scalar""#)).is_some());
+        assert!(Json::decode(&value("null")).is_ok());
+        assert!(Json::decode(&value("[1, 2, 3]")).is_ok());
+        assert!(Json::decode(&value(r#""scalar""#)).is_ok());
     }
 
     #[test]
@@ -326,7 +334,7 @@ mod tests {
     /// `n` as config-graft reads it out of a JSON document.
     fn leaf(literal: &str) -> JsonLeaf {
         match Json::decode(&value(literal)) {
-            Some(Node::Leaf(l)) => l,
+            Ok(Node::Leaf(l)) => l,
             other => panic!("expected a leaf, got {other:?}"),
         }
     }
