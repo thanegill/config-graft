@@ -1396,3 +1396,15 @@ fn indent_is_capped_at_the_widest_the_writer_takes() {
         "got: {stderr}"
     );
 }
+
+#[test]
+fn help_shows_the_indent_default() {
+    let out = run(&["json", "-h"]);
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let line = help
+        .lines()
+        .find(|line| line.contains("--indent"))
+        .expect("--indent is in json -h");
+    assert!(line.ends_with("[default: 2]"), "got: {line}");
+}
