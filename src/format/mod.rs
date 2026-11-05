@@ -15,9 +15,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::error::Error;
-use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
-use crate::warning::Warning;
+use crate::warning::{DiagnosticPath, Warning};
 
 pub(crate) mod directory;
 pub(crate) mod json;
@@ -161,7 +160,7 @@ pub struct Normalization<L: Leaf> {
 /// normalization reports what it rewrote and [`crate::backend::Backend::run`]
 /// decides whether to warn.
 pub struct Normalized<L: Leaf> {
-    pub path: KeyPath,
+    pub path: DiagnosticPath,
     pub original: Node<L>,
     pub value: Node<L>,
     /// Why the value could not be carried as it stood, completing the normalization
