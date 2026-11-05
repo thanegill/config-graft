@@ -63,8 +63,10 @@ let
           {command}`defaults export` reads the live domain, {command}`config-graft`
           deep-merges and prunes, and {command}`defaults import` writes it back, so
           the change isn't lost to cfprefsd's in-memory cache. Runs as root, so it
-          targets system/global domains under {file}`/Library/Preferences`.
-          {option}`target` is ignored in this mode.
+          targets system/global domains under {file}`/Library/Preferences`. Name
+          a process that writes the domain in {option}`skipWhileRunning` to leave
+          it alone while that process runs. {option}`target` is ignored in this
+          mode.
         '';
       };
     };
@@ -104,7 +106,7 @@ let
     inherit entry;
     snapshotRel = "config-graft/managed-directory/${configGraftLib.safeName name}";
     script = configGraftLib.mkDirectoryReconcileScript {
-      inherit lib entry;
+      inherit lib pkgs entry;
       target = entry.target;
     };
   }) config.environment.managedDirectory;
@@ -170,7 +172,7 @@ let
       e:
       prevSnapshot e.snapshotRel
       + configGraftLib.mkEntryReconcileScript {
-        inherit lib;
+        inherit lib pkgs;
         inherit (e) format entry desired;
         target = e.entry.target;
       }

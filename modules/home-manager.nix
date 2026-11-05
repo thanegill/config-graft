@@ -63,8 +63,9 @@ let
           live domain, {command}`config-graft` deep-merges and prunes, and
           {command}`defaults import` writes the result back, so the change isn't
           lost to cfprefsd's in-memory cache. A running app keeps its own copy of
-          the prefs, so quit it before switching and relaunch afterwards.
-          {option}`target` is ignored in this mode.
+          the prefs, so quit it before switching and relaunch afterwards, or name
+          it in {option}`skipWhileRunning` to leave the domain alone while it
+          runs. {option}`target` is ignored in this mode.
         '';
       };
     };
@@ -126,7 +127,15 @@ let
       inherit snapshotRel;
       source = entry.source;
       script =
-        prevSnapshot snapshotRel + configGraftLib.mkDirectoryReconcileScript { inherit lib entry target; };
+        prevSnapshot snapshotRel
+        + configGraftLib.mkDirectoryReconcileScript {
+          inherit
+            lib
+            pkgs
+            entry
+            target
+            ;
+        };
     }
   ) config.home.managedDirectory;
 
@@ -146,6 +155,7 @@ let
     + configGraftLib.mkEntryReconcileScript {
       inherit
         lib
+        pkgs
         format
         entry
         desired
