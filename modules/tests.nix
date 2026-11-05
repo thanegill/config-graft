@@ -6,7 +6,8 @@
 #
 # Almost everything here is a pure evaluation of `lib/common.nix` -- no platform
 # module, no home-manager input -- so the assertions read as plain
-# expected/actual. `binaryTargetRun` is the exception: it runs the real binary.
+# expected/actual. `binaryTargetRun` and `domainRuns` are the exceptions: they run
+# the generated script, with the real binary, against files the builder makes.
 {
   lib,
   pkgs,
@@ -157,6 +158,113 @@ let
         grep -q '<key>a</key>' roundtrip.xml \
           || { echo "the managed key was not grafted in"; exit 1; }
         echo ok > $out
+      '';
+
+  # The cfprefsd path, run against a stub `defaults` (never the real one) in each
+  # of the ways an export can turn out, under both of the shells it runs in:
+  # home-manager's `set -euo pipefail`, and the system module's script, which sets
+  # none. A failed or empty export must leave the domain alone (issue #59) without
+  # aborting what follows; a missing domain, which exports as an empty dictionary,
+  # is a first run. An export config-graft cannot read must not be imported either:
+  # that stays fatal under home-manager and is skipped by the system script.
+  domainEntry = entry {
+    package = package;
+    settings.a = 1;
+    cfprefsdDomain = "com.example.app";
+    binary = true;
+  };
+
+  # A failing export still leaves a well-formed empty plist behind, so the exit
+  # status is the only thing that can tell it from a missing domain.
+  stubDefaults = pkgs.writeShellScript "stub-defaults" ''
+    echo "$*" >> "$STUB_LOG"
+    case "$1:$STUB_EXPORT" in
+      export:fail)
+        cp "$STUB_DIR/empty.plist" "$3"
+        echo "stub: export failed" >&2
+        exit 1
+        ;;
+      export:nothing) ;;
+      export:missing) cp "$STUB_DIR/empty.plist" "$3" ;;
+      export:existing) cp "$STUB_DIR/existing.plist" "$3" ;;
+      export:corrupt) echo "not a plist" > "$3" ;;
+      import:*) cp "$3" "$STUB_DIR/imported.plist" ;;
+    esac
+  '';
+
+  domainScenario = pkgs.writeShellScript "cfprefsd-scenario" ''
+    if [[ $STRICT == 1 ]]; then set -euo pipefail; fi
+    run() { "$@"; }
+    _i() { :; }
+    _iWarn() {
+      _fmt="$1"
+      shift
+      printf "warning: $_fmt\n" "$@"
+    }
+    _prev=""
+    ${common.mkEntryReconcileScript {
+      inherit lib;
+      format = {
+        name = "plist";
+      };
+      entry = domainEntry;
+      desired = common.mkDesired {
+        inherit lib pkgs;
+        format = {
+          name = "plist";
+        };
+        name = "com.example.app.plist";
+        entry = domainEntry;
+      };
+      target = "/unused";
+      commands.defaults = stubDefaults;
+    }}
+    echo "reached the next entry"
+  '';
+
+  domainRuns =
+    pkgs.runCommand "config-graft-module-cfprefsd"
+      {
+        nativeBuildInputs = [ pkgs.libplist ];
+      }
+      ''
+        export STUB_DIR=$PWD STUB_LOG=$PWD/log
+        printf '<plist version="1.0"><dict/></plist>' > empty.xml
+        printf '<plist version="1.0"><dict><key>appOwned</key><string>x</string></dict></plist>' > existing.xml
+        plistutil -f bin -i empty.xml -o empty.plist
+        plistutil -f bin -i existing.xml -o existing.plist
+
+        fail() { echo "$1 (export=$STUB_EXPORT strict=$STRICT)"; cat out; exit 1; }
+        for STRICT in 1 0; do
+          for STUB_EXPORT in fail nothing missing existing corrupt; do
+            export STRICT STUB_EXPORT
+            rm -f imported.plist imported.xml log
+            status=0
+            ${domainScenario} > out 2>&1 || status=$?
+            if [ "$STUB_EXPORT:$STRICT" = corrupt:1 ]; then
+              [ "$status" != 0 ] || fail "a failed graft did not fail the activation"
+            else
+              [ "$status" = 0 ] || fail "the scenario exited $status"
+              grep -q "reached the next entry" out || fail "the script stopped short"
+            fi
+            case $STUB_EXPORT in
+              fail|nothing|corrupt)
+                [ ! -e imported.plist ] || fail "imported over the domain after a bad export"
+                grep -q "warning: Skipping plist domain com.example.app" out \
+                  || fail "skipped without a warning"
+                ;;
+              missing|existing)
+                [ -e imported.plist ] || fail "a good export was not imported"
+                plistutil -f xml -i imported.plist -o imported.xml
+                grep -q '<key>a</key>' imported.xml || fail "the managed key was not grafted"
+                ;;
+            esac
+            if [ "$STUB_EXPORT" = existing ]; then
+              grep -q '<key>appOwned</key>' imported.xml || fail "the domain's own key was dropped"
+            fi
+          done
+        done
+        echo "cfprefsd export guard ok" > $out
       '';
 
   # A generator distinguishable from the default only by what it emits. Under the
@@ -432,4 +540,5 @@ assert lib.assertMsg (failures == [ ]) (
 pkgs.runCommand "config-graft-module-tests" { } ''
   echo "${toString (builtins.length cases)} module assertions passed" > $out
   cat ${binaryTargetRun} >> $out
+  cat ${domainRuns} >> $out
 ''
