@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 
-use super::{Format, FormatKind, ValueCodec, WriteOpts};
+use super::{is_blank, Format, FormatKind, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{canonical_float_bits, Leaf, Node};
@@ -135,7 +135,7 @@ impl Format for Yaml {
         let text = std::str::from_utf8(bytes).ok()?;
         let docs = saphyr::Yaml::load_from_str(text).ok()?;
         match docs.as_slice() {
-            [] if bytes.iter().all(u8::is_ascii_whitespace) => None,
+            [] if is_blank(bytes) => None,
             [] => Some(Node::empty_map()),
             [doc] if doc.is_null() && is_empty_document(text) => Some(Node::empty_map()),
             [doc] => Yaml::decode(doc),

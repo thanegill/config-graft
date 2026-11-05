@@ -105,9 +105,9 @@ pub trait Format: ValueCodec {
     /// given its current bytes. plist answers [`PlistFormat::Follow`] from them;
     /// every other format writes one encoding and keeps what it was given.
     ///
-    /// Called once per run, before the first input is read: the plist date floor
-    /// runs at read time and is encoding-dependent, so deciding any later would
-    /// normalize against an encoding the write does not use.
+    /// Called once per pass, on the bytes TARGET is parsed from and before any input
+    /// is parsed. The plist date floor runs at read time and is encoding-dependent,
+    /// so deciding later would normalize against an encoding the write does not use.
     fn resolve_write_opts(_current: &[u8], opts: WriteOpts) -> WriteOpts {
         opts
     }
@@ -154,11 +154,10 @@ pub struct Normalization<L: Leaf> {
 
 /// One array element that [`Format::normalize_for_run`] rewrote: `original` is what
 /// the file held, `value` what the run will use. Two elements that shared a `value`
-/// but not an `original` can no longer both survive, since array membership is a
-/// set -- but whether that actually loses anything depends on the array strategy and
-/// on whether the array is managed at all, which only the run knows. So
-/// normalization reports what it rewrote and [`crate::backend::Backend::run`]
-/// decides whether to warn.
+/// but not an `original` cannot both survive, since array membership is a set.
+/// Whether that loses anything depends on the array strategy and on whether the
+/// array is managed at all, which only the run knows, so normalization reports what
+/// it rewrote and [`crate::backend::Backend::pass`] decides whether to warn.
 pub struct Normalized<L: Leaf> {
     pub path: KeyPath,
     pub original: Node<L>,
@@ -185,9 +184,9 @@ pub enum PlistFormat {
 /// Output preferences threaded to [`Format::serialize`]. Each field is honored by
 /// one format and ignored by the others.
 ///
-/// [`Backend::run`](crate::backend::Backend::run) resolves these once against the
-/// target's bytes before anything is read, so `plist_format` is never still
-/// [`PlistFormat::Follow`] by the time a codec sees it.
+/// [`Backend::pass`](crate::backend::Backend::pass) resolves these once per pass,
+/// from TARGET's snapshot and before any input is parsed, so `plist_format` is never
+/// still [`PlistFormat::Follow`] by the time a codec sees it.
 #[derive(Clone, Copy, Debug)]
 pub struct WriteOpts {
     /// JSON indentation.
@@ -242,21 +241,37 @@ pub fn parse_indent(spec: &str) -> Result<Indent, String> {
 /// an absent TARGET as `{}`, which is right for a first apply and destructive for a
 /// file that merely failed to parse.
 pub fn read_file<F: Format>(path: &Path) -> Result<Option<Node<F::Leaf>>, Error> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(Error::Read {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
+    let bytes = read_bytes(path).map_err(|source| Error::read(path, source))?;
+    parse_file::<F>(path, bytes.as_deref())
+}
+
+/// Whether `bytes` are only whitespace, as in a file staged for a first apply.
+pub fn is_blank(bytes: &[u8]) -> bool {
+    bytes.iter().all(u8::is_ascii_whitespace)
+}
+
+/// The bytes at `path`, or `None` when there is no file there.
+pub fn read_bytes(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`read_file`] over bytes already read from `path`: `None` is a missing file.
+pub fn parse_file<F: Format>(
+    path: &Path,
+    bytes: Option<&[u8]>,
+) -> Result<Option<Node<F::Leaf>>, Error> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
     };
-    match F::parse(&bytes) {
+    match F::parse(bytes) {
         Some(node) => Ok(Some(node)),
         // Checked only after parsing fails, so a format whose empty document is
         // meaningful (TOML's empty table) still parses it.
-        None if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
+        None if is_blank(bytes) => Ok(None),
         None => Err(Error::Unreadable {
             path: path.to_path_buf(),
             kind: F::KIND,

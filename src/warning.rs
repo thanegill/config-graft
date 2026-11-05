@@ -1,11 +1,14 @@
-//! Run diagnostics: the things config-graft did to a value that the caller did
-//! not ask for and could not see from the output alone.
+//! Run diagnostics: the things config-graft did that the caller did not ask for and
+//! could not see from the output alone.
 //!
 //! A [`Warning`] is produced wherever data changes shape without being a managed
-//! edit, and every one of them prints through [`crate::backend::emit`], so there
-//! is a single place that decides how a diagnostic looks.
+//! edit, or a pass has to start over, and every one of them prints through
+//! [`crate::backend::emit`], so there is a single place that decides how a
+//! diagnostic looks.
 //!
 //! Warnings are diagnostics only -- they never change the exit code.
+
+use std::path::PathBuf;
 
 use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
@@ -26,7 +29,7 @@ impl Source {
     }
 }
 
-/// Something a run changed about a value beyond applying the managed edits.
+/// Something a run did beyond applying the managed edits.
 pub enum Warning<L: Leaf> {
     /// A `merge` array where TARGET and DESIRED reordered the same elements
     /// contradictorily (a cross-over move). The order is still resolved
@@ -85,6 +88,25 @@ pub enum Warning<L: Leaf> {
         kept: usize,
         because: &'static str,
     },
+    /// TARGET no longer held the bytes pass `pass` of `passes` reconciled when the
+    /// write came to replace it, so that pass wrote nothing. About the file rather
+    /// than a key, so `path` is always the document root.
+    TargetChanged {
+        path: KeyPath,
+        file: PathBuf,
+        pass: usize,
+        passes: usize,
+    },
+    /// TARGET was empty or missing at pass `pass` of `passes` after an earlier pass
+    /// read content from it, as an app partway through a save leaves it, so that
+    /// pass wrote nothing rather than reconcile it as a first apply. `path` is
+    /// always the document root.
+    TargetEmptied {
+        path: KeyPath,
+        file: PathBuf,
+        pass: usize,
+        passes: usize,
+    },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -96,7 +118,9 @@ impl<L: Leaf> Warning<L> {
             | Warning::ValueNormalized { path, .. }
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
+            | Warning::ArrayCollapsed { path, .. }
+            | Warning::TargetChanged { path, .. }
+            | Warning::TargetEmptied { path, .. } => path,
         }
     }
 
@@ -109,7 +133,9 @@ impl<L: Leaf> Warning<L> {
             | Warning::ValueNormalized { path, .. }
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
+            | Warning::ArrayCollapsed { path, .. }
+            | Warning::TargetChanged { path, .. }
+            | Warning::TargetEmptied { path, .. } => path,
         }
     }
 
@@ -180,6 +206,21 @@ impl<L: Leaf> Warning<L> {
             } => format!(
                 "`{at}` in {}: {from} was read as {to} because {because}",
                 source.label()
+            ),
+            Warning::TargetChanged {
+                file, pass, passes, ..
+            } => format!(
+                "{} changed between config-graft's read and its write, so pass {pass} \
+                 of {passes} wrote nothing",
+                file.display()
+            ),
+            Warning::TargetEmptied {
+                file, pass, passes, ..
+            } => format!(
+                "{} is empty or missing after an earlier pass read content from it, as \
+                 an app partway through saving it would leave it, so pass {pass} of \
+                 {passes} wrote nothing",
+                file.display()
             ),
         }
     }

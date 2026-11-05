@@ -28,6 +28,9 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// TARGET changed between read and write, or was found emptied after an earlier
+    /// pass read content, on every pass, so nothing was written.
+    TargetKeptChanging { path: PathBuf, passes: usize },
     /// Reading a `directory` tree entry failed (I/O error other than a
     /// plain "not found", which the single-file readers treat as empty).
     Read {
@@ -138,6 +141,13 @@ impl fmt::Display for Error {
                 write!(f, "DESIRED must be a TOML table: {}", p.display())
             }
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
+            Error::TargetKeptChanging { path, passes } => write!(
+                f,
+                "{} did not settle in {passes} passes: each found it changed between \
+                 config-graft's read and its write, or emptied after an earlier pass read \
+                 it; another process kept modifying it, so it was left untouched",
+                path.display()
+            ),
             Error::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
             Error::StdoutWrite(e) => write!(f, "writing to stdout: {e}"),
             Error::Unreadable { path, kind } => write!(
