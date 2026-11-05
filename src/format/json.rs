@@ -403,4 +403,26 @@ mod tests {
         assert_eq!(hash_of(&huge), hash_of(&huge.clone()));
         assert_ne!(huge, JsonLeaf::Number("1e99999999999999999998".to_string()));
     }
+
+    #[test]
+    fn non_numbers_compare_by_kind_and_value() {
+        let leaves = [
+            JsonLeaf::Null,
+            JsonLeaf::Bool(false),
+            JsonLeaf::Bool(true),
+            JsonLeaf::String(String::new()),
+            JsonLeaf::String("0".to_string()),
+            JsonLeaf::Int(0),
+        ];
+        for (i, a) in leaves.iter().enumerate() {
+            for (j, b) in leaves.iter().enumerate() {
+                assert_eq!(a == b, i == j, "{a:?} vs {b:?}");
+            }
+        }
+        // `Hash` need not separate them, but differing leaves should not share
+        // one bucket; `DefaultHasher::new()` is deterministic, so this is stable.
+        for pair in leaves.windows(2) {
+            assert_ne!(hash_of(&pair[0]), hash_of(&pair[1]), "{pair:?}");
+        }
+    }
 }
