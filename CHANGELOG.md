@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`config-graft json --help` shows `--indent`'s default** as `[default: 2]`, like every other flag with a default, instead of spelling it out in the description.
 - **Building from source requires Rust 1.93 or later**, now declared as `rust-version` in Cargo.toml. The code has needed it since `fmt::from_fn` came into use after 0.1.1; declaring it makes the requirement visible to `cargo install` and lets clippy reject a newer std API before it raises the requirement.
 - **directory:** `--diff` now shows each extended attribute as `name=` plus the first four bytes of its value's SHA-256, in hex. The digest came from Rust's `DefaultHasher`, whose algorithm the standard library doesn't promise to keep between releases, so a toolchain upgrade could change `--diff` output for the same tree. The 8-hex-digit shape is unchanged, but every xattr digest in existing output changes once.
 - **`--base PATH` and a positional BASE together are a usage error** (exit 2). Both were accepted and the flag silently won, so a command line that named two different snapshots pruned against one of them without saying which. **Breaking:** a command line passing both now exits 2, even when one of them is empty.

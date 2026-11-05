@@ -134,9 +134,9 @@ pub(crate) struct JsonArgs {
     #[command(flatten)]
     byte: ByteArgs,
 
-    /// Output indentation: a number of spaces, or `tab` (default: 2 spaces).
-    #[arg(long, value_name = "N|tab")]
-    indent: Option<Indent>,
+    /// Output indentation: a number of spaces, or `tab`.
+    #[arg(long, value_name = "N|tab", default_value_t)]
+    indent: Indent,
 }
 
 /// plist: the byte flags plus plist-only `--plist-format`.
@@ -313,7 +313,7 @@ fn main() {
     let result = match cli.command {
         Command::Json(a) => ByteBackend::<Json>::run(&RunArgs::from_byte(
             a.byte,
-            a.indent,
+            Some(a.indent),
             PlistFormat::default(),
         )),
         Command::Yaml(a) => {
