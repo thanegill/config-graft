@@ -1,6 +1,7 @@
 //! Apple plist codec, leaf type, and I/O. Reads accept XML or binary; writes keep
 //! the target's own encoding by default, or whichever `--plist-format` names.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
@@ -437,8 +438,8 @@ impl CurrentBytes {
 /// for, while the same text somewhere new is.
 #[derive(Default)]
 struct Represented {
-    keys: std::collections::HashSet<(KeyPath, String)>,
-    values: std::collections::HashSet<(KeyPath, String)>,
+    keys: HashSet<(KeyPath, String)>,
+    values: HashSet<(KeyPath, String)>,
 }
 
 fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Represented) {
@@ -474,13 +475,12 @@ fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Re
 /// nothing carries over and the byte becomes this run's alone.
 #[derive(Default)]
 struct Carried {
-    keys: std::collections::HashSet<String>,
-    values: std::collections::HashSet<String>,
+    keys: HashSet<String>,
+    values: HashSet<String>,
 }
 
 fn carried_over(target: &Represented, result: &Represented) -> Carried {
-    let texts = |a: &std::collections::HashSet<(KeyPath, String)>,
-                 b: &std::collections::HashSet<(KeyPath, String)>| {
+    let texts = |a: &HashSet<(KeyPath, String)>, b: &HashSet<(KeyPath, String)>| {
         a.intersection(b).map(|(_, text)| text.clone()).collect()
     };
     Carried {
