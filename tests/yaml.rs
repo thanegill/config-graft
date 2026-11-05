@@ -197,6 +197,37 @@ fn removal_collapses_empty_parent() {
 }
 
 #[test]
+fn a_structural_change_under_an_explicit_key_is_written_at_the_line_indent() {
+    yaml_golden(
+        "? a\n: 5\nz: 1\n",
+        "a:\n  b: 1\n",
+        None,
+        "a:\n  b: 1\nz: 1\n",
+    );
+    yaml_golden("? a\n: 5\n", "a:\n  b: 1\n", None, "a:\n  b: 1\n");
+}
+
+#[test]
+fn a_structural_change_under_an_anchored_key_is_written_at_the_line_indent() {
+    yaml_golden("&k a:\n  b: 1\nz: 1\n", "a: 5\n", None, "a: 5\nz: 1\n");
+}
+
+#[test]
+fn a_structural_change_under_a_tagged_key_is_written_at_the_line_indent() {
+    yaml_golden("!!str a:\n  b: 1\nz: 1\n", "a: 5\n", None, "a: 5\nz: 1\n");
+}
+
+#[test]
+fn a_tab_before_a_flow_entry_is_not_counted_as_indent() {
+    yaml_golden(
+        "x: {\n  \ta: 1,\n  \tb: {c: 1}\n}\n",
+        "x:\n  b: 5\n",
+        None,
+        "x: {\n  \ta: 1,\n  b: 5\n}\n",
+    );
+}
+
+#[test]
 fn top_level_addition_keeps_existing_comment() {
     yaml_golden("a: 1  # c\n", "z: 9\n", None, "a: 1  # c\nz: 9\n");
 }

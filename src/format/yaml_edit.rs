@@ -339,7 +339,7 @@ fn diff_map(
             }
             _ => {
                 // A structural change (to/from a block): re-render the whole entry.
-                let ind = indent_of(src, entry.key_start);
+                let ind = line_indent(src, entry.key_start);
                 let frag = emit_entry(k, rv, ind);
                 edits.push(Edit {
                     start: line_start(src, entry.key_start),
@@ -415,9 +415,17 @@ fn line_end(src: &str, idx: usize) -> usize {
     src[idx..].find('\n').map_or(src.len(), |p| idx + p + 1)
 }
 
-/// Leading-whitespace width (in bytes) of the line containing `idx`.
+/// Byte column of `idx` within its line.
 fn indent_of(src: &str, idx: usize) -> usize {
     idx - line_start(src, idx)
+}
+
+/// Leading-space width of the line containing `idx`: an entry's block indent,
+/// which differs from its key's column for an explicit `? key` and for a tagged
+/// or anchored key. Tabs are not YAML indentation, so only spaces count.
+fn line_indent(src: &str, idx: usize) -> usize {
+    let line = &src[line_start(src, idx)..];
+    line.len() - line.trim_start_matches(' ').len()
 }
 
 #[cfg(test)]
