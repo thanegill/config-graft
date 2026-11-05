@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 
-use super::{Format, FormatKind, ValueCodec, WriteOpts, MAX_DEPTH};
+use super::{Format, FormatKind, ParseFailure, ValueCodec, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{canonical_float_bits, Leaf, Node};
@@ -79,37 +79,41 @@ impl ValueCodec for Yaml {
     type Leaf = YamlLeaf;
     type Value<'a> = saphyr::Yaml<'a>;
 
-    fn decode(value: &saphyr::Yaml<'_>) -> Option<Node<YamlLeaf>> {
+    fn decode(value: &saphyr::Yaml<'_>) -> Result<Node<YamlLeaf>, ParseFailure> {
         match value {
             saphyr::Yaml::Mapping(m) => {
                 let mut map = IndexMap::with_capacity(m.len());
                 for (k, val) in m {
                     // Only string keys: config maps are string-keyed, and the
                     // engine's paths are key sequences.
-                    let key = match k {
-                        saphyr::Yaml::Value(saphyr::Scalar::String(s)) => s.to_string(),
-                        _ => return None,
+                    let saphyr::Yaml::Value(saphyr::Scalar::String(key)) = k else {
+                        return Err(ParseFailure::Unsupported(
+                            "a mapping key that is not a string",
+                        ));
                     };
-                    map.insert(key, Yaml::decode(val)?);
+                    map.insert(key.to_string(), Yaml::decode(val)?);
                 }
-                Some(Node::Map(map))
+                Ok(Node::Map(map))
             }
             saphyr::Yaml::Sequence(a) => {
                 let mut out = Vec::with_capacity(a.len());
                 for e in a {
                     out.push(Yaml::decode(e)?);
                 }
-                Some(Node::Array(out))
+                Ok(Node::Array(out))
             }
-            saphyr::Yaml::Value(scalar) => Some(Node::Leaf(match scalar {
+            saphyr::Yaml::Value(scalar) => Ok(Node::Leaf(match scalar {
                 saphyr::Scalar::Null => YamlLeaf::Null,
                 saphyr::Scalar::Boolean(b) => YamlLeaf::Bool(*b),
                 saphyr::Scalar::Integer(i) => YamlLeaf::Int(*i),
                 saphyr::Scalar::FloatingPoint(f) => YamlLeaf::Float(f.into_inner()),
                 saphyr::Scalar::String(s) => YamlLeaf::String(s.to_string()),
             })),
-            // Tagged values, aliases, and unresolved representations are refused.
-            _ => None,
+            saphyr::Yaml::Tagged(..) => Err(ParseFailure::Unsupported("a tagged value")),
+            saphyr::Yaml::Alias(_) => Err(ParseFailure::Unsupported("an alias")),
+            saphyr::Yaml::Representation(..) | saphyr::Yaml::BadValue => {
+                Err(ParseFailure::Unsupported("an unresolved value"))
+            }
         }
     }
 
@@ -132,20 +136,25 @@ impl Format for Yaml {
     const KIND: FormatKind = FormatKind::Yaml;
     const PATH_SEP: &'static str = ".";
 
-    fn parse(bytes: &[u8]) -> Option<Node<YamlLeaf>> {
-        let text = std::str::from_utf8(bytes).ok()?;
+    fn parse(bytes: &[u8]) -> Result<Node<YamlLeaf>, ParseFailure> {
+        let text =
+            std::str::from_utf8(bytes).map_err(|error| ParseFailure::not_utf8(bytes, error))?;
         if !nests_within_limit(text) {
-            return None;
+            return Err(ParseFailure::TooDeep);
         }
         let mut parser = saphyr_parser::Parser::new_from_iter(text.chars());
-        let docs = saphyr::Yaml::load_from_parser(&mut parser).ok()?;
+        let docs = saphyr::Yaml::load_from_parser(&mut parser).map_err(|error| {
+            let marker = error.marker();
+            ParseFailure::syntax_at_line(marker.line(), marker.col() + 1, error.info())
+        })?;
         match docs.as_slice() {
-            [] if bytes.iter().all(u8::is_ascii_whitespace) => None,
-            [] => Some(Node::empty_map()),
-            [doc] if doc.is_null() && is_empty_document(text) => Some(Node::empty_map()),
+            [] if bytes.iter().all(u8::is_ascii_whitespace) => {
+                Err(ParseFailure::syntax("no document"))
+            }
+            [] => Ok(Node::empty_map()),
+            [doc] if doc.is_null() && is_empty_document(text) => Ok(Node::empty_map()),
             [doc] => Yaml::decode(doc),
-            // A multi-doc stream is not reconcilable here.
-            _ => None,
+            _ => Err(ParseFailure::Unsupported("more than one document")),
         }
     }
 
@@ -296,7 +305,7 @@ mod tests {
     use super::*;
 
     fn yaml_to_node(text: &str) -> Option<Node<YamlLeaf>> {
-        Yaml::parse(text.as_bytes())
+        Yaml::parse(text.as_bytes()).ok()
     }
 
     /// Emit a `Node` as canonical YAML.
