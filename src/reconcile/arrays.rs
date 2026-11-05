@@ -72,31 +72,48 @@ pub(super) fn combine<L: Leaf>(
                 desired,
                 base_arr,
                 opts,
-                opts.merge_keys.candidates(path),
+                merge_key_fields(target, desired, opts, path),
             )
         }
     }
 }
 
+/// The merge-key fields `merge` matches the elements of these two arrays by, or
+/// `None` when it matches them by whole value: keyed only under `merge`, with a
+/// candidate configured for the array at `path` and carried by every element of
+/// both sides. The one place that decides, so the collapse check in
+/// [`crate::backend`] sees each array matched exactly as the engine matched it.
+pub(crate) fn merge_key_fields<'o, L: Leaf>(
+    target: &[Node<L>],
+    desired: &[Node<L>],
+    opts: &'o Options,
+    path: &ManagedPath,
+) -> Option<&'o [String]> {
+    let keys = opts.merge_keys.candidates(path);
+    let keyed = opts.arrays == ArrayStrategy::Merge
+        && !keys.is_empty()
+        && all_keyed(target, keys)
+        && all_keyed(desired, keys);
+    keyed.then_some(keys)
+}
+
 /// Move-aware three-way merge of two arrays via a generalized topological sort
 /// (GTS). Elements are matched by **identity** -- the whole value by default, or,
-/// when `keys` names candidate fields and every element of both sides is an object
-/// carrying one, by that key field (a keyed record). Matched keyed records are
-/// three-way *merged* (fields reconciled); value-matched elements are taken as-is.
-/// Returns the ordered survivors and any [`Warning`]s (a contradictory cross-over
-/// cycle at this array, plus, in keyed mode, conflicts nested inside a merged
-/// record).
+/// when [`merge_key_fields`] found `keys`, by the first of them each element
+/// carries (a keyed record). Matched keyed records are three-way *merged* (fields
+/// reconciled); value-matched elements are taken as-is. Returns the ordered
+/// survivors and any [`Warning`]s (a contradictory cross-over cycle at this array,
+/// plus, in keyed mode, conflicts nested inside a merged record).
 fn ordered_merge<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
     opts: &Options,
-    keys: &[String],
+    keys: Option<&[String]>,
 ) -> (NodeList<L>, Vec<Warning<L>>) {
-    if !keys.is_empty() && all_keyed(target, keys) && all_keyed(desired, keys) {
-        keyed_merge(target, desired, base, opts, keys)
-    } else {
-        value_merge(target, desired, base)
+    match keys {
+        Some(keys) => keyed_merge(target, desired, base, opts, keys),
+        None => value_merge(target, desired, base),
     }
 }
 
@@ -524,15 +541,24 @@ type Ident<L> = (String, Node<L>);
 /// The identity of `e` for keyed matching: the first `keys` field it carries, as
 /// `(field, value)` (the field disambiguates `name:"x"` from `id:"x"`). `None` if
 /// `e` isn't an object with a candidate field.
-pub(crate) fn identity<L: Leaf>(e: &Node<L>, keys: &[String]) -> Option<Ident<L>> {
+fn identity<L: Leaf>(e: &Node<L>, keys: &[String]) -> Option<Ident<L>> {
+    key_of(e, keys).map(|(field, value)| (field.to_owned(), value.clone()))
+}
+
+/// [`identity`], borrowed from `e`: the field and its value. The engine's matching
+/// and the collapse check's both go through it, so the two agree on what a key is.
+pub(crate) fn key_of<'a, L: Leaf>(
+    e: &'a Node<L>,
+    keys: &[String],
+) -> Option<(&'a str, &'a Node<L>)> {
     let map = e.as_map()?;
     keys.iter()
-        .find_map(|f| map.get(f).map(|v| (f.clone(), v.clone())))
+        .find_map(|f| map.get_key_value(f).map(|(f, v)| (f.as_str(), v)))
 }
 
 /// Whether every element of `seq` is an object carrying a candidate key field.
 fn all_keyed<L: Leaf>(seq: &[Node<L>], keys: &[String]) -> bool {
-    seq.iter().all(|e| identity(e, keys).is_some())
+    seq.iter().all(|e| key_of(e, keys).is_some())
 }
 
 /// Three-way membership merge of two arrays (membership only, abstracting away

@@ -152,13 +152,13 @@ pub struct Normalization<L: Leaf> {
     pub rewritten: Vec<Normalized<L>>,
 }
 
-/// One array element that [`Format::normalize_for_run`] rewrote: `original` is what
-/// the file held, `value` what the run will use. Two elements that shared a `value`
-/// but not an `original` can no longer both survive, since array membership is a
-/// set -- but whether that actually loses anything depends on the array strategy and
-/// on whether the array is managed at all, which only the run knows. So
-/// normalization reports what it rewrote and [`crate::backend::Backend::run`]
-/// decides whether to warn.
+/// One value that [`Format::normalize_for_run`] rewrote, at the path where it sits
+/// (an array element by its position): `original` is what the file held, `value`
+/// what the run will use. Two array elements that differed only in such a value can
+/// no longer both survive, since array membership is a set -- but whether that
+/// actually loses anything depends on the array strategy and on whether the array
+/// is managed at all, which only the run knows. So normalization reports what it
+/// rewrote and [`crate::backend::Backend::run`] decides whether to warn.
 pub struct Normalized<L: Leaf> {
     pub path: DiagnosticPath,
     pub original: Node<L>,

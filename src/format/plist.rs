@@ -265,8 +265,8 @@ impl Format for Plist {
         if opts.plist_format == PlistFormat::Binary {
             return Ok(None);
         }
-        let needs_floor = scan_dates(node).map_err(|segments| {
-            let path: DiagnosticPath = segments.into_iter().rev().map(Step::Key).collect();
+        let needs_floor = scan_dates(node).map_err(|steps| {
+            let path: DiagnosticPath = steps.into_iter().rev().collect();
             Error::PlistDateOutOfRange {
                 path: path.render(Plist::PATH_SEP),
             }
@@ -336,11 +336,11 @@ fn floor_dates_to_whole_seconds(
                 path.pop();
             }
         }
-        // Arrays are atomic for key paths, so an element is recorded under the
-        // array's own key -- which is what the collapse check needs to find it.
         Node::Array(a) => {
-            for element in a.iter_mut() {
+            for (index, element) in a.iter_mut().enumerate() {
+                path.push(Step::Index(index));
                 floor_dates_to_whole_seconds(element, path, rewritten)?;
+                path.pop();
             }
         }
         Node::Leaf(leaf) => {
@@ -548,8 +548,10 @@ fn check_xml_representable(
             }
         }
         Node::Array(a) => {
-            for element in a {
+            for (index, element) in a.iter().enumerate() {
+                path.push(Step::Index(index));
                 check_xml_representable(element, carried, current, path, kept)?;
+                path.pop();
             }
         }
         Node::Leaf(PlistLeaf::String(text)) => judge(text, false, path, kept)?,
@@ -603,7 +605,7 @@ fn date_valid_in_xml(date: plist::Date) -> bool {
 /// The path is built only on the error branch, unwinding -- this runs over all three
 /// inputs on every run, and cloning a key per level to describe a failure that
 /// almost never happens is the wrong trade.
-fn scan_dates(node: &Node<PlistLeaf>) -> Result<bool, Vec<String>> {
+fn scan_dates(node: &Node<PlistLeaf>) -> Result<bool, Vec<Step>> {
     let mut needs_floor = false;
     match node {
         Node::Map(m) => {
@@ -611,15 +613,21 @@ fn scan_dates(node: &Node<PlistLeaf>) -> Result<bool, Vec<String>> {
                 match scan_dates(value) {
                     Ok(found) => needs_floor |= found,
                     Err(mut below) => {
-                        below.push(key.clone());
+                        below.push(Step::Key(key.clone()));
                         return Err(below);
                     }
                 }
             }
         }
         Node::Array(a) => {
-            for element in a {
-                needs_floor |= scan_dates(element)?;
+            for (index, element) in a.iter().enumerate() {
+                match scan_dates(element) {
+                    Ok(found) => needs_floor |= found,
+                    Err(mut below) => {
+                        below.push(Step::Index(index));
+                        return Err(below);
+                    }
+                }
             }
         }
         Node::Leaf(PlistLeaf::Date(date)) => {
