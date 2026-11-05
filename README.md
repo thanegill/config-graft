@@ -112,6 +112,8 @@ Each byte-format entry takes `settings` (freeform data) or a pre-built `source` 
 
 `managedDirectory` is the `directory` subcommand wrapper: each entry reconciles a `source` directory *tree* into `target`, keeping app-created files and pruning files dropped from `source`. It takes `manageRoot`, `noOwner` (set it on a non-root home-manager activation — a store-built source is root-owned), and `xattrs` (`all`/`safe`/`none`) in place of `settings`.
 
+Every entry, `managedDirectory` included, takes `whileRunning`. Its `skip` is a list of process names that, while any of them is running, make activation skip that entry with a warning and leave it untouched until the next activation. It is for an app that rewrites its own configuration while it runs, whose write between config-graft's read and its write would otherwise be lost; on a `cfprefsdDomain` entry that includes keys the entry doesn't manage, since `defaults import` replaces the whole domain. Names are matched exactly, as `pgrep -x` matches them, against every user's processes: on macOS the basename of `argv[0]` in full (normally the executable's file name), on Linux the kernel's 15-byte command name, so a longer name is cut to match. A `pgrep` that fails also skips the entry. The check narrows the window rather than closing it: an app that starts after it, or writes while the reconcile runs, can still race it.
+
 A home-manager `flake.nix` sketch:
 
 ```nix

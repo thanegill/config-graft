@@ -10,6 +10,89 @@ let
   # nested dirs or a leading "//"), and no doubled extension since the name already
   # ends in one.
   safeName = builtins.replaceStrings [ "/" ] [ "-" ];
+
+  # `whileRunning`, the same on every entry type.
+  whileRunningOption =
+    lib:
+    lib.mkOption {
+      default = { };
+      description = ''
+        What to do about an app that is running when this entry is reconciled. An
+        app that rewrites its own configuration while it runs can lose a write it
+        makes between config-graft's read and its write, and for a plist entry
+        with `cfprefsdDomain` set that includes keys this entry does not manage,
+        since {command}`defaults import` replaces the whole domain.
+
+        This narrows the window rather than closing it: an app that starts after
+        the check, or writes while the reconcile runs, can still race it.
+      '';
+      type = lib.types.submodule {
+        options.skip = lib.mkOption {
+          type = lib.types.listOf lib.types.nonEmptyStr;
+          default = [ ];
+          example = [ "MeetingBar" ];
+          description = ''
+            Process names that make activation skip this entry, with a warning,
+            while any of them is running, leaving it untouched until the next
+            activation.
+
+            Each name is matched exactly, as {command}`pgrep -x` matches it,
+            against processes of every user. On macOS that is the last component
+            of the process's `argv[0]`, normally the executable's file name
+            (`MeetingBar` for {file}`MeetingBar.app/Contents/MacOS/MeetingBar`),
+            in full. On Linux it is the kernel's command name, which keeps only
+            the first 15 bytes, so the name is cut the same way before matching;
+            a program wrapped by `wrapProgram` runs as `.<name>-wrapped`. Find
+            the name to use with {command}`pgrep -l <part of it>` (or
+            {command}`ps -o comm=` on Linux). If {command}`pgrep` itself fails,
+            the entry is skipped too; a non-ASCII name whose 15-byte cut splits a
+            character may do that on Linux.
+          '';
+        };
+      };
+    };
+
+  # Wraps an entry's reconcile `body` so it runs only while none of `names` is
+  # running. pgrep exits 1 when nothing matches; a match (0) or a pgrep failure
+  # (2 or 3) skips the entry. macOS's pgrep matches the untruncated basename of
+  # argv[0], while Linux's matches the 15-byte kernel comm, hence the cut there.
+  # pgrep's stderr is dropped because procps warns on every miss for an escaped
+  # pattern over 15 bytes; a real failure still surfaces through its status.
+  guardRunning =
+    {
+      lib,
+      pkgs,
+      names,
+      label,
+      commands,
+      body,
+    }:
+    let
+      isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+      pgrep = commands.pgrep or (if isDarwin then "/usr/bin/pgrep" else lib.getExe' pkgs.procps "pgrep");
+      pattern = name: lib.escapeRegex (if isDarwin then name else builtins.substring 0 15 name);
+      probe = name: ''
+        if [[ -z "$_running" ]]; then
+          _pgrepStatus=0
+          ${pgrep} -x -- ${lib.escapeShellArg (pattern name)} >/dev/null 2>&1 || _pgrepStatus=$?
+          if [[ $_pgrepStatus -ne 1 ]]; then _running=${lib.escapeShellArg name}; fi
+        fi
+      '';
+    in
+    if names == [ ] then
+      body
+    else
+      ''
+        _running=""
+        ${lib.concatMapStrings probe names}
+        if [[ -z "$_running" ]]; then
+        ${body}
+        elif [[ $_pgrepStatus -eq 0 ]]; then
+          _iWarn "Skipping %s: %s is running (whileRunning.skip)" ${lib.escapeShellArg label} "$_running"
+        else
+          _iWarn "Skipping %s: pgrep exited %s looking for %s (whileRunning.skip)" ${lib.escapeShellArg label} "$_pgrepStatus" "$_running"
+        fi
+      '';
 in
 {
   inherit safeName;
@@ -114,6 +197,8 @@ in
                 used to build {option}`settings`. Override to use a validating format.
               '';
             };
+
+            whileRunning = whileRunningOption lib;
           }
           // lib.optionalAttrs (format.name == "plist") {
             # `defaults`/`cfprefsd` are macOS-only; `mkAssertions` guards a Darwin
@@ -177,6 +262,7 @@ in
   mkEntryReconcileScript =
     {
       lib,
+      pkgs,
       format,
       entry,
       desired,
@@ -185,9 +271,9 @@ in
     }:
     let
       defaults = commands.defaults or "/usr/bin/defaults";
-    in
-    if format.name == "plist" && entry.cfprefsdDomain != null then
-      ''
+      isDomain = format.name == "plist" && entry.cfprefsdDomain != null;
+
+      domainScript = ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
         _i "Reconciling managed plist domain %s" "$_domain"
 
@@ -216,15 +302,22 @@ in
           run ${defaults} import "$_domain" "$_live"
         fi
         rm -f "$_live"
-      ''
-    else
-      ''
+      '';
+
+      fileScript = ''
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
         run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${
           lib.optionalString (format.name == "plist" && entry.binary) " --plist-format binary"
         }
       '';
+    in
+    guardRunning {
+      inherit lib pkgs commands;
+      names = entry.whileRunning.skip;
+      label = if isDomain then entry.cfprefsdDomain else target;
+      body = if isDomain then domainScript else fileScript;
+    };
 
   # Directory-format entry type. Unlike the byte formats there is no `settings`
   # (freeform data through a `pkgs.formats` generator): the DESIRED is a prebuilt
@@ -299,6 +392,8 @@ in
                 (skip privileged/system namespaces), or `none`.
               '';
             };
+
+            whileRunning = whileRunningOption lib;
           };
 
           config.target = lib.mkDefault name;
@@ -313,8 +408,10 @@ in
   mkDirectoryReconcileScript =
     {
       lib,
+      pkgs,
       entry,
       target,
+      commands ? { },
     }:
     let
       flags = lib.concatStringsSep " " (
@@ -323,11 +420,16 @@ in
         ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}"
       );
     in
-    ''
-      _target=${lib.escapeShellArg target}
-      _i "Reconciling managed directory tree %s" "$_target"
-      run ${lib.getExe entry.package} directory ${flags} "$_target" ${entry.source} "$_prev"
-    '';
+    guardRunning {
+      inherit lib pkgs commands;
+      names = entry.whileRunning.skip;
+      label = target;
+      body = ''
+        _target=${lib.escapeShellArg target}
+        _i "Reconciling managed directory tree %s" "$_target"
+        run ${lib.getExe entry.package} directory ${flags} "$_target" ${entry.source} "$_prev"
+      '';
+    };
 
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
   # macOS-only tooling, and `settings`/`source` are mutually exclusive.
