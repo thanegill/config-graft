@@ -2,7 +2,7 @@
 //! magic exit codes.
 
 use crate::format::plist::CurrentBytes;
-use crate::format::FormatKind;
+use crate::format::{FormatKind, ParseFailure, MAX_DEPTH};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -41,11 +41,19 @@ pub enum Error {
     /// an absent TARGET is legitimately reconciled as empty, but treating an
     /// unreadable one that way would replace a file full of app-owned data with
     /// DESIRED alone.
-    Unreadable { path: PathBuf, kind: FormatKind },
+    Unreadable {
+        path: PathBuf,
+        kind: FormatKind,
+        failure: ParseFailure,
+    },
     /// DESIRED is absent or empty, as opposed to present and unparseable.
     DesiredAbsent { path: PathBuf, kind: FormatKind },
     /// DESIRED exists but could not be parsed.
-    UnreadableDesired { path: PathBuf, kind: FormatKind },
+    UnreadableDesired {
+        path: PathBuf,
+        kind: FormatKind,
+        failure: ParseFailure,
+    },
     /// TARGET parsed, but its root is not this format's mapping shape.
     TargetNotMapping { path: PathBuf, kind: FormatKind },
     /// The plist serializer failed.
@@ -124,6 +132,28 @@ const TOML_UNSAFE: &str = "cannot safely edit this TOML while preserving comment
     (an edit that would not round-trip, e.g. a table-shape change the editor can't \
     rewrite); aborting rather than risk corrupting the file";
 
+/// Why a `kind` file could not be read, as the middle of a refusal. `exists`
+/// leads the two reasons that do not start by calling the file valid.
+fn write_reason(
+    f: &mut fmt::Formatter<'_>,
+    kind: FormatKind,
+    failure: &ParseFailure,
+    exists: &str,
+) -> fmt::Result {
+    let name = kind.name();
+    match failure {
+        ParseFailure::Syntax(detail) => write!(f, "{exists}is not valid {name} ({detail})"),
+        ParseFailure::TooDeep => write!(
+            f,
+            "{exists}nests deeper than the {MAX_DEPTH} levels config-graft reads"
+        ),
+        ParseFailure::Unsupported(what) => write!(
+            f,
+            "is valid {name} but config-graft cannot reconcile {what}"
+        ),
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -140,13 +170,18 @@ impl fmt::Display for Error {
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
             Error::StdoutWrite(e) => write!(f, "writing to stdout: {e}"),
-            Error::Unreadable { path, kind } => write!(
-                f,
-                "{} exists but is not valid {}; refusing to treat it as empty, which \
-                 would replace it with DESIRED. Fix or remove the file.",
-                path.display(),
-                kind.name()
-            ),
+            Error::Unreadable {
+                path,
+                kind,
+                failure,
+            } => {
+                write!(f, "{} ", path.display())?;
+                write_reason(f, *kind, failure, "exists but ")?;
+                f.write_str(
+                    "; refusing to treat it as empty, which would replace it with \
+                     DESIRED. Fix or remove the file.",
+                )
+            }
             Error::DesiredAbsent { path, kind } => write!(
                 f,
                 "DESIRED at {} does not exist or is empty, so there is no {} to \
@@ -154,12 +189,15 @@ impl fmt::Display for Error {
                 path.display(),
                 kind.name()
             ),
-            Error::UnreadableDesired { path, kind } => write!(
-                f,
-                "DESIRED at {} is not valid {}; nothing was written.",
-                path.display(),
-                kind.name()
-            ),
+            Error::UnreadableDesired {
+                path,
+                kind,
+                failure,
+            } => {
+                write!(f, "DESIRED at {} ", path.display())?;
+                write_reason(f, *kind, failure, "")?;
+                f.write_str("; nothing was written.")
+            }
             Error::TargetNotMapping { path, kind } => write!(
                 f,
                 "{} is valid {} but its root is not {}; refusing, because there is \

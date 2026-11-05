@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use indexmap::IndexMap;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
-use super::{Format, FormatKind, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, ParseFailure, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{canonical_float_bits, Leaf, Node};
@@ -80,7 +80,7 @@ impl ValueCodec for Toml {
     type Leaf = TomlLeaf;
     type Value<'a> = Item;
 
-    fn decode(value: &Item) -> Option<Node<TomlLeaf>> {
+    fn decode(value: &Item) -> Result<Node<TomlLeaf>, ParseFailure> {
         match value {
             Item::Table(t) => decode_table(t),
             Item::Value(v) => decode_value(v),
@@ -89,9 +89,9 @@ impl ValueCodec for Toml {
                 for t in aot.iter() {
                     out.push(decode_table(t)?);
                 }
-                Some(Node::Array(out))
+                Ok(Node::Array(out))
             }
-            Item::None => None,
+            Item::None => Err(ParseFailure::Unsupported("an empty item")),
         }
     }
 
@@ -109,9 +109,16 @@ impl Format for Toml {
     const KIND: FormatKind = FormatKind::Toml;
     const PATH_SEP: &'static str = ".";
 
-    fn parse(bytes: &[u8]) -> Option<Node<TomlLeaf>> {
-        let text = std::str::from_utf8(bytes).ok()?;
-        let doc = text.parse::<DocumentMut>().ok()?;
+    fn parse(bytes: &[u8]) -> Result<Node<TomlLeaf>, ParseFailure> {
+        let text =
+            std::str::from_utf8(bytes).map_err(|error| ParseFailure::not_utf8(bytes, error))?;
+        let doc = text.parse::<DocumentMut>().map_err(|error| {
+            let message = join_lines_outside_backticks(error.message().trim_end());
+            match error.span() {
+                Some(span) => ParseFailure::syntax_at(text, span.start, message),
+                None => ParseFailure::syntax(message),
+            }
+        })?;
         // A TOML document's root is always a table, so this is total.
         decode_table(doc.as_table())
     }
@@ -151,18 +158,38 @@ fn write_canonical(node: &Node<TomlLeaf>) -> String {
     out
 }
 
+/// toml_edit's message with its own line breaks joined by `; `. A line break
+/// inside backticks is part of the quoted file content, such as a duplicate
+/// key, and is left for the refusal to escape. A key holding both a backtick and
+/// a line break can still read with `; `; nothing reaches the terminal raw.
+fn join_lines_outside_backticks(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut quoted = false;
+    for c in message.chars() {
+        match c {
+            '`' => {
+                quoted = !quoted;
+                out.push(c);
+            }
+            '\n' if !quoted => out.push_str("; "),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Decode a TOML table into a map node. Total: TOML keys are always strings.
-fn decode_table(t: &Table) -> Option<Node<TomlLeaf>> {
+fn decode_table(t: &Table) -> Result<Node<TomlLeaf>, ParseFailure> {
     let mut map = IndexMap::with_capacity(t.len());
     for (k, v) in t.iter() {
         map.insert(k.to_string(), Toml::decode(v)?);
     }
-    Some(Node::Map(map))
+    Ok(Node::Map(map))
 }
 
 /// Decode a TOML value (scalar, array, or inline table) into a node.
-fn decode_value(v: &Value) -> Option<Node<TomlLeaf>> {
-    Some(match v {
+fn decode_value(v: &Value) -> Result<Node<TomlLeaf>, ParseFailure> {
+    Ok(match v {
         Value::String(f) => Node::Leaf(TomlLeaf::String(f.value().clone())),
         Value::Integer(f) => Node::Leaf(TomlLeaf::Int(*f.value())),
         Value::Float(f) => Node::Leaf(TomlLeaf::Float(*f.value())),
@@ -238,7 +265,7 @@ mod tests {
 
     /// Parse TOML text into a `Node` (mirrors `Toml::parse`).
     fn toml_to_node(text: &str) -> Option<Node<TomlLeaf>> {
-        Toml::parse(text.as_bytes())
+        Toml::parse(text.as_bytes()).ok()
     }
 
     fn leaf(node: &Node<TomlLeaf>, key: &str) -> TomlLeaf {

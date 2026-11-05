@@ -1818,6 +1818,28 @@ fn deep_xml(depth: usize) -> String {
 }
 
 #[test]
+fn a_plist_that_ends_early_or_is_malformed_says_so() {
+    for text in [
+        "hello",
+        "<plist><dict><!bogus><key>a</key><integer>1</integer></dict></plist>",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.plist");
+        let desired = dir.path().join("desired.plist");
+        fs::write(&target, text).unwrap();
+        pdict(vec![("a", pint(1))]).to_file_xml(&desired).unwrap();
+        let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("is not valid plist (ends early or is malformed)"),
+            "{text:?}: {err}"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), text);
+    }
+}
+
+#[test]
 fn a_deeply_nested_xml_target_is_refused_not_aborted() {
     // plist's event readers are iterative, but a `plist::Value` *drops*
     // recursively and the codec walks it recursively, so a deep document aborts
@@ -1835,7 +1857,12 @@ fn a_deeply_nested_xml_target_is_refused_not_aborted() {
         Some(1),
         "aborted instead of refusing: {out:?}"
     );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not valid plist"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("nests deeper than the 512 levels config-graft reads"),
+        "got: {err}"
+    );
+    assert!(!err.contains("not valid plist"), "got: {err}");
     assert_eq!(fs::read_to_string(&target).unwrap(), deep);
 }
 
@@ -1855,6 +1882,11 @@ fn a_deeply_nested_binary_target_is_refused_not_aborted() {
         out.status.code(),
         Some(1),
         "aborted instead of refusing: {out:?}"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("nests deeper than the 512 levels config-graft reads"),
+        "got: {err}"
     );
     assert_eq!(fs::read(&target).unwrap(), binary);
 }

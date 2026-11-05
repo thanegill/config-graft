@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A refused file says why** instead of always "is not valid <format>": the parser's message with its line and column, the 512-container depth cap, or what valid YAML holds that can't be reconciled; control and invisible characters from the file are escaped.
 - **An object DESIRED declares empty survives the prune that emptied it**, instead of being deleted and re-added on the next run. YAML writes it as `key: {}`, and TOML turns an emptied dotted or implicit table into an explicit `[a]` header.
 - **YAML:** a DESIRED key under an existing `key: {}` is written instead of refused; a comment on its key line is dropped.
 - **A declared `-0.0` replaces an existing `0.0`** ([#40](https://github.com/thanegill/config-graft/issues/40)): the sign of a zero is part of its value in every format, so an array keeps both and a `-0.0` the app rewrote as `0.0` is no longer pruned.

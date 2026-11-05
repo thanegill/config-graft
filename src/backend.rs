@@ -253,7 +253,15 @@ pub(crate) trait Backend {
         // says nothing about DESIRED.
         let mut desired = Self::read(args, &args.desired)
             .map_err(|e| match e {
-                Error::Unreadable { path, kind } => Error::UnreadableDesired { path, kind },
+                Error::Unreadable {
+                    path,
+                    kind,
+                    failure,
+                } => Error::UnreadableDesired {
+                    path,
+                    kind,
+                    failure,
+                },
                 other => other,
             })?
             .ok_or_else(|| Self::error_desired_absent(args.desired.clone()))?;
