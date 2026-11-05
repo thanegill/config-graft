@@ -3,7 +3,7 @@
 use std::fs;
 
 mod common;
-use common::{run, stderr_of};
+use common::{applies_then_settles, run, stderr_of};
 
 /// Parse TOML text and read a top-level value back as a string for assertions.
 fn doc(text: &str) -> toml_edit::DocumentMut {
@@ -370,4 +370,31 @@ fn a_deeply_nested_target_is_refused_not_aborted() {
     let out = run(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read_to_string(&target).unwrap(), deep);
+}
+
+#[test]
+fn a_declared_negative_zero_replaces_zero_toml() {
+    let written = applies_then_settles(
+        "toml",
+        b"z = 0.0 # keep\napp = true\n",
+        b"z = -0.0\n",
+        &[],
+        "~ z: 0.0 => -0.0\n",
+    );
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "z = -0.0 # keep\napp = true\n"
+    );
+}
+
+#[test]
+fn zero_and_negative_zero_are_two_array_members_toml() {
+    let written = applies_then_settles(
+        "toml",
+        b"a = [0.0]\n",
+        b"a = [-0.0]\n",
+        &["--array-strategy", "set"],
+        "~ a: [0.0] => [0.0,-0.0]\n",
+    );
+    assert_eq!(String::from_utf8(written).unwrap(), "a = [0.0, -0.0]\n");
 }
