@@ -7,8 +7,60 @@
 //!
 //! Warnings are diagnostics only -- they never change the exit code.
 
-use crate::reconcile::KeyPath;
 use crate::value::{Leaf, Node};
+
+/// One step of a [`DiagnosticPath`].
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum Step {
+    /// An object key.
+    Key(String),
+    /// The record of a keyed array, rendered `[field=value]`; `value` is the key
+    /// value's `--diff` token, so a string is already quoted.
+    Selector { field: String, value: String },
+}
+
+/// Where a diagnostic points. Wider than the engine's own
+/// [`crate::reconcile::ManagedPath`], which stops at an array because management
+/// does: this one can also step into a keyed record to name what a warning is
+/// about there. Only ever rendered and compared, never used to manage anything.
+#[derive(Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct DiagnosticPath(Vec<Step>);
+
+impl DiagnosticPath {
+    /// An empty path (the document root).
+    pub(crate) fn new() -> DiagnosticPath {
+        DiagnosticPath(Vec::new())
+    }
+
+    /// Append a step, descending one level.
+    pub(crate) fn push(&mut self, step: Step) {
+        self.0.push(step);
+    }
+
+    /// Drop the last step.
+    pub(crate) fn pop(&mut self) {
+        self.0.pop();
+    }
+
+    /// Prepend a step -- used as a warning bubbles up out of a subtree, gaining its
+    /// parent key (or its record's selector) at each level.
+    pub(crate) fn prepend(&mut self, step: Step) {
+        self.0.insert(0, step);
+    }
+}
+
+impl FromIterator<Step> for DiagnosticPath {
+    fn from_iter<I: IntoIterator<Item = Step>>(steps: I) -> DiagnosticPath {
+        DiagnosticPath(steps.into_iter().collect())
+    }
+}
+
+impl std::ops::Deref for DiagnosticPath {
+    type Target = [Step];
+    fn deref(&self) -> &[Step] {
+        &self.0
+    }
+}
 
 /// Which of a run's inputs a warning is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,13 +84,13 @@ pub enum Warning<L: Leaf> {
     /// contradictorily (a cross-over move). The order is still resolved
     /// deterministically; this records that it was resolved, not agreed.
     ContradictoryReorder {
-        path: KeyPath,
+        path: DiagnosticPath,
         elements: Vec<Node<L>>,
     },
     /// One input array held the same identity twice. Membership is a set, so the
     /// repeats cannot all survive -- and where the value was also pruned, none do.
     DuplicateCollapsed {
-        path: KeyPath,
+        path: DiagnosticPath,
         source: Source,
         /// What repeated: an element's compact value, or a `[field=value]`
         /// selector when the array is matched by merge key.
@@ -58,7 +110,7 @@ pub enum Warning<L: Leaf> {
     /// printed one by one -- a `defaults export` domain stores every date as an
     /// `f64`, so listing each would bury every other diagnostic.
     MoreValuesNormalized {
-        path: KeyPath,
+        path: DiagnosticPath,
         source: Source,
         more: usize,
         because: &'static str,
@@ -67,7 +119,7 @@ pub enum Warning<L: Leaf> {
     /// read with one that it can -- so the reconcile, `--diff` and the write all
     /// agree. `because` completes the sentence "... because <because>".
     ValueNormalized {
-        path: KeyPath,
+        path: DiagnosticPath,
         source: Source,
         from: String,
         to: String,
@@ -76,14 +128,14 @@ pub enum Warning<L: Leaf> {
     /// A byte the output encoding cannot carry, kept because the file already had
     /// it -- so the result loads on macOS but in no conforming parser.
     NonConformingByteKept {
-        path: KeyPath,
+        path: DiagnosticPath,
         character: char,
         because: &'static str,
     },
     /// Normalization made array elements equal that an input distinguished, and
     /// membership is a set, so fewer survived.
     ArrayCollapsed {
-        path: KeyPath,
+        path: DiagnosticPath,
         distinct: usize,
         kept: usize,
         because: &'static str,
@@ -92,7 +144,7 @@ pub enum Warning<L: Leaf> {
 
 impl<L: Leaf> Warning<L> {
     /// The path this warning points at.
-    pub fn path(&self) -> &KeyPath {
+    pub fn path(&self) -> &DiagnosticPath {
         match self {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }
@@ -105,7 +157,7 @@ impl<L: Leaf> Warning<L> {
 
     /// The same, mutably, so a caller can extend it as the warning bubbles up out
     /// of a subtree and gains its parent key at each level.
-    pub fn path_mut(&mut self) -> &mut KeyPath {
+    pub fn path_mut(&mut self) -> &mut DiagnosticPath {
         match self {
             Warning::ContradictoryReorder { path, .. }
             | Warning::DuplicateCollapsed { path, .. }

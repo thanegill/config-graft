@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
-use crate::reconcile::{identity, reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
+use crate::reconcile::{identity, reconcile, ArrayStrategy, ManagedPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
-use crate::warning::{Source, Warning};
+use crate::warning::{DiagnosticPath, Source, Step, Warning};
 use crate::RunArgs;
 
 /// Output preferences as the flags asked for them, before any format settles what
@@ -40,10 +40,40 @@ struct KeyCollapse<'a, L: Leaf> {
 }
 
 /// Per `(array path, key value)`: the [`KeyCollapse`] behind it.
-type KeyCollapses<'a, L> = HashMap<(KeyPath, Node<L>), KeyCollapse<'a, L>>;
+type KeyCollapses<'a, L> = HashMap<(DiagnosticPath, Node<L>), KeyCollapse<'a, L>>;
+
+/// The node a warning's path names, while it names one by keys alone. A selector
+/// names a record by a field rather than by position, so it resolves to nothing.
+fn resolve<'a, L: Leaf>(node: &'a Node<L>, path: &DiagnosticPath) -> Option<&'a Node<L>> {
+    let mut cur = node;
+    for step in path.iter() {
+        cur = match step {
+            Step::Key(key) => cur.as_map()?.get(key)?,
+            Step::Selector { .. } => return None,
+        };
+    }
+    Some(cur)
+}
+
+/// The merge-key candidates the engine used for the array a warning's path names.
+/// A scope is a path of keys, so one through a keyed record matches only the
+/// global candidates.
+fn candidates_at<'o>(merge_keys: &'o MergeKeys, path: &DiagnosticPath) -> &'o [String] {
+    let keys: Option<ManagedPath> = path
+        .iter()
+        .map(|step| match step {
+            Step::Key(key) => Some(key.clone()),
+            Step::Selector { .. } => None,
+        })
+        .collect();
+    keys.map_or(merge_keys.global.as_slice(), |keys| {
+        merge_keys.candidates(&keys)
+    })
+}
 
 /// The originals rewritten into each `(array path, resulting value)`, and why.
-type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
+type Conflations<'a, L> =
+    HashMap<(&'a DiagnosticPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
 
 /// Report arrays where normalization conflated values an input distinguished and
 /// the reconcile then kept fewer copies than there were distinct originals.
@@ -54,10 +84,11 @@ type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>,
 /// conflated and writes anyway, because the same normalization is what keeps TARGET
 /// comparable to BASE.
 ///
-/// Only paths that name an array on both sides can be judged. `KeyPath` addresses
-/// map keys, so a date inside an array of dicts is recorded under the array's key
-/// and is unreachable here; a path the result no longer holds was pruned, which is
-/// a removal rather than a collapse. Both are skipped -- see issue #37.
+/// Only paths that name an array on both sides can be judged. A normalization
+/// record's path stops at an array, so a date inside an array of dicts is recorded
+/// under the array's key and is unreachable here; a path the result no longer holds
+/// was pruned, which is a removal rather than a collapse. Both are skipped -- see
+/// issue #37.
 fn lossy_collapses<L: Leaf>(
     target_rewritten: &[Normalized<L>],
     desired_rewritten: &[Normalized<L>],
@@ -80,9 +111,9 @@ fn lossy_collapses<L: Leaf>(
     }
     // Collected as plain fields so the sort key is total without matching on a
     // variant the list cannot hold.
-    let mut reported: Vec<(KeyPath, usize, usize, &'static str)> = Vec::new();
+    let mut reported: Vec<(DiagnosticPath, usize, usize, &'static str)> = Vec::new();
     for ((path, value), (originals, because)) in &rewritten {
-        let array = |node: &Node<L>| match node.get_path(path) {
+        let array = |node: &Node<L>| match resolve(node, path) {
             Some(Node::Array(a)) => Some(a.iter().filter(|e| e == value).count()),
             _ => None,
         };
@@ -339,8 +370,8 @@ pub(crate) trait Backend {
                     Source::Desired => (&desired, desired_as_read.as_ref(), &desired_risks),
                 };
                 let made = match (
-                    normalized.get_path(path),
-                    as_read.and_then(|node| node.get_path(path)),
+                    resolve(normalized, path),
+                    as_read.and_then(|node| resolve(node, path)),
                 ) {
                     (Some(Node::Array(normalized_elements)), Some(Node::Array(read_elements))) => {
                         debug_assert_eq!(
@@ -351,7 +382,7 @@ pub(crate) trait Backend {
                         let (key, matched) = (key.as_deref(), &*matched);
                         let denotes = |element: &Node<Self::Leaf>| match key {
                             None => element == matched,
-                            Some(field) => identity(element, opts.merge_keys.candidates(path))
+                            Some(field) => identity(element, candidates_at(&opts.merge_keys, path))
                                 .is_some_and(|(f, value)| f == *field && value == *matched),
                         };
                         let originals: HashSet<&Node<Self::Leaf>> = normalized_elements

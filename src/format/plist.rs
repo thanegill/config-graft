@@ -13,10 +13,10 @@ use super::{
     Format, FormatKind, Normalization, Normalized, PlistFormat, ValueCodec, WriteOpts, MAX_DEPTH,
 };
 use crate::error::Error;
-use crate::reconcile::KeyPath;
+use crate::reconcile::ManagedPath;
 use crate::render::{quote, render_f64};
 use crate::value::{canonical_float_bits, Leaf, Node};
-use crate::warning::Warning;
+use crate::warning::{DiagnosticPath, Step, Warning};
 
 /// Apple plist codec.
 pub struct Plist;
@@ -243,12 +243,18 @@ impl Format for Plist {
         if current == CurrentBytes::Xml {
             let mut in_target = Represented::default();
             let mut in_result = Represented::default();
-            collect_represented(target, &mut KeyPath::new(), &mut in_target);
-            collect_represented(result, &mut KeyPath::new(), &mut in_result);
+            collect_represented(target, &mut ManagedPath::new(), &mut in_target);
+            collect_represented(result, &mut ManagedPath::new(), &mut in_result);
             carried = carried_over(&in_target, &in_result);
         }
         let mut kept = Vec::new();
-        check_xml_representable(result, &carried, current, &mut KeyPath::new(), &mut kept)?;
+        check_xml_representable(
+            result,
+            &carried,
+            current,
+            &mut DiagnosticPath::new(),
+            &mut kept,
+        )?;
         Ok(kept)
     }
 
@@ -260,7 +266,7 @@ impl Format for Plist {
             return Ok(None);
         }
         let needs_floor = scan_dates(node).map_err(|segments| {
-            let path: KeyPath = segments.into_iter().rev().collect();
+            let path: DiagnosticPath = segments.into_iter().rev().map(Step::Key).collect();
             Error::PlistDateOutOfRange {
                 path: path.render(Plist::PATH_SEP),
             }
@@ -270,7 +276,7 @@ impl Format for Plist {
         }
         let mut normalized = node.clone();
         let mut rewritten = Vec::new();
-        floor_dates_to_whole_seconds(&mut normalized, &mut KeyPath::new(), &mut rewritten)?;
+        floor_dates_to_whole_seconds(&mut normalized, &mut DiagnosticPath::new(), &mut rewritten)?;
         Ok(Some(Normalization {
             node: normalized,
             rewritten,
@@ -319,13 +325,13 @@ const XML_DATE_RESOLUTION: &str =
 // BASE, and a managed date key could then never be pruned.
 fn floor_dates_to_whole_seconds(
     node: &mut Node<PlistLeaf>,
-    path: &mut KeyPath,
+    path: &mut DiagnosticPath,
     rewritten: &mut Vec<Normalized<PlistLeaf>>,
 ) -> Result<(), Error> {
     match node {
         Node::Map(m) => {
             for (key, value) in m.iter_mut() {
-                path.push_key(key.clone());
+                path.push(Step::Key(key.clone()));
                 floor_dates_to_whole_seconds(value, path, rewritten)?;
                 path.pop();
             }
@@ -435,18 +441,20 @@ impl CurrentBytes {
 /// and values kept apart: a byte the file holds as a key says nothing about writing
 /// it as a value. Paired with the path so pre-existence can be judged by *position*
 /// -- a value still at the place the file had it is one this run is not responsible
-/// for, while the same text somewhere new is.
+/// for, while the same text somewhere new is. The path stops at an array, as a
+/// managed one does, so an element that only moved within its array is still where
+/// the file had it.
 #[derive(Default)]
 struct Represented {
-    keys: HashSet<(KeyPath, String)>,
-    values: HashSet<(KeyPath, String)>,
+    keys: HashSet<(ManagedPath, String)>,
+    values: HashSet<(ManagedPath, String)>,
 }
 
-fn collect_represented(node: &Node<PlistLeaf>, path: &mut KeyPath, into: &mut Represented) {
+fn collect_represented(node: &Node<PlistLeaf>, path: &mut ManagedPath, into: &mut Represented) {
     match node {
         Node::Map(m) => {
             for (key, value) in m {
-                path.push_key(key.clone());
+                path.push(key.clone());
                 if xml_unrepresentable(key).is_some() {
                     into.keys.insert((path.clone(), key.clone()));
                 }
@@ -480,7 +488,7 @@ struct Carried {
 }
 
 fn carried_over(target: &Represented, result: &Represented) -> Carried {
-    let texts = |a: &HashSet<(KeyPath, String)>, b: &HashSet<(KeyPath, String)>| {
+    let texts = |a: &HashSet<(ManagedPath, String)>, b: &HashSet<(ManagedPath, String)>| {
         a.intersection(b).map(|(_, text)| text.clone()).collect()
     };
     Carried {
@@ -500,12 +508,12 @@ fn check_xml_representable(
     node: &Node<PlistLeaf>,
     carried: &Carried,
     current: CurrentBytes,
-    path: &mut KeyPath,
+    path: &mut DiagnosticPath,
     kept: &mut Vec<Warning<PlistLeaf>>,
 ) -> Result<(), Error> {
     let judge = |text: &str,
                  as_key: bool,
-                 path: &KeyPath,
+                 path: &DiagnosticPath,
                  kept: &mut Vec<Warning<PlistLeaf>>|
      -> Result<(), Error> {
         let Some(character) = xml_unrepresentable(text) else {
@@ -533,7 +541,7 @@ fn check_xml_representable(
     match node {
         Node::Map(m) => {
             for (key, value) in m {
-                path.push_key(key.clone());
+                path.push(Step::Key(key.clone()));
                 judge(key, true, path, kept)?;
                 check_xml_representable(value, carried, current, path, kept)?;
                 path.pop();
