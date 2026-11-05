@@ -18,7 +18,7 @@ mod warning;
 use backend::{Backend, ByteBackend, Directory};
 use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
-use reconcile::{ArrayStrategy, MergeKeys};
+use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
 /// directory tree): deep-merge DESIRED into TARGET while preserving keys the app
@@ -219,7 +219,7 @@ pub(crate) fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
         if fields.is_empty() {
             continue;
         }
-        let path: Vec<String> = scope
+        let path: KeyPath = scope
             .into_iter()
             .flat_map(|k| k.split(sep))
             .map(str::trim)
@@ -387,12 +387,28 @@ mod tests {
     use std::collections::HashMap;
 
     use super::parse_merge_keys;
+    use crate::reconcile::Segment;
 
     /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
-    /// `&str` literals so the expectations stay readable.
+    /// `&str` literals and each scope `KeyPath` flattened to its keys, so the
+    /// expectations stay readable.
     fn parsed(specs: &[&str], sep: &str) -> (Vec<String>, HashMap<Vec<String>, Vec<String>>) {
         let keys = parse_merge_keys(&strings(specs), sep);
-        (keys.global, keys.scoped)
+        let scoped = keys
+            .scoped
+            .into_iter()
+            .map(|(path, fields)| {
+                let segments = path
+                    .iter()
+                    .map(|segment| match segment {
+                        Segment::Key(key) => key.clone(),
+                        other => panic!("a scope holds keys only: {other:?}"),
+                    })
+                    .collect();
+                (segments, fields)
+            })
+            .collect();
+        (keys.global, scoped)
     }
 
     fn strings(items: &[&str]) -> Vec<String> {
