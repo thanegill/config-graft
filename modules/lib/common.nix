@@ -116,8 +116,8 @@ in
             };
           }
           // lib.optionalAttrs (format.name == "plist") {
-            # `defaults`/`plutil`/`cfprefsd` are macOS-only; `mkAssertions` guards a
-            # Darwin host when this is set.
+            # `defaults`/`cfprefsd` are macOS-only; `mkAssertions` guards a Darwin
+            # host when this is set.
             cfprefsdDomain = mkOption {
               type = types.nullOr types.str;
               default = null;
@@ -164,9 +164,11 @@ in
     );
 
   # The per-entry reconcile script, shared by every platform. It uses `run` (run a
-  # command) and `_i` (info log): home-manager provides these in its activation
-  # context, and the system module defines pass-through shims. The caller sets
-  # `_prev` (the BASE snapshot path) beforehand and passes the resolved `target`.
+  # command), `_i` (info log) and `_iWarn` (warning): home-manager provides these
+  # in its activation context, and the system module defines pass-through shims.
+  # The caller sets `_prev` (the BASE snapshot path) beforehand and passes the
+  # resolved `target`. `commands` replaces the system tools the script calls by
+  # absolute path, for tests that run it against stubs; the modules never pass it.
   #
   # Shell vars are `_`-prefixed because home-manager runs this inline in its
   # activation shell, shared with every other module's activation code, so bare
@@ -179,27 +181,40 @@ in
       entry,
       desired,
       target,
+      commands ? { },
     }:
+    let
+      defaults = commands.defaults or "/usr/bin/defaults";
+    in
     if format.name == "plist" && entry.cfprefsdDomain != null then
       ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
         _i "Reconciling managed plist domain %s" "$_domain"
 
         # Read the live domain through cfprefsd (not the on-disk file, which may be
-        # staler than cfprefsd's cache). Empty/missing domain -> start from an empty
-        # plist.
+        # staler than cfprefsd's cache). A domain that does not exist yet exports
+        # as an empty dictionary with status 0, so a failed or empty export is never
+        # a first run: grafting onto nothing and importing the result would replace
+        # every key the domain holds with the managed ones alone.
         _live=$(mktemp)
-        /usr/bin/defaults export "$_domain" "$_live" 2>/dev/null || true
-        [[ -s "$_live" ]] || /usr/bin/plutil -create xml1 "$_live"
-
+        if ! ${defaults} export "$_domain" "$_live"; then
+          _iWarn "Skipping plist domain %s: defaults export failed, so it was left untouched" "$_domain"
+        elif [[ ! -s "$_live" ]]; then
+          _iWarn "Skipping plist domain %s: defaults export wrote nothing, so it was left untouched" "$_domain"
         # Graft our settings into the live state, then push it back through cfprefsd
         # so it adopts the merged result. `--plist-format binary` is unconditional
-        # here -- not `binary`-gated, and not left to `follow`: routing this scratch
-        # file through XML would drop XML-illegal bytes and sub-second dates that
-        # both `defaults` ends carry, and an empty domain's scratch file is the
-        # `plutil -create xml1` one above, which `follow` would read as XML.
-        run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-format binary
-        run /usr/bin/defaults import "$_domain" "$_live"
+        # here, not `binary`-gated: XML would drop XML-illegal bytes and sub-second
+        # dates that both `defaults` ends carry, and the flag keeps the write from
+        # depending on what the export produced. A failed graft must not reach the
+        # import, which would rewrite the domain from a stale snapshot; `false`
+        # keeps it fatal under home-manager's errexit.
+        elif ! run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-format binary; then
+          _iWarn "Skipping plist domain %s: config-graft failed, so it was left untouched" "$_domain"
+          rm -f "$_live"
+          false
+        else
+          run ${defaults} import "$_domain" "$_live"
+        fi
         rm -f "$_live"
       ''
     else
@@ -356,9 +371,9 @@ in
             assertion = entry.cfprefsdDomain == null || pkgs.stdenv.hostPlatform.isDarwin;
             message = ''
               ${parent}.${format.optionName}."${name}".cfprefsdDomain is set,
-              but cfprefsd, defaults, and plutil exist only on macOS (this
-              configuration targets ${pkgs.stdenv.hostPlatform.system}). Unset it to
-              edit the plist file in place instead.
+              but cfprefsd and defaults exist only on macOS (this configuration
+              targets ${pkgs.stdenv.hostPlatform.system}). Unset it to edit the
+              plist file in place instead.
             '';
           }
           {

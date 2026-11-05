@@ -145,18 +145,25 @@ let
   '';
 
   # A single activation script for all managed system files. The system activation
-  # environment has none of home-manager's helpers, so define pass-through `run` and
-  # `_i` shims (the reconcile body, shared with home-manager, calls them).
+  # environment has none of home-manager's helpers, so define pass-through `run`,
+  # `_i` and `_iWarn` shims (the reconcile body, shared with home-manager, calls
+  # them).
   activationScript = pkgs.writeShellScript "config-graft-activation" (
     ''
-      # The reconcile body (shared with home-manager) calls `run` and `_i`.
-      # home-manager defines them in its activation context; here there are none, so
-      # shim them: `run` executes its arguments, `_i` prints an info line.
+      # The reconcile body (shared with home-manager) calls `run`, `_i` and
+      # `_iWarn`. home-manager defines them in its activation context; here there
+      # are none, so shim them: `run` executes its arguments, `_i` prints an info
+      # line, `_iWarn` a warning on stderr.
       run() { "$@"; }
       _i() {
         _fmt="$1"
         shift
         printf "config-graft: $_fmt\n" "$@"
+      }
+      _iWarn() {
+        _fmt="$1"
+        shift
+        printf "config-graft: warning: $_fmt\n" "$@" >&2
       }
     ''
     + lib.concatMapStringsSep "\n" (
