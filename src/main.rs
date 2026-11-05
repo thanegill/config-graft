@@ -135,7 +135,7 @@ pub(crate) struct JsonArgs {
     byte: ByteArgs,
 
     /// Output indentation: a number of spaces, or `tab` (default: 2 spaces).
-    #[arg(long, value_name = "N|tab", value_parser = format::parse_indent)]
+    #[arg(long, value_name = "N|tab")]
     indent: Option<Indent>,
 }
 

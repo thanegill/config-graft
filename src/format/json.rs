@@ -236,7 +236,7 @@ impl Format for Json {
     ) -> Result<Vec<u8>, Error> {
         let mut print = json_syntax::print::Options::pretty();
         print.indent = match opts.indent {
-            Indent::Spaces(n) => json_syntax::print::Indent::Spaces(n as u8),
+            Indent::Spaces(n) => json_syntax::print::Indent::Spaces(n),
             Indent::Tab => json_syntax::print::Indent::Tabs(1),
         };
         // The default inlines a short array or object onto one line, which would
