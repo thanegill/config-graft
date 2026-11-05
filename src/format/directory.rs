@@ -30,7 +30,7 @@ use indexmap::IndexMap;
 // which the `Digest` type alias below uses.
 use sha2::{Digest as _, Sha256};
 
-use crate::error::Error;
+use crate::error::{Error, OneFile};
 use crate::reconcile::KeyPath;
 use crate::render::write_separated;
 use crate::value::{Leaf, Node};
@@ -342,6 +342,264 @@ fn find_name_collision<'a>(names: impl Iterator<Item = &'a str>) -> Option<(Stri
     None
 }
 
+/// Whether TARGET's filesystem keeps names that differ only by case apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum CaseSensitivity {
+    /// Ask TARGET's filesystem.
+    #[default]
+    Auto,
+    /// `Foo` and `foo` are two files.
+    Sensitive,
+    /// `Foo` and `foo` are one file.
+    Insensitive,
+}
+
+/// Refuse a reconciled tree that names one file on TARGET's filesystem twice.
+///
+/// Engine keys are exact strings, but a filesystem may store `Foo` and `foo` (or
+/// two Unicode normalizations of one name) as one file. A run holding such a pair
+/// never converges: it rewrites the file every time, `--check` never comes back
+/// clean, and a case-only rename writes the new spelling then prunes the old one,
+/// deleting the file it just wrote. In every mode, a wanted name that already
+/// resolves on disk to an entry listed under another name is refused outright --
+/// an exact, read-only identity check for whatever the filesystem folds. Two
+/// wanted names that are both still absent are compared by `to_lowercase`: `auto`
+/// refuses them when the filesystem folds case, which is asked at most once per
+/// directory per run, and `sensitive` keeps them. `insensitive` refuses any
+/// `to_lowercase` pair among the wanted and existing names.
+pub fn refuse_case_collisions(
+    target: &Path,
+    on_disk: &Node<FsLeaf>,
+    result: &Node<FsLeaf>,
+    sensitivity: CaseSensitivity,
+) -> Result<(), Error> {
+    let mut folding = CaseFolding {
+        sensitivity,
+        answers: std::collections::HashMap::new(),
+    };
+    folding.check_dir(target, Some(on_disk), result)
+}
+
+/// One run's case-collision check, holding what it has asked the filesystem.
+struct CaseFolding {
+    sensitivity: CaseSensitivity,
+    /// Whether case folds, per directory already asked.
+    answers: std::collections::HashMap<PathBuf, bool>,
+}
+
+impl CaseFolding {
+    fn check_dir(
+        &mut self,
+        dir: &Path,
+        on_disk: Option<&Node<FsLeaf>>,
+        result: &Node<FsLeaf>,
+    ) -> Result<(), Error> {
+        let Node::Map(wanted) = result else {
+            return Ok(());
+        };
+        let on_disk = on_disk.and_then(Node::as_map);
+        let existing: std::collections::BTreeSet<&str> = on_disk
+            .into_iter()
+            .flat_map(|entries| entries.keys())
+            .map(String::as_str)
+            .filter(|name| *name != DIR_ATTRS_KEY)
+            .collect();
+        let mut absent = Vec::new();
+        for name in wanted.keys().filter(|name| *name != DIR_ATTRS_KEY) {
+            if existing.contains(name.as_str()) {
+                continue;
+            }
+            if on_disk.is_some() {
+                if let Some(alias) = on_disk_alias(dir, name)? {
+                    return Err(name_collision(dir, alias, name.clone(), OneFile::OnDisk));
+                }
+            }
+            absent.push(name.as_str());
+        }
+        match self.sensitivity {
+            CaseSensitivity::Insensitive => {
+                let names = existing.iter().copied().chain(absent.iter().copied());
+                if let Some((a, b)) = find_name_collision(names) {
+                    return Err(name_collision(dir, a, b, OneFile::Asserted));
+                }
+            }
+            CaseSensitivity::Auto => {
+                if let Some((a, b)) = find_name_collision(absent.iter().copied()) {
+                    if self.folds_case(dir)? {
+                        return Err(name_collision(dir, a, b, OneFile::OnDisk));
+                    }
+                }
+            }
+            CaseSensitivity::Sensitive => {}
+        }
+        for (name, child) in wanted.iter().filter(|(name, _)| *name != DIR_ATTRS_KEY) {
+            let child_on_disk = on_disk.and_then(|entries| entries.get(name));
+            self.check_dir(&dir.join(name), child_on_disk, child)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the filesystem holding `dir` (or its nearest existing ancestor)
+    /// folds case, asking it only the first time.
+    fn folds_case(&mut self, dir: &Path) -> Result<bool, Error> {
+        let asked = nearest_existing_dir(dir).map_err(|source| Error::CaseSensitivityUnknown {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        if let Some(&answer) = self.answers.get(&asked) {
+            return Ok(answer);
+        }
+        let folds = !keeps_case_apart(&asked).map_err(|source| Error::CaseSensitivityUnknown {
+            path: asked.clone(),
+            source,
+        })?;
+        self.answers.insert(asked, folds);
+        Ok(folds)
+    }
+}
+
+fn name_collision(dir: &Path, a: String, b: String, because: OneFile) -> Error {
+    Error::NameCollision {
+        dir: dir.to_path_buf(),
+        a,
+        b,
+        because,
+    }
+}
+
+/// The entry already in `dir` that `name` resolves to on disk under another
+/// spelling, if any: same device and inode, found without writing anything. An
+/// entry whose name folds to the same lowercase is preferred, so a hardlink of
+/// the same file under an unrelated name is not reported instead.
+fn on_disk_alias(dir: &Path, name: &str) -> Result<Option<String>, Error> {
+    let path = dir.join(name);
+    let wanted = match fs::symlink_metadata(&path) {
+        Ok(meta) => (meta.dev(), meta.ino()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::read(&path, e)),
+    };
+    let mut aliases = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| Error::read(dir, e))? {
+        let entry = entry.map_err(|e| Error::read(dir, e))?;
+        let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let meta = entry
+            .metadata()
+            .map_err(|e| Error::read(&entry.path(), e))?;
+        if entry_name != name && (meta.dev(), meta.ino()) == wanted {
+            aliases.push(entry_name);
+        }
+    }
+    let folded = name.to_lowercase();
+    Ok(aliases
+        .iter()
+        .find(|alias| alias.to_lowercase() == folded)
+        .or(aliases.first())
+        .cloned())
+}
+
+/// `path` itself if it is a directory, else its nearest ancestor that is one.
+fn nearest_existing_dir(path: &Path) -> io::Result<PathBuf> {
+    path.ancestors()
+        .map(|ancestor| {
+            if ancestor.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                ancestor
+            }
+        })
+        .find(|ancestor| fs::metadata(ancestor).is_ok_and(|m| m.is_dir()))
+        .map(Path::to_path_buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no existing ancestor directory"))
+}
+
+/// Whether the filesystem holding `dir` keeps names that differ only by case
+/// apart, found without writing anything. macOS answers directly; otherwise an
+/// existing name is looked up with its ASCII letters' case swapped (every folding
+/// filesystem folds ASCII), first among `dir`'s entries, since Linux case-folding
+/// is a per-directory attribute, and then `dir`'s own name in its parent when both
+/// are on one device. An empty `+F` directory under one without the flag
+/// therefore gets its parent's answer.
+fn keeps_case_apart(dir: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    if let Some(answer) = pathconf_case_sensitive(dir) {
+        return Ok(answer);
+    }
+    keeps_case_apart_by_lookup(dir)
+}
+
+/// macOS answers the question directly; `None` when the filesystem doesn't say.
+#[cfg(target_os = "macos")]
+fn pathconf_case_sensitive(dir: &Path) -> Option<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a NUL-terminated string that outlives the call, and
+    // pathconf(2) only reads it.
+    match unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) } {
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    }
+}
+
+fn keeps_case_apart_by_lookup(dir: &Path) -> io::Result<bool> {
+    for entry in fs::read_dir(dir)? {
+        if let Some(name) = entry?.file_name().to_str() {
+            if let Some(apart) = swapped_case_is_another_file(dir, name)? {
+                return Ok(apart);
+            }
+        }
+    }
+    let own_name = dir.file_name().and_then(|n| n.to_str());
+    let parent = dir.parent().map(|p| {
+        if p.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            p
+        }
+    });
+    if let (Some(parent), Some(name)) = (parent, own_name) {
+        let same_device = fs::metadata(dir)?.dev() == fs::metadata(parent)?.dev();
+        if same_device {
+            if let Some(apart) = swapped_case_is_another_file(parent, name)? {
+                return Ok(apart);
+            }
+        }
+    }
+    Err(io::Error::other(
+        "no name here has an ASCII letter to swap the case of, so there is nothing to \
+         look up",
+    ))
+}
+
+/// Look `name` up in `dir` with its ASCII letters' case swapped: `Some(false)` when
+/// that finds the same file, `Some(true)` when it finds nothing or another file,
+/// `None` when the name has no ASCII letter.
+fn swapped_case_is_another_file(dir: &Path, name: &str) -> io::Result<Option<bool>> {
+    let swapped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    if swapped == name {
+        return Ok(None);
+    }
+    let original = fs::symlink_metadata(dir.join(name))?;
+    match fs::symlink_metadata(dir.join(&swapped)) {
+        Ok(meta) => Ok(Some(
+            (meta.dev(), meta.ino()) != (original.dev(), original.ino()),
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Some(true)),
+        Err(e) => Err(e),
+    }
+}
+
 /// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
 /// directory's own attributes).
 fn read_dir(
@@ -359,8 +617,7 @@ fn read_dir(
         .collect::<Result<_, _>>()?;
     paths.sort();
 
-    // Resolve names first (refusing non-UTF-8, skipping our own temp files), then
-    // refuse a case-fold collision before doing any expensive per-entry reads.
+    // Resolve names first, refusing non-UTF-8 and skipping our own temp files.
     let mut children: Vec<(String, PathBuf)> = Vec::with_capacity(paths.len());
     for path in paths {
         match path.file_name().and_then(|n| n.to_str()) {
@@ -370,13 +627,6 @@ fn read_dir(
             Some(n) if n.starts_with(TEMP_PREFIX) => continue,
             Some(n) => children.push((n.to_owned(), path)),
         }
-    }
-    if let Some((a, b)) = find_name_collision(children.iter().map(|(n, _)| n.as_str())) {
-        return Err(Error::NameCollision {
-            dir: dir.to_path_buf(),
-            a,
-            b,
-        });
     }
 
     let mut map = IndexMap::with_capacity(children.len() + 1);
@@ -1138,6 +1388,206 @@ mod tests {
         assert_eq!(find_name_collision(["a", "b", "c"].into_iter()), None);
         assert!(find_name_collision(["Foo", "foo"].into_iter()).is_some());
         assert!(find_name_collision(["a", "A"].into_iter()).is_some());
+    }
+
+    /// Whether `dir`'s filesystem keeps `lower` and `LOWER` apart, found
+    /// independently of the code under test.
+    fn keeps_case_apart_here(dir: &Path) -> bool {
+        fs::write(dir.join("lower"), "").unwrap();
+        let apart = !dir.join("LOWER").exists();
+        fs::remove_file(dir.join("lower")).unwrap();
+        apart
+    }
+
+    fn named_files(names: &[&str]) -> Node<FsLeaf> {
+        Node::Map(
+            names
+                .iter()
+                .map(|name| (name.to_string(), Node::Leaf(leaf("/x", "x", attrs(&[])))))
+                .collect(),
+        )
+    }
+
+    fn in_sub(sub: Node<FsLeaf>) -> Node<FsLeaf> {
+        Node::Map([("sub".to_string(), sub)].into_iter().collect())
+    }
+
+    #[test]
+    fn refuse_case_collisions_follows_the_override_for_new_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = Node::empty_map();
+        let distinct = in_sub(named_files(&["a", "b"]));
+        let folded = in_sub(named_files(&["foo", "Foo"]));
+        let check = |result: &Node<FsLeaf>, sensitivity| {
+            refuse_case_collisions(dir.path(), &empty, result, sensitivity)
+        };
+
+        assert!(check(&distinct, CaseSensitivity::Insensitive).is_ok());
+        assert!(check(&folded, CaseSensitivity::Sensitive).is_ok());
+        match check(&folded, CaseSensitivity::Insensitive) {
+            Err(Error::NameCollision {
+                dir: at,
+                a,
+                b,
+                because,
+            }) => {
+                assert_eq!(at, dir.path().join("sub"));
+                assert_eq!((a.as_str(), b.as_str()), ("foo", "Foo"));
+                assert_eq!(because, OneFile::Asserted);
+            }
+            other => panic!("expected NameCollision, got {other:?}"),
+        }
+        let auto = check(&folded, CaseSensitivity::Auto);
+        if keeps_case_apart_here(dir.path()) {
+            assert!(auto.is_ok());
+        } else {
+            assert!(matches!(auto, Err(Error::NameCollision { .. })));
+        }
+
+        // `insensitive` also pairs a wanted name with one TARGET lists, which
+        // `auto` only does once the lookup finds them on disk.
+        let listed = named_files(&["foo"]);
+        let renamed = named_files(&["Foo"]);
+        let rename =
+            |sensitivity| refuse_case_collisions(dir.path(), &listed, &renamed, sensitivity);
+        assert!(matches!(
+            rename(CaseSensitivity::Insensitive),
+            Err(Error::NameCollision { .. })
+        ));
+        assert!(rename(CaseSensitivity::Auto).is_ok());
+    }
+
+    #[test]
+    fn refuse_case_collisions_finds_an_existing_entry_by_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foo"), "A").unwrap();
+        let on_disk = read_tree(dir.path(), false, POLICY).unwrap().unwrap();
+        let renamed = named_files(&["Foo"]);
+
+        let apart = keeps_case_apart_here(dir.path());
+        // The lookup reads the filesystem itself, so even `sensitive` heeds it.
+        for sensitivity in [CaseSensitivity::Auto, CaseSensitivity::Sensitive] {
+            match refuse_case_collisions(dir.path(), &on_disk, &renamed, sensitivity) {
+                Ok(()) => assert!(apart, "{sensitivity:?}"),
+                Err(Error::NameCollision { a, b, because, .. }) => {
+                    assert!(!apart, "{sensitivity:?}");
+                    assert_eq!((a.as_str(), b.as_str()), ("foo", "Foo"));
+                    assert_eq!(because, OneFile::OnDisk);
+                }
+                Err(other) => panic!("expected NameCollision, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            refuse_case_collisions(dir.path(), &on_disk, &renamed, CaseSensitivity::Insensitive),
+            Err(Error::NameCollision { .. })
+        ));
+    }
+
+    #[test]
+    fn on_disk_alias_prefers_the_name_that_folds_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foo"), "A").unwrap();
+        fs::hard_link(dir.path().join("foo"), dir.path().join("bar")).unwrap();
+        let alias = on_disk_alias(dir.path(), "FOO").unwrap();
+        if keeps_case_apart_here(dir.path()) {
+            assert_eq!(alias, None);
+        } else {
+            assert_eq!(alias.as_deref(), Some("foo"));
+        }
+        assert_eq!(on_disk_alias(dir.path(), "absent").unwrap(), None);
+
+        let distinct = tempfile::tempdir().unwrap();
+        fs::write(distinct.path().join("foo"), "A").unwrap();
+        fs::write(distinct.path().join("bar"), "B").unwrap();
+        assert_eq!(on_disk_alias(distinct.path(), "foo").unwrap(), None);
+    }
+
+    #[test]
+    fn on_disk_alias_reports_a_failed_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let enforced = fs::read_dir(&locked).is_err();
+        let alias = on_disk_alias(&locked, "x");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if !enforced {
+            eprintln!("skipping on_disk_alias_reports_a_failed_lookup: perms not enforced");
+            return;
+        }
+        assert!(matches!(alias, Err(Error::Read { .. })), "{alias:?}");
+    }
+
+    #[test]
+    fn case_lookup_matches_an_independent_check() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Probe"), "").unwrap();
+        assert_eq!(
+            keeps_case_apart_by_lookup(dir.path()).unwrap(),
+            keeps_case_apart_here(dir.path())
+        );
+    }
+
+    #[test]
+    fn case_lookup_without_a_cased_name_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let caseless = dir.path().join("1");
+        fs::create_dir(&caseless).unwrap();
+        assert!(keeps_case_apart_by_lookup(&caseless).is_err());
+        // Only ASCII is swapped: not every folding filesystem folds the rest.
+        let e_acute = char::from_u32(0xe9).unwrap().to_string();
+        fs::write(caseless.join(e_acute), "").unwrap();
+        assert!(keeps_case_apart_by_lookup(&caseless).is_err());
+        fs::write(caseless.join("PROBE"), "").unwrap();
+        assert!(keeps_case_apart_by_lookup(&caseless).is_ok());
+    }
+
+    #[test]
+    fn case_folding_asks_each_directory_once() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Probe"), "").unwrap();
+        let mut folding = CaseFolding {
+            sensitivity: CaseSensitivity::Auto,
+            answers: std::collections::HashMap::new(),
+        };
+        let first = folding.folds_case(&dir.path().join("new/a")).unwrap();
+        assert_eq!(
+            folding.folds_case(&dir.path().join("new/b")).unwrap(),
+            first
+        );
+        assert_eq!(folding.answers.len(), 1);
+        folding.answers.insert(dir.path().to_path_buf(), !first);
+        assert_eq!(folding.folds_case(dir.path()).unwrap(), !first);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pathconf_agrees_with_the_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Probe"), "").unwrap();
+        assert_eq!(
+            pathconf_case_sensitive(dir.path()),
+            Some(keeps_case_apart_by_lookup(dir.path()).unwrap())
+        );
+    }
+
+    #[test]
+    fn nearest_existing_dir_walks_up_to_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("file"), "").unwrap();
+        assert_eq!(nearest_existing_dir(dir.path()).unwrap(), dir.path());
+        assert_eq!(
+            nearest_existing_dir(&dir.path().join("a/b")).unwrap(),
+            dir.path()
+        );
+        assert_eq!(
+            nearest_existing_dir(&dir.path().join("file")).unwrap(),
+            dir.path()
+        );
+        assert_eq!(
+            nearest_existing_dir(Path::new("no-such-dir-here")).unwrap(),
+            Path::new(".")
+        );
     }
 
     #[test]

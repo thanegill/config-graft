@@ -175,6 +175,7 @@ dependencies = [
  "clap",
  "indexmap 2.14.0",
  "json-syntax",
+ "libc",
  "plist",
  "ryu",
  "saphyr",

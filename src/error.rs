@@ -90,12 +90,31 @@ pub enum Error {
     /// Internal invariant: a directory tree contained a node it never can (an array
     /// node, or a non-map root). Kept as a typed error rather than a panic.
     DirectoryTreeInvariant,
-    /// Two sibling names collide when case-folded, so they would map to one file on
-    /// a case-insensitive filesystem -- refused rather than silently landing one.
-    NameCollision { dir: PathBuf, a: String, b: String },
+    /// Two sibling names would be one file; refused rather than landing one.
+    NameCollision {
+        dir: PathBuf,
+        a: String,
+        b: String,
+        because: OneFile,
+    },
+    /// A tree names two new entries that differ only by case, and the filesystem
+    /// at `path` could not be asked whether that makes them one file.
+    CaseSensitivityUnknown {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// A `directory` tree is nested deeper than the supported limit
     /// (refused rather than risk a stack overflow).
     TreeTooDeep(PathBuf),
+}
+
+/// Why [`Error::NameCollision`]'s two names count as one file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OneFile {
+    /// TARGET's filesystem stores them as one file.
+    OnDisk,
+    /// `--case-sensitivity insensitive` says they are.
+    Asserted,
 }
 
 impl Error {
@@ -223,11 +242,21 @@ impl fmt::Display for Error {
             Error::DirectoryTreeInvariant => {
                 f.write_str("internal error: unexpected directory-tree node")
             }
-            Error::NameCollision { dir, a, b } => write!(
+            Error::NameCollision { dir, a, b, because } => write!(
                 f,
-                "entries {a:?} and {b:?} in {} collide when case-folded (they would \
-                 map to one file on a case-insensitive filesystem); refusing",
-                dir.display()
+                "entries {a:?} and {b:?} in {} would be one file {}; refusing",
+                dir.display(),
+                match because {
+                    OneFile::OnDisk => "on this filesystem",
+                    OneFile::Asserted => "under --case-sensitivity insensitive",
+                }
+            ),
+            Error::CaseSensitivityUnknown { path, source } => write!(
+                f,
+                "cannot tell whether the filesystem at {} is case-sensitive \
+                 ({source}), and the tree names two new entries that differ only by \
+                 case; pass --case-sensitivity sensitive or insensitive",
+                path.display()
             ),
             Error::TreeTooDeep(p) => {
                 write!(f, "directory tree nested too deeply at {}", p.display())
@@ -245,7 +274,9 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Write { source, .. } | Error::Read { source, .. } => Some(source),
+            Error::Write { source, .. }
+            | Error::Read { source, .. }
+            | Error::CaseSensitivityUnknown { source, .. } => Some(source),
             Error::StdoutWrite(e) => Some(e),
             Error::PlistSerialize(e) => Some(e),
             _ => None,
