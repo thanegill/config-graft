@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{fchown, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -336,25 +336,65 @@ fn main() {
     }
 }
 
-/// Atomic in-place write: temp file in the same dir, fsync, then rename over the
-/// target. Preserves the target's existing mode (0644 for new files).
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let mode = fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o777)
-        .unwrap_or(0o644);
-    write_atomic_mode(path, content, mode)
+/// A file's owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Owner {
+    uid: u32,
+    gid: u32,
 }
 
-/// Atomic in-place write with an explicit permission mode (temp file in the same
-/// dir, fsync, set mode, then rename over the target).
-fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
+impl Owner {
+    fn of(metadata: &fs::Metadata) -> Owner {
+        Owner {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        }
+    }
+}
+
+/// The owner to give a rewrite's temp file so the file keeps `previous`: only when
+/// the temp file was `written` by root (who alone may hand a file to another owner)
+/// and as someone else.
+fn owner_to_keep(previous: Owner, written: Owner) -> Option<Owner> {
+    let privileged = written.uid == 0;
+    (privileged && written != previous).then_some(previous)
+}
+
+/// Give `file` TARGET's `previous` owner when [`owner_to_keep`] says to, and return
+/// the owner it ends up with.
+fn keep_owner(file: &fs::File, previous: Owner) -> std::io::Result<Owner> {
+    let written = Owner::of(&file.metadata()?);
+    let Some(kept) = owner_to_keep(previous, written) else {
+        return Ok(written);
+    };
+    fchown(file, Some(kept.uid), Some(kept.gid)).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("keeping owner {}:{}: {e}", kept.uid, kept.gid),
+        )
+    })?;
+    Ok(kept)
+}
+
+/// Atomic in-place write: temp file in the same dir, fsync, set its owner and mode,
+/// then rename over the target. Keeps the target's permission bits (0644 for a new
+/// file) and, on a privileged run, its owner and group; a failure to keep them
+/// refuses the write.
+pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let previous = fs::metadata(path).ok();
     let dir = dest_dir(path);
     fs::create_dir_all(&dir)?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
     tmp.write_all(content)?;
     tmp.as_file().sync_all()?;
+    if let Some(target_metadata) = &previous {
+        // Before the mode: chown clears setuid and setgid.
+        keep_owner(tmp.as_file(), Owner::of(target_metadata))?;
+    }
+    let mode = previous
+        .as_ref()
+        .map_or(0o644, |m| m.permissions().mode() & 0o777);
     tmp.as_file()
         .set_permissions(fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
@@ -386,7 +426,7 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 mod tests {
     use std::collections::HashMap;
 
-    use super::parse_merge_keys;
+    use super::{owner_to_keep, parse_merge_keys, Owner};
     use crate::reconcile::Segment;
 
     /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
@@ -468,5 +508,24 @@ mod tests {
             scoped,
             HashMap::from([(strings(&["servers"]), strings(&["name", "id"]))])
         );
+    }
+
+    const ALICE: Owner = Owner { uid: 501, gid: 20 };
+    const ROOT: Owner = Owner { uid: 0, gid: 0 };
+
+    #[test]
+    fn a_privileged_rewrite_hands_the_file_back_to_its_owner() {
+        let root_with_group = Owner { uid: 0, gid: 20 };
+        assert_eq!(owner_to_keep(ALICE, ROOT), Some(ALICE));
+        // BSD gives the temp file the directory's group, so only the uid differs.
+        assert_eq!(owner_to_keep(ALICE, root_with_group), Some(ALICE));
+        assert_eq!(owner_to_keep(root_with_group, ROOT), Some(root_with_group));
+    }
+
+    #[test]
+    fn nothing_to_keep_when_root_already_owns_it_or_the_writer_is_not_root() {
+        assert_eq!(owner_to_keep(ROOT, ROOT), None);
+        assert_eq!(owner_to_keep(Owner { uid: 502, gid: 20 }, ALICE), None);
+        assert_eq!(owner_to_keep(Owner { uid: 501, gid: 80 }, ALICE), None);
     }
 }
