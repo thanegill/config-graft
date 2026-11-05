@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand};
 
 mod backend;
@@ -48,6 +49,12 @@ enum Command {
     Directory(DirArgs),
 }
 
+/// A path argument that may be empty, which clap's own `PathBuf` parser refuses: an
+/// empty BASE means "no BASE".
+fn path_allowing_empty() -> impl TypedValueParser<Value = PathBuf> {
+    OsStringValueParser::new().map(PathBuf::from)
+}
+
 /// Positionals and flags common to every format (byte formats and the directory
 /// tree alike).
 #[derive(Args)]
@@ -61,11 +68,17 @@ pub(crate) struct CommonArgs {
 
     /// Previous snapshot (last applied); enables pruning. Optional. An empty
     /// value is treated the same as omitting it (no pruning).
-    pub(crate) base: Option<String>,
+    #[arg(value_parser = path_allowing_empty())]
+    pub(crate) base: Option<PathBuf>,
 
     /// Previous snapshot, as a flag (alternative to the positional BASE).
-    #[arg(long = "base", value_name = "PATH")]
-    pub(crate) base_flag: Option<String>,
+    #[arg(
+        long = "base",
+        value_name = "PATH",
+        conflicts_with = "base",
+        value_parser = path_allowing_empty()
+    )]
+    pub(crate) base_flag: Option<PathBuf>,
 
     /// Deep-merge only; never delete keys.
     #[arg(long = "no-prune")]
@@ -170,8 +183,8 @@ pub(crate) struct DirArgs {
 pub(crate) struct RunArgs {
     pub(crate) target: PathBuf,
     pub(crate) desired: PathBuf,
-    pub(crate) base: Option<String>,
-    pub(crate) base_flag: Option<String>,
+    pub(crate) base: Option<PathBuf>,
+    pub(crate) base_flag: Option<PathBuf>,
     pub(crate) no_prune: bool,
     pub(crate) stdout: bool,
     pub(crate) diff: bool,

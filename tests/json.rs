@@ -544,6 +544,93 @@ fn empty_base_flag_is_treated_as_no_base() {
 }
 
 #[test]
+fn base_given_both_ways_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    let other = dir.path().join("other.json");
+    fs::write(&target, r#"{"a":1,"b":2}"#).unwrap();
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+    fs::write(&base, r#"{"a":1,"b":2}"#).unwrap();
+    fs::write(&other, r#"{"a":1}"#).unwrap();
+    let before = fs::read(&target).unwrap();
+
+    // An empty value counts as given here too, though it means "no BASE" alone.
+    let (base, other) = (base.to_str().unwrap(), other.to_str().unwrap());
+    for (flagged, positional) in [(base, other), (base, ""), ("", other)] {
+        let out = run(&[
+            "json",
+            "--base",
+            flagged,
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+            positional,
+        ]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{flagged:?} + {positional:?}: {err}"
+        );
+        assert!(
+            err.contains("'--base <PATH>' cannot be used with"),
+            "{flagged:?} + {positional:?}: {err}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), before);
+    }
+}
+
+#[test]
+fn a_non_utf8_base_path_is_accepted_like_target() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join(OsStr::from_bytes(b"base-\xff.json"));
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+    // APFS refuses a name that is not UTF-8, so on macOS the BASE stays absent and
+    // only its acceptance is checked; on Linux it must also be read.
+    let base_written = fs::write(&base, r#"{"a":1,"b":2}"#).is_ok();
+    if cfg!(target_os = "linux") {
+        assert!(base_written, "could not create the non-UTF-8 BASE");
+    }
+    let want = if base_written {
+        serde_json::json!({"a":1})
+    } else {
+        serde_json::json!({"a":1,"b":2})
+    };
+
+    let json = OsStr::new("json");
+    let positional = [
+        json,
+        target.as_os_str(),
+        desired.as_os_str(),
+        base.as_os_str(),
+    ];
+    let flagged = [
+        json,
+        OsStr::new("--base"),
+        base.as_os_str(),
+        target.as_os_str(),
+        desired.as_os_str(),
+    ];
+    for args in [&positional[..], &flagged[..]] {
+        fs::write(&target, r#"{"a":1,"b":2}"#).unwrap();
+        let out = Command::new(BIN).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(v, want, "{args:?}");
+    }
+}
+
+#[test]
 fn sort_keys_orders_output() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
