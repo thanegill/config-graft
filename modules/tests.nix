@@ -6,7 +6,9 @@
 #
 # Almost everything here is a pure evaluation of `lib/common.nix` -- no platform
 # module, no home-manager input -- so the assertions read as plain
-# expected/actual. `binaryTargetRun` is the exception: it runs the real binary.
+# expected/actual. `binaryTargetRun`, `domainRuns` and `runningRuns` are the
+# exceptions: they run the generated script, with the real binary, against files
+# the builder makes.
 {
   lib,
   pkgs,
@@ -25,13 +27,29 @@ let
       format = pkgs.formats.plist { };
       cfprefsdDomain = null;
       binary = false;
+      skipWhileRunning = [ ];
     }
     // overrides;
 
-  script =
-    overrides:
+  # `pkgs` as a Darwin or a Linux host sees it, for the decisions keyed on the
+  # platform: `mkAssertions`' cfprefsd guard and which `pgrep` the script runs.
+  hostPkgs =
+    darwin:
+    pkgs
+    // {
+      stdenv = pkgs.stdenv // {
+        hostPlatform = pkgs.stdenv.hostPlatform // {
+          isDarwin = darwin;
+          system = if darwin then "aarch64-darwin" else "x86_64-linux";
+        };
+      };
+    };
+
+  scriptOn =
+    darwin: overrides:
     common.mkEntryReconcileScript {
       inherit lib;
+      pkgs = hostPkgs darwin;
       format = {
         name = "plist";
       };
@@ -39,6 +57,8 @@ let
       desired = "/desired.plist";
       target = "/target.plist";
     };
+
+  script = scriptOn true;
 
   plistEntryType =
     parent:
@@ -133,7 +153,7 @@ let
         _i() { :; }
         _prev=""
         ${common.mkEntryReconcileScript {
-          inherit lib;
+          inherit lib pkgs;
           format = {
             name = "plist";
           };
@@ -159,6 +179,242 @@ let
         echo ok > $out
       '';
 
+  # The cfprefsd path, run against a stub `defaults` (never the real one) in each
+  # of the ways an export can turn out, under both of the shells it runs in:
+  # home-manager's `set -euo pipefail`, and the system module's script, which sets
+  # none. A failed or empty export must leave the domain alone (issue #59) without
+  # aborting what follows; a missing domain, which exports as an empty dictionary,
+  # is a first run. An export config-graft cannot read must not be imported either:
+  # that stays fatal under home-manager and is skipped by the system script.
+  domainEntry = entry {
+    package = package;
+    settings.a = 1;
+    cfprefsdDomain = "com.example.app";
+    binary = true;
+  };
+
+  # A failing export still leaves a well-formed empty plist behind, so the exit
+  # status is the only thing that can tell it from a missing domain.
+  stubDefaults = pkgs.writeShellScript "stub-defaults" ''
+    echo "$*" >> "$STUB_LOG"
+    case "$1:$STUB_EXPORT" in
+      export:fail)
+        cp "$STUB_DIR/empty.plist" "$3"
+        echo "stub: export failed" >&2
+        exit 1
+        ;;
+      export:nothing) ;;
+      export:missing) cp "$STUB_DIR/empty.plist" "$3" ;;
+      export:existing) cp "$STUB_DIR/existing.plist" "$3" ;;
+      export:corrupt) echo "not a plist" > "$3" ;;
+      import:*) cp "$3" "$STUB_DIR/imported.plist" ;;
+    esac
+  '';
+
+  # A generated reconcile script as an activation runs it: with the helpers
+  # home-manager provides, under `set -euo pipefail` when `STRICT=1` (home-manager)
+  # and without errexit otherwise (the system script), and followed by a marker
+  # that only prints if nothing aborted the run.
+  scenario =
+    name: reconcile:
+    pkgs.writeShellScript name ''
+      if [[ $STRICT == 1 ]]; then set -euo pipefail; fi
+      run() { "$@"; }
+      _i() { :; }
+      _iWarn() {
+        _fmt="$1"
+        shift
+        printf "warning: $_fmt\n" "$@"
+      }
+      _prev=""
+      ${reconcile}
+      echo "reached the next entry"
+    '';
+
+  domainScript =
+    domainEntry:
+    common.mkEntryReconcileScript {
+      inherit lib pkgs;
+      format = {
+        name = "plist";
+      };
+      entry = domainEntry;
+      desired = common.mkDesired {
+        inherit lib pkgs;
+        format = {
+          name = "plist";
+        };
+        name = "com.example.app.plist";
+        entry = domainEntry;
+      };
+      target = "/unused";
+      commands = {
+        defaults = stubDefaults;
+        pgrep = stubPgrep;
+      };
+    };
+
+  domainScenario = scenario "cfprefsd-scenario" (domainScript domainEntry);
+
+  domainRuns =
+    pkgs.runCommand "config-graft-module-cfprefsd"
+      {
+        nativeBuildInputs = [ pkgs.libplist ];
+      }
+      ''
+        export STUB_DIR=$PWD STUB_LOG=$PWD/log
+        printf '<plist version="1.0"><dict/></plist>' > empty.xml
+        printf '<plist version="1.0"><dict><key>appOwned</key><string>x</string></dict></plist>' > existing.xml
+        plistutil -f bin -i empty.xml -o empty.plist
+        plistutil -f bin -i existing.xml -o existing.plist
+
+        fail() { echo "$1 (export=$STUB_EXPORT strict=$STRICT)"; cat out; exit 1; }
+        for STRICT in 1 0; do
+          for STUB_EXPORT in fail nothing missing existing corrupt; do
+            export STRICT STUB_EXPORT
+            rm -f imported.plist imported.xml log
+            status=0
+            ${domainScenario} > out 2>&1 || status=$?
+            if [ "$STUB_EXPORT:$STRICT" = corrupt:1 ]; then
+              [ "$status" != 0 ] || fail "a failed graft did not fail the activation"
+            else
+              [ "$status" = 0 ] || fail "the scenario exited $status"
+              grep -q "reached the next entry" out || fail "the script stopped short"
+            fi
+            case $STUB_EXPORT in
+              fail|nothing|corrupt)
+                [ ! -e imported.plist ] || fail "imported over the domain after a bad export"
+                grep -q "warning: Skipping plist domain com.example.app" out \
+                  || fail "skipped without a warning"
+                ;;
+              missing|existing)
+                [ -e imported.plist ] || fail "a good export was not imported"
+                plistutil -f xml -i imported.plist -o imported.xml
+                grep -q '<key>a</key>' imported.xml || fail "the managed key was not grafted"
+                ;;
+            esac
+            if [ "$STUB_EXPORT" = existing ]; then
+              grep -q '<key>appOwned</key>' imported.xml || fail "the domain's own key was dropped"
+            fi
+          done
+        done
+        echo "cfprefsd export guard ok" > $out
+      '';
+
+  # `skipWhileRunning` on each kind of entry, against a stub `pgrep` answering
+  # `STUB_FIRST` for the first name and `STUB_SECOND` for the second: 0 (a match)
+  # or 2 (pgrep failed) for either must skip the entry, leave its target alone and
+  # name the process that decided it; 1 (no match) for both must reconcile it.
+  stubPgrep = pkgs.writeShellScript "stub-pgrep" ''
+    echo "$*" >> "$STUB_DIR/pgrep.log"
+    case "$3" in
+      MeetingBar) exit "$STUB_FIRST" ;;
+      *) exit "$STUB_SECOND" ;;
+    esac
+  '';
+
+  watched = [
+    "MeetingBar"
+    "Other App"
+  ];
+
+  fileScenario = scenario "running-file-scenario" (
+    common.mkEntryReconcileScript {
+      inherit lib pkgs;
+      format = {
+        name = "json";
+      };
+      entry = entry {
+        inherit package;
+        skipWhileRunning = watched;
+      };
+      desired = pkgs.writeText "desired.json" ''{"a": 1}'';
+      target = "target.json";
+      commands.pgrep = stubPgrep;
+    }
+  );
+
+  runningDomainScenario = scenario "running-cfprefsd-scenario" (
+    domainScript (domainEntry // { skipWhileRunning = watched; })
+  );
+
+  directoryScenario = scenario "running-directory-scenario" (
+    common.mkDirectoryReconcileScript {
+      inherit lib pkgs;
+      entry = {
+        inherit package;
+        source = pkgs.runCommand "running-directory-source" { } ''
+          mkdir $out
+          echo managed > $out/managed.txt
+        '';
+        manageRoot = false;
+        noOwner = true;
+        xattrs = "none";
+        skipWhileRunning = watched;
+      };
+      target = "target-dir";
+      commands.pgrep = stubPgrep;
+    }
+  );
+
+  runningRuns =
+    pkgs.runCommand "config-graft-module-skip-while-running"
+      {
+        nativeBuildInputs = [ pkgs.libplist ];
+      }
+      ''
+        export STUB_DIR=$PWD STUB_LOG=$PWD/log STUB_EXPORT=existing
+        printf '<plist version="1.0"><dict><key>appOwned</key><string>x</string></dict></plist>' > existing.xml
+        plistutil -f bin -i existing.xml -o existing.plist
+
+        fail() { echo "$1 (pgrep=$STUB_FIRST:$STUB_SECOND strict=$STRICT)"; cat out; exit 1; }
+        for STRICT in 1 0; do
+          for statuses in 0:1 2:1 1:0 1:2 1:1; do
+            STUB_FIRST=''${statuses%:*} STUB_SECOND=''${statuses#*:}
+            export STRICT STUB_FIRST STUB_SECOND
+            rm -rf target.json target-dir imported.plist log pgrep.log out
+            echo '{"app": true}' > target.json
+            mkdir target-dir
+            echo app > target-dir/app.txt
+
+            for run in ${fileScenario} ${runningDomainScenario} ${directoryScenario}; do
+              status=0
+              "$run" >> out 2>&1 || status=$?
+              [ "$status" = 0 ] || fail "$run exited $status"
+            done
+            [ "$(grep -c "reached the next entry" out)" = 3 ] || fail "a script stopped short"
+
+            if [ "$statuses" = 1:1 ]; then
+              grep -q '"a"' target.json || fail "the file entry was not reconciled"
+              [ -e imported.plist ] || fail "the domain entry was not reconciled"
+              [ -e target-dir/managed.txt ] || fail "the directory entry was not reconciled"
+              [ "$(grep -c -- '-x -- Other App' pgrep.log)" = 3 ] \
+                || fail "not every name was looked for"
+              continue
+            fi
+
+            [ "$(cat target.json)" = '{"app": true}' ] || fail "the file entry was touched"
+            [ ! -e log ] || fail "defaults ran for a skipped domain entry"
+            [ ! -e target-dir/managed.txt ] || fail "the directory entry was touched"
+            [ "$(grep -c "Skipping" out)" = 3 ] || fail "a skip went unreported"
+            if [ "$STUB_FIRST" = 1 ]; then
+              name="Other App" status=$STUB_SECOND
+            else
+              name=MeetingBar status=$STUB_FIRST
+              [ "$(grep -c -- '-x -- Other App' pgrep.log)" = 0 ] \
+                || fail "pgrep was asked again after a match"
+            fi
+            if [ "$status" = 0 ]; then
+              expected="Skipping com.example.app: $name is running"
+            else
+              expected="Skipping target.json: pgrep exited $status looking for $name"
+            fi
+            grep -qF "warning: $expected" out || fail "no \"$expected\" warning"
+          done
+        done
+        echo "skipWhileRunning ok" > $out
+      '';
+
   # A generator distinguishable from the default only by what it emits. Under the
   # old `builtins.toJSON` path the entry's `format` was bypassed, so this produced
   # a derivation identical to the default one -- which is exactly the regression
@@ -177,34 +433,11 @@ let
       formatName ? "plist",
       darwin ? true,
     }:
-    let
-      hostPkgs =
-        if darwin then
-          pkgs
-          // {
-            stdenv = pkgs.stdenv // {
-              hostPlatform = pkgs.stdenv.hostPlatform // {
-                isDarwin = true;
-                system = "aarch64-darwin";
-              };
-            };
-          }
-        else
-          pkgs
-          // {
-            stdenv = pkgs.stdenv // {
-              hostPlatform = pkgs.stdenv.hostPlatform // {
-                isDarwin = false;
-                system = "x86_64-linux";
-              };
-            };
-          };
-    in
     map (a: a.message) (
       builtins.filter (a: !a.assertion) (
         common.mkAssertions {
           inherit lib;
-          pkgs = hostPkgs;
+          pkgs = hostPkgs darwin;
           parent = "home";
           format = {
             name = formatName;
@@ -220,13 +453,14 @@ let
   directoryFlags =
     overrides:
     common.mkDirectoryReconcileScript {
-      inherit lib;
+      inherit lib pkgs;
       entry = {
         package = pkgs.hello;
         source = "/source";
         manageRoot = false;
         noOwner = false;
         xattrs = "all";
+        skipWhileRunning = [ ];
       }
       // overrides;
       target = "/target";
@@ -421,6 +655,37 @@ let
       expected = "config.environment.managed.package";
       actual = packageDefaultText (directoryEntryType "environment");
     }
+    {
+      name = "an entry without skipWhileRunning looks for no process";
+      expected = false;
+      actual =
+        lib.hasInfix "pgrep" (script { })
+        || lib.hasInfix "pgrep" (script {
+          cfprefsdDomain = "com.example.app";
+        })
+        || lib.hasInfix "pgrep" (directoryFlags { });
+    }
+    {
+      # macOS's pgrep matches the basename of argv[0] in full.
+      name = "on macOS the whole name is matched, as a literal, by /usr/bin/pgrep";
+      expected = true;
+      actual = lib.hasInfix "/usr/bin/pgrep -x -- 'Long\\.Process-Name\\.App' " (
+        scriptOn true {
+          skipWhileRunning = [ "Long.Process-Name.App" ];
+        }
+      );
+    }
+    {
+      # Linux's matches the kernel comm, which keeps 15 bytes.
+      name = "on Linux the name is cut to 15 bytes for procps' pgrep";
+      expected = true;
+      actual =
+        let
+          linuxScript = scriptOn false { skipWhileRunning = [ "Long.Process-Name.App" ]; };
+        in
+        lib.hasInfix (builtins.unsafeDiscardStringContext "${pkgs.procps}/bin/pgrep -x -- 'Long\\.Process-Na' ") linuxScript
+        && !(lib.hasInfix "/usr/bin/pgrep" linuxScript);
+    }
   ];
 
   failures = builtins.filter (c: c.actual != c.expected) cases;
@@ -432,4 +697,6 @@ assert lib.assertMsg (failures == [ ]) (
 pkgs.runCommand "config-graft-module-tests" { } ''
   echo "${toString (builtins.length cases)} module assertions passed" > $out
   cat ${binaryTargetRun} >> $out
+  cat ${domainRuns} >> $out
+  cat ${runningRuns} >> $out
 ''
