@@ -4,13 +4,13 @@
 # `--plist-format binary` would reintroduce issue #33 with the Rust suite fully
 # green (the engine's floor never runs on a binary write).
 #
-# Almost everything here is a pure evaluation of `lib/common.nix` -- no platform
-# module, no home-manager input -- so the assertions read as plain
-# expected/actual. `binaryTargetRun`, `homeFileMigrationRun`, `domainRuns`,
-# `runningRuns` and `restartRuns` are the exceptions: they run the generated
-# script, with the real binary, against files the builder makes. `hmActivation`
-# evaluates the home-manager module itself, with home-manager's own pieces
-# stubbed.
+# Almost everything here is a pure evaluation of `lib/common.nix`, so the
+# assertions read as plain expected/actual. `binaryTargetRun`,
+# `homeFileMigrationRun`, `domainRuns`, `runningRuns`, `restartRuns` and
+# `failingSystemRun` are the exceptions: they run the generated script, with the
+# real binary, against files the builder makes. `hmActivation` evaluates the
+# home-manager module itself, with home-manager's own pieces stubbed, and
+# `failingSystemRun` evaluates the system module itself.
 {
   lib,
   pkgs,
@@ -237,7 +237,8 @@ let
   # none. A failed or empty export must leave the domain alone (issue #59) without
   # aborting what follows; a missing domain, which exports as an empty dictionary,
   # is a first run. An export config-graft cannot read must not be imported either:
-  # that stays fatal under home-manager and is skipped by the system script.
+  # that stays fatal under home-manager, and the system script skips the domain
+  # while its ERR trap counts the failure (see `failingSystemRun`).
   domainEntry = entry {
     package = package;
     settings.a = 1;
@@ -728,6 +729,109 @@ let
         echo "whileRunning.restart ok" > $out
       '';
 
+  # The system module's activation script, from a real evaluation of
+  # `lib/system.nix` with `managed` as its `environment` settings, so what runs is
+  # the wiring around the shared reconcile bodies: the shims, the BASE probe and the
+  # failure handling. The few platform options the module sets are declared here as
+  # plain sinks.
+  systemActivation =
+    managed:
+    (lib.evalModules {
+      modules = [
+        (
+          { config, ... }:
+          import ./lib/system.nix {
+            inherit config lib pkgs;
+            defaultPackage = package;
+            activationWiring = script: { config-graft = script; };
+          }
+        )
+        {
+          options = {
+            system.activationScripts = lib.mkOption {
+              type = lib.types.attrsOf lib.types.raw;
+              default = { };
+            };
+            system.systemBuilderCommands = lib.mkOption {
+              type = lib.types.lines;
+              default = "";
+            };
+            assertions = lib.mkOption {
+              type = lib.types.listOf lib.types.raw;
+              default = [ ];
+            };
+            environment.etc = lib.mkOption {
+              type = lib.types.attrsOf lib.types.raw;
+              default = { };
+            };
+          };
+        }
+        { environment = managed; }
+      ];
+    }).config.system.activationScripts.config-graft;
+
+  # A failing entry fails the system activation without stopping the entries after
+  # it: NixOS reports the snippet and fails the switch, nix-darwin aborts at the
+  # end. The script is the module's own, copied with `/usr/bin/defaults` and
+  # `pgrep` pointed at the stubs. `bad.json` sorts first and holds no JSON, so
+  # config-graft refuses it; a cfprefsd graft that fails counts as a failure, while
+  # a skip and a pgrep probe that finds nothing do not.
+  systemScenario = systemActivation {
+    managedJson = {
+      "bad.json".settings.a = 1;
+      "good.json".settings.a = 1;
+    };
+    managedPlist."com.example.app.plist" = {
+      cfprefsdDomain = "com.example.app";
+      settings.a = 1;
+      whileRunning.skip = [ "MeetingBar" ];
+    };
+  };
+
+  failingSystemRun =
+    pkgs.runCommand "config-graft-module-system-failure"
+      {
+        nativeBuildInputs = [ pkgs.libplist ];
+      }
+      ''
+        export STUB_DIR=$PWD STUB_LOG=$PWD/log STUB_FIRST=1
+        printf '<plist version="1.0"><dict/></plist>' > empty.xml
+        plistutil -f bin -i empty.xml -o empty.plist
+        printf '<plist version="1.0"><dict><key>appOwned</key><string>x</string></dict></plist>' > existing.xml
+        plistutil -f bin -i existing.xml -o existing.plist
+        sed -e 's|/usr/bin/defaults|${stubDefaults}|g' \
+          -e 's|[^ ]*/bin/pgrep |${stubPgrep} |g' ${systemScenario} > activate
+        chmod +x activate
+        grep -q '${stubPgrep} -x' activate || { echo "pgrep was not stubbed"; exit 1; }
+
+        fail() { echo "$1"; cat out; exit 1; }
+        expect() {
+          echo '{"app": true}' > good.json
+          rm -f imported.plist
+          status=0
+          ./activate > out 2>&1 || status=$?
+          [ "$status" = "$1" ] || fail "$2: exited $status, expected $1"
+          grep -q '"a"' good.json || fail "$2: good.json was not reconciled"
+        }
+
+        echo 'not json' > bad.json
+        STUB_EXPORT=existing expect 1 "a refused file entry"
+        [ "$(cat bad.json)" = 'not json' ] || fail "the refused target was touched"
+        [ -e imported.plist ] || fail "the domain after the failure was not reconciled"
+        grep -q "a managed entry failed" out || fail "the failure went unreported"
+
+        echo '{"app": true}' > bad.json
+        STUB_EXPORT=existing expect 0 "a clean run"
+        [ -e imported.plist ] || fail "a clean run did not reconcile the domain"
+        STUB_EXPORT=corrupt expect 1 "a failed cfprefsd graft"
+        [ ! -e imported.plist ] || fail "a failed cfprefsd graft was imported"
+        STUB_EXPORT=fail expect 0 "a skipped export"
+        [ ! -e imported.plist ] || fail "a skipped export was imported"
+        STUB_FIRST=0 STUB_EXPORT=existing expect 0 "a skip while running"
+        [ ! -e imported.plist ] || fail "a running app's domain was reconciled"
+        echo "system failure handling ok" > $out
+      '';
+
   # A generator distinguishable from the default only by what it emits. Under the
   # old `builtins.toJSON` path the entry's `format` was bypassed, so this produced
   # a derivation identical to the default one -- which is exactly the regression
@@ -1125,4 +1229,5 @@ pkgs.runCommand "config-graft-module-tests" { } ''
   cat ${runningRuns} >> $out
   cat ${homeFileMigrationRun} >> $out
   cat ${restartRuns} >> $out
+  cat ${failingSystemRun} >> $out
 ''

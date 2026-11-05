@@ -157,8 +157,16 @@ let
   # environment has none of home-manager's helpers, so define pass-through `run`,
   # `_i` and `_iWarn` shims (the reconcile body, shared with home-manager, calls
   # them).
+  #
+  # A failing entry must not stop the ones after it, yet the activation has to see
+  # the failure: the ERR trap records it, every entry still runs, and the script
+  # exits non-zero at the end. A failure the body handles in a condition (a skipped
+  # entry, a `||`-guarded probe) never trips the trap.
   activationScript = pkgs.writeShellScript "config-graft-activation" (
     ''
+      _failed=0
+      trap '_failed=1' ERR
+
       # The reconcile body (shared with home-manager) calls `run`, `_i` and
       # `_iWarn`. home-manager defines them in its activation context; here there
       # are none, so shim them: `run` executes its arguments, `_i` prints an info
@@ -185,6 +193,12 @@ let
       }
     ) entries
     + lib.concatMapStringsSep "\n" (e: prevSnapshot e.snapshotRel + e.script) directoryEntries
+    + ''
+      if (( _failed )); then
+        printf "config-graft: a managed entry failed (see above); the others still ran\n" >&2
+        exit 1
+      fi
+    ''
   );
 in
 {

@@ -28,17 +28,15 @@ let
 
         A skipped entry still advances BASE. When the activation warns and
         carries on -- a {option}`skip` match (or a failed {command}`pgrep`), a
-        blocked {option}`restart`, a failed or empty {command}`defaults export`,
-        or in the system activation a graft or {command}`defaults import` that
-        fails while it carries on -- the generation still records the entry's
-        settings as the ones last applied. A key removed from the settings in
-        that generation is then never pruned: it stays in the app's
-        configuration until it is removed by hand. A failure that ends the
-        activation (every failed graft under home-manager; under nix-darwin, one
-        that reaches the activation script's exit status) leaves BASE where it
-        was, and the next activation retries against it -- on nix-darwin only
-        until a reboot, since {command}`darwin-rebuild` has already pointed the
-        system profile at the failed generation and boot re-links
+        blocked {option}`restart`, or a failed or empty {command}`defaults
+        export` -- the generation still records the entry's settings as the ones
+        last applied. A key removed from the settings in that generation is then
+        never pruned: it stays in the app's configuration until it is removed by
+        hand. A failed graft or {command}`defaults import` fails the activation,
+        which under home-manager and nix-darwin ends it before BASE moves, so the
+        next activation retries against the old one -- on nix-darwin only until
+        a reboot, since {command}`darwin-rebuild` has already pointed the system
+        profile at the failed generation and boot re-links
         {file}`/run/current-system` to it. NixOS never ends early: it records a
         failed snippet and carries on, so there every skip and failure advances
         BASE. This is deliberate: BASE comes from the previous generation rather
@@ -128,9 +126,8 @@ let
   # The body runs in a subshell with errexit on, so it stops at its first failure
   # and its status can be taken: home-manager's own errexit is lifted around the
   # subshell, or the failure would end the activation before the relaunch. A
-  # failed reconcile still relaunches, then fails with `false`. That stops
-  # home-manager; in the system script it reaches the activation only as the
-  # script's last command.
+  # failed reconcile still relaunches, then fails with `false`, which stops
+  # home-manager and trips the system script's ERR trap.
   guardRestart =
     {
       lib,
@@ -493,8 +490,9 @@ in
         # here, not `binary`-gated: XML would drop XML-illegal bytes and sub-second
         # dates that both `defaults` ends carry, and the flag keeps the write from
         # depending on what the export produced. A failed graft must not reach the
-        # import, which would rewrite the domain from a stale snapshot; `false`
-        # keeps it fatal under home-manager's errexit.
+        # import, which would rewrite the domain from a stale snapshot. `false` is
+        # what reports it: fatal under home-manager, counted by the system script's
+        # ERR trap (the failed `run` sits in a condition, which doesn't).
         elif ! run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-format binary; then
           _iWarn "Skipping plist domain %s: config-graft failed, so it was left untouched" "$_domain"
           rm -f "$_live"
