@@ -278,6 +278,26 @@ in
   # `source` is inert.
   isActive = entry: entry.settings != { } || entry.source != null;
 
+  # What the system modules hand `defaults` for a `cfprefsdDomain`. As root,
+  # `defaults <id>` addresses root's own user domain, which only root's processes
+  # read (/private/var/root/Library/Preferences); the system-wide (any-user) domain
+  # is the file under /Library/Preferences, which `defaults` takes as a path.
+  # Anything already holding a `/` is taken to be a path and passed through.
+  systemDomain =
+    domain:
+    if builtins.match ".*/.*" domain != null then
+      domain
+    else if
+      builtins.elem domain [
+        "NSGlobalDomain"
+        "-g"
+        "-globalDomain"
+      ]
+    then
+      "/Library/Preferences/.GlobalPreferences"
+    else
+      "/Library/Preferences/${domain}";
+
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
   # generated from `settings` by the entry's `pkgs.formats` generator. A plist entry
   # with `binary = true` runs that same generator and converts its output to a binary

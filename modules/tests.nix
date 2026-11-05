@@ -821,8 +821,13 @@ let
         grep -q "a managed entry failed" out || fail "the failure went unreported"
 
         echo '{"app": true}' > bad.json
+        rm -f log
         STUB_EXPORT=existing expect 0 "a clean run"
         [ -e imported.plist ] || fail "a clean run did not reconcile the domain"
+        for verb in export import; do
+          grep -q "^$verb /Library/Preferences/com.example.app " log \
+            || fail "$verb did not address the system-wide domain by path"
+        done
         STUB_EXPORT=corrupt expect 1 "a failed cfprefsd graft"
         [ ! -e imported.plist ] || fail "a failed cfprefsd graft was imported"
         STUB_EXPORT=fail expect 0 "a skipped export"
@@ -1098,6 +1103,34 @@ let
         cfprefsdDomain = "com.example.app";
         binary = false;
       };
+    }
+    {
+      # Run as root, a bare id would be root's own user domain.
+      name = "a system cfprefsdDomain id becomes its /Library/Preferences path";
+      expected = [
+        "/Library/Preferences/com.example.app"
+        "/Library/Preferences/.GlobalPreferences"
+        "/Library/Preferences/.GlobalPreferences"
+        "/Library/Preferences/.GlobalPreferences"
+        "/Library/Preferences/Custom/com.example.app"
+        "relative/com.example.app"
+      ];
+      actual = map common.systemDomain [
+        "com.example.app"
+        "NSGlobalDomain"
+        "-g"
+        "-globalDomain"
+        "/Library/Preferences/Custom/com.example.app"
+        "relative/com.example.app"
+      ];
+    }
+    {
+      # home-manager runs as the user, whose own domain a bare id already is.
+      name = "a home-manager cfprefsdDomain stays a bare id";
+      expected = true;
+      actual = lib.hasInfix "_domain=com.example.app\n" (script {
+        cfprefsdDomain = "com.example.app";
+      });
     }
     {
       name = "a home entry documents its package default as the module's";

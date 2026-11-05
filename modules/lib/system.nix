@@ -10,8 +10,9 @@
 # step on both platforms), so the prior snapshot is reachable at
 # `/run/current-system/<snapshot>`. Absent on the first switch (or for a newly added
 # entry) -> no pruning. Plist entries may set `cfprefsdDomain` to reconcile through
-# `cfprefsd` (as root, so system/global domains) instead of editing the file;
-# a build-time assertion requires a Darwin host.
+# `cfprefsd` instead of editing the file, addressed by path as the system-wide
+# domain under /Library/Preferences (`systemDomain`); a build-time assertion
+# requires a Darwin host.
 let
   configGraftLib = import ./.;
   inherit (configGraftLib) formats;
@@ -63,12 +64,16 @@ let
           activation instead of by editing {option}`target` in place:
           {command}`defaults export` reads the live domain, {command}`config-graft`
           deep-merges and prunes, and {command}`defaults import` writes it back, so
-          the change isn't lost to cfprefsd's in-memory cache. Runs as root, so it
-          targets system/global domains under {file}`/Library/Preferences`. Name
-          an app that writes the domain in {option}`whileRunning.restart` to quit
-          and relaunch it around the reconcile (as {option}`system.primaryUser`),
-          or its process in {option}`whileRunning.skip` to leave the domain alone
-          while it runs. {option}`target` is ignored in this mode.
+          the change isn't lost to cfprefsd's in-memory cache. A domain id is
+          reconciled as the system-wide (any-user) domain: `com.example.app` as
+          {file}`/Library/Preferences/com.example.app`, and `NSGlobalDomain` as
+          {file}`/Library/Preferences/.GlobalPreferences`. Anything holding a `/`
+          is used as a path, as given. A user's own value for a key still
+          overrides it for that user. Name an app that writes the domain in
+          {option}`whileRunning.restart` to quit and relaunch it around the
+          reconcile (as {option}`system.primaryUser`), or its process in
+          {option}`whileRunning.skip` to leave the domain alone while it runs.
+          {option}`target` is ignored in this mode.
         '';
       };
     };
@@ -188,7 +193,12 @@ let
       prevSnapshot e.snapshotRel
       + configGraftLib.mkEntryReconcileScript {
         inherit lib pkgs restartUser;
-        inherit (e) format entry desired;
+        inherit (e) format desired;
+        entry =
+          if e.entry.cfprefsdDomain or null != null then
+            e.entry // { cfprefsdDomain = configGraftLib.systemDomain e.entry.cfprefsdDomain; }
+          else
+            e.entry;
         target = e.entry.target;
       }
     ) entries
