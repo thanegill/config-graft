@@ -229,6 +229,16 @@ impl Default for Indent {
     }
 }
 
+/// How `--help` shows an indent: the spelling `FromStr` accepts.
+impl fmt::Display for Indent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Indent::Spaces(n) => write!(f, "{n}"),
+            Indent::Tab => f.write_str("tab"),
+        }
+    }
+}
+
 /// A `--indent` value: a non-negative number of spaces, or `tab`. clap parses the
 /// flag through this, so an invalid value is a usage error (exit 2).
 impl FromStr for Indent {
