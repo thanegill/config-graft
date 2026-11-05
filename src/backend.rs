@@ -20,7 +20,7 @@ use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normal
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
-use crate::RunArgs;
+use crate::{symlink, RunArgs};
 
 /// Output preferences as the flags asked for them, before any format settles what
 /// depends on the target's bytes.
@@ -228,6 +228,12 @@ pub(crate) trait Backend {
         output: Option<&[u8]>,
     ) -> Result<(), Error>;
 
+    /// Refuse now what [`Backend::apply`] would refuse before writing anything, so a
+    /// `--check` with a change pending predicts the apply. Default: nothing to refuse.
+    fn preflight_write(_args: &RunArgs) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// The reconcile-run driver: read the three inputs, reconcile, then `--diff` /
     /// `--check` / `--stdout` / apply. Provided -- backends supply only the I/O ends
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
@@ -379,11 +385,11 @@ pub(crate) trait Backend {
         let Prepared { output, changed } = Self::prepare(args, write_opts, &target, &result)?;
 
         if args.check {
-            return Ok(if changed {
-                Outcome::WouldChange
-            } else {
-                Outcome::Applied
-            });
+            if !changed {
+                return Ok(Outcome::Applied);
+            }
+            Self::preflight_write(args)?;
+            return Ok(Outcome::WouldChange);
         }
         if args.stdout {
             // Only the byte formats expose `--stdout`; the directory subcommand has
@@ -490,10 +496,19 @@ impl<F: Format> Backend for ByteBackend<F> {
         output: Option<&[u8]>,
     ) -> Result<(), Error> {
         let output = output.expect("byte backend always produces output");
-        crate::write_atomic(&args.target, output).map_err(|e| Error::Write {
-            path: args.target.clone(),
-            source: e,
+        let Some(resolved) = symlink::write_path(&args.target, args.symlinks)? else {
+            return crate::write_atomic(&args.target, output)
+                .map_err(|e| Error::write(&args.target, e));
+        };
+        crate::write_atomic(&resolved, output).map_err(|source| Error::WriteThroughSymlink {
+            link: args.target.clone(),
+            resolved,
+            source,
         })
+    }
+
+    fn preflight_write(args: &RunArgs) -> Result<(), Error> {
+        symlink::write_path(&args.target, args.symlinks).map(|_| ())
     }
 }
 
