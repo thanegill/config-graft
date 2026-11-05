@@ -829,10 +829,10 @@ fn a_collapse_across_target_and_desired_warns() {
 
 #[test]
 fn normalization_does_not_warn_where_nothing_is_dropped() {
-    // The four shapes the check cannot judge, and so must stay quiet about: a scalar
-    // date on both sides, a date inside an array of dicts (unreachable by key path),
-    // a date inside an array of arrays (filed under the outer array, which holds no
-    // copy of it), and a managed array the user removed from DESIRED.
+    // Four shapes where the floor conflates values and nothing is lost by it: a
+    // scalar date on both sides, where DESIRED simply wins; an array of dicts and
+    // an array of arrays, both unmanaged and so copied through with every element;
+    // and a managed array the user removed from DESIRED, which is pruned.
     let dir = tempfile::tempdir().unwrap();
     let quiet = |name: &str,
                  target_value: plist::Value,
@@ -1080,8 +1080,8 @@ fn collapse_stderr(key: &str) -> Vec<u8> {
 
 #[test]
 fn a_control_bearing_key_keeps_its_collapse_diagnostic() {
-    // The reported path escapes at render time only; escaping the segments would
-    // make `get_path` miss the array and silently drop this warning.
+    // The reported path escapes at render time only: the path is built from the
+    // real key, which is what the collapse check walks the inputs by.
     let stderr = collapse_stderr(&format!("a{}b", char::from(127u8)));
     let err = String::from_utf8_lossy(&stderr);
     assert!(
@@ -1188,7 +1188,7 @@ fn a_date_outside_the_years_xml_can_spell_is_refused_not_a_panic() {
 #[test]
 fn a_duplicate_is_reported_only_when_the_file_really_held_one() {
     // Normalization can make elements equal that the file distinguished, so the
-    // duplicate report must subtract the equalities it introduced -- but not the
+    // duplicate report must not count those as repeats -- but must still count the
     // repeats the file genuinely held. Only the arrays and the strategy vary.
     let dir = tempfile::tempdir().unwrap();
     let whole = || vec![instant(1_000_000, 0)];
@@ -1361,13 +1361,13 @@ fn a_key_collision_made_by_the_floor_is_reported_as_a_collapse() {
         let count = |needle: &str| err.lines().filter(|l| l.contains(needle)).count();
         let counts = (
             count("times; array membership"),
-            count("values that normalizing made identical"),
+            count("keys that normalizing made"),
         );
         (err, counts)
     };
-    let reports = |name: &str, target_ids: &[(u64, u32)]| {
-        run_case(name, target_ids, &[(1_000_000, 0)], None).1
-    };
+    // DESIRED's record is keyed on another second, so it matches none of TARGET's.
+    let reports =
+        |name: &str, target_ids: &[(u64, u32)]| run_case(name, target_ids, &[other], None).1;
 
     let at = |nanos| (1_000_000, nanos);
     assert_eq!(
@@ -1404,7 +1404,7 @@ fn a_key_collision_made_by_the_floor_is_reported_as_a_collapse() {
         None,
     );
     assert_eq!(counts, (0, 1));
-    assert!(err.contains("held 4 values"), "{err}");
+    assert!(err.contains("held 4 keys"), "{err}");
     // An input's genuine repeat still counts toward the other input's collapse.
     let (err, counts) = run_case(
         "genuine-and-floored",
@@ -1413,7 +1413,12 @@ fn a_key_collision_made_by_the_floor_is_reported_as_a_collapse() {
         None,
     );
     assert_eq!(counts, (1, 1));
-    assert!(err.contains("held 3 values"), "{err}");
+    assert!(err.contains("held 3 keys"), "{err}");
+    // A key from each input that only the floor made equal: the merge matches the
+    // two records and folds them into one, which is a collapse too.
+    let (err, counts) = run_case("matched-across", &[at(700_000_000)], &[at(0)], None);
+    assert_eq!(counts, (0, 1));
+    assert!(err.contains("held 2 keys"), "{err}");
 }
 
 #[test]
@@ -1923,4 +1928,432 @@ fn a_refusal_quotes_a_key_holding_a_bracket() {
 
     let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains(r#"x:"[b]""#), "got: {err}");
+}
+
+/// Stderr of a successful XML run over `target` and `desired` (and `base`, if any),
+/// each written as binary so its sub-second dates survive until the run floors
+/// them, with `flags` ahead of the paths. A run that floors nothing fails, since a
+/// test about what the floor costs would then pass vacuously.
+fn xml_run(
+    name: &str,
+    target: plist::Value,
+    desired: plist::Value,
+    base: Option<plist::Value>,
+    flags: &[&str],
+) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let target_path = dir.path().join(format!("{name}-t.plist"));
+    let desired_path = dir.path().join(format!("{name}-d.plist"));
+    let base_path = dir.path().join(format!("{name}-b.plist"));
+    target.to_file_binary(&target_path).unwrap();
+    desired.to_file_binary(&desired_path).unwrap();
+    let mut args = vec!["plist", "--plist-format", "xml"];
+    args.extend(flags);
+    args.push(target_path.to_str().unwrap());
+    args.push(desired_path.to_str().unwrap());
+    if let Some(base) = base {
+        base.to_file_binary(&base_path).unwrap();
+        args.push(base_path.to_str().unwrap());
+    }
+    let out = run(&args);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{name} failed the run:\n{err}");
+    assert!(
+        err.contains("was read as"),
+        "{name} floored nothing, so it tests nothing:\n{err}"
+    );
+    err
+}
+
+/// The collapse warnings in `stderr`.
+fn collapses(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|line| line.contains("that normalizing made"))
+        .collect()
+}
+
+/// The duplicate warnings in `stderr`.
+fn repeats(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|line| line.contains("times; array membership"))
+        .collect()
+}
+
+/// The tail every date-floor warning ends with.
+const FLOOR: &str = "an XML plist carries dates at one-second resolution; pass \
+                     --plist-format binary to keep the full value";
+
+/// The instant every fractional date in these tests floors to, as `--diff` and the
+/// warnings render it.
+const FLOORED: &str = "<date 1970-01-12T13:46:40Z>";
+
+#[test]
+fn a_collapse_inside_an_array_of_dicts_warns() {
+    // What `defaults export` produces most often (issue #37): the dates sit one
+    // level inside the array, so the elements membership is a set over are the
+    // dicts. Both floor to the same dict, and DESIRED's is the other survivor.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![(
+        "k",
+        plist::Value::Array(vec![
+            pdict(vec![("d", instant(1_000_000, 300_000_000))]),
+            pdict(vec![("d", instant(1_000_000, 700_000_000))]),
+        ]),
+    )])
+    .to_file_binary(&target)
+    .unwrap();
+    pdict(vec![(
+        "k",
+        plist::Value::Array(vec![pdict(vec![("z", pint(1))])]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let out = run(&[
+        "plist",
+        "--plist-format",
+        "xml",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        collapses(&err),
+        [format!(
+            "config-graft: warning: array `k` held 2 values that normalizing made \
+             identical, and membership is a set, so only 1 survived; {FLOOR}"
+        )],
+        "stderr was: {err}"
+    );
+    // The value warning names the element the date is in: `k` is an array, so there
+    // is no `k:d`.
+    assert!(err.contains("`k[0]:d` in TARGET: "), "stderr was: {err}");
+    assert!(err.contains("`k[1]:d` in TARGET: "), "stderr was: {err}");
+    assert!(!err.contains("`k:d`"), "stderr was: {err}");
+
+    let plist::Value::Dictionary(d) = read_plist(&target) else {
+        panic!("expected a dictionary");
+    };
+    let plist::Value::Array(kept) = d.get("k").unwrap().clone() else {
+        panic!("expected an array");
+    };
+    assert_eq!(kept.len(), 2, "got: {kept:?}");
+}
+
+#[test]
+fn a_refusal_inside_an_array_names_the_element() {
+    // An array element has no key of its own, so naming the array alone would point
+    // at a value that is not a string.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![]).to_file_xml(&target).unwrap();
+    pdict(vec![(
+        "keys",
+        plist::Value::Array(vec![
+            plist::Value::String("fine".into()),
+            plist::Value::String("\u{1b}Window".into()),
+        ]),
+    )])
+    .to_file_binary(&desired)
+    .unwrap();
+
+    let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("`keys[1]`"), "got: {err}");
+    assert!(err.contains("U+001B"), "got: {err}");
+}
+
+#[test]
+fn an_array_inside_an_element_is_not_judged_as_one_the_reconcile_combined() {
+    // The engine takes an element whole, so an array inside one is never combined
+    // with anything and cannot lose a value to a collapse. Judging it anyway, by
+    // its position, compares it with whatever the result happens to hold there.
+    let array = plist::Value::Array;
+    let fraction = |nanos| instant(1_000_000, nanos);
+
+    // An element BASE says DESIRED dropped is pruned, so every later element moves
+    // up one place: the result's `arr[1]` is TARGET's `arr[2]`, which holds one
+    // copy of the instant TARGET's `arr[1]` holds two of. DESIRED is as long as
+    // TARGET, so each of TARGET's positions has a DESIRED element to pair with.
+    let shifted = array(vec![
+        array(vec![pint(1)]),
+        array(vec![fraction(200_000_000), fraction(700_000_000)]),
+        array(vec![fraction(0)]),
+    ]);
+    let unrelated = array(vec![
+        array(vec![pint(9)]),
+        array(vec![pint(8)]),
+        array(vec![pint(7)]),
+    ]);
+    let err = xml_run(
+        "shifted",
+        pdict(vec![("arr", shifted)]),
+        pdict(vec![("arr", unrelated)]),
+        Some(pdict(vec![("arr", array(vec![array(vec![pint(1)])]))])),
+        &[],
+    );
+    assert_eq!(collapses(&err), Vec::<&str>::new(), "stderr was: {err}");
+
+    // TARGET's and DESIRED's first elements are unrelated, so the one collapse is
+    // the outer array's: the two elements became one.
+    let err = xml_run(
+        "paired",
+        pdict(vec![(
+            "arr",
+            array(vec![array(vec![fraction(200_000_000)])]),
+        )]),
+        pdict(vec![(
+            "arr",
+            array(vec![array(vec![fraction(700_000_000)])]),
+        )]),
+        None,
+        &[],
+    );
+    assert_eq!(
+        collapses(&err),
+        [format!(
+            "config-graft: warning: array `arr` held 2 values that normalizing made \
+             identical, and membership is a set, so only 1 survived; {FLOOR}"
+        )],
+        "stderr was: {err}"
+    );
+
+    // A date in a nested array floors onto the same instant as a date that is an
+    // element, but `[x]` and `x` are different elements, so nothing collapsed.
+    let err = xml_run(
+        "nested",
+        pdict(vec![(
+            "arr",
+            array(vec![
+                array(vec![fraction(200_000_000)]),
+                fraction(700_000_000),
+            ]),
+        )]),
+        pdict(vec![("arr", array(vec![instant(0, 0)]))]),
+        None,
+        &[],
+    );
+    assert_eq!(collapses(&err), Vec::<&str>::new(), "stderr was: {err}");
+}
+
+#[test]
+fn a_repeat_is_counted_by_the_original_that_repeats() {
+    // The file holds two instants twice each, which floor to one value held four
+    // times. It genuinely held a repeat of two, not of three: the other pair is a
+    // collapse, and is reported as one.
+    let fraction = |nanos| instant(1_000_000, nanos);
+    let err = xml_run(
+        "repeats",
+        pdict(vec![(
+            "l",
+            plist::Value::Array(vec![
+                fraction(200_000_000),
+                fraction(200_000_000),
+                fraction(700_000_000),
+                fraction(700_000_000),
+            ]),
+        )]),
+        pdict(vec![("l", plist::Value::Array(vec![instant(0, 0)]))]),
+        None,
+        &[],
+    );
+    assert_eq!(
+        repeats(&err),
+        [format!(
+            "config-graft: warning: array `l` in TARGET holds {FLOORED} 2 times; array \
+             membership is a set, so one is in the result"
+        )],
+        "stderr was: {err}"
+    );
+    assert_eq!(collapses(&err).len(), 1, "stderr was: {err}");
+}
+
+#[test]
+fn a_collapse_under_a_merge_key_is_judged_by_the_key() {
+    let fraction = |nanos| instant(1_000_000, nanos);
+    let records = |records| pdict(vec![("l", plist::Value::Array(records))]);
+    let record = |id, field: &str| pdict(vec![("id", id), (field, pint(1))]);
+    let keyed_collapse = |distinct| {
+        format!(
+            "config-graft: warning: array `l` held {distinct} keys that normalizing made \
+             [id={FLOORED}], and records sharing a key are merged, so only 1 survived; \
+             {FLOOR}"
+        )
+    };
+    let merge_key = ["--merge-key", "id"];
+
+    // Two records whose keys floor together are merged into one, so the second
+    // record's other fields are gone -- a collapse, not a key the file held twice.
+    let err = xml_run(
+        "one-side",
+        records(vec![
+            record(fraction(300_000_000), "a"),
+            record(fraction(700_000_000), "b"),
+        ]),
+        records(vec![record(instant(5, 0), "c")]),
+        None,
+        &merge_key,
+    );
+    assert_eq!(collapses(&err), [keyed_collapse(2)], "stderr was: {err}");
+    assert_eq!(repeats(&err), Vec::<&str>::new(), "stderr was: {err}");
+
+    // The same when the two keys came one from each input, which the merge then
+    // matches as one record.
+    let err = xml_run(
+        "both-sides",
+        records(vec![record(fraction(300_000_000), "a")]),
+        records(vec![record(fraction(700_000_000), "b")]),
+        None,
+        &merge_key,
+    );
+    assert_eq!(collapses(&err), [keyed_collapse(2)], "stderr was: {err}");
+
+    // A key the file really held twice is still a repeat, and nothing collapsed.
+    let err = xml_run(
+        "repeated",
+        records(vec![
+            record(fraction(300_000_000), "a"),
+            record(fraction(300_000_000), "b"),
+        ]),
+        records(vec![record(instant(5, 0), "c")]),
+        None,
+        &merge_key,
+    );
+    assert_eq!(
+        repeats(&err),
+        [format!(
+            "config-graft: warning: array `l` in TARGET holds [id={FLOORED}] 2 times; \
+             array membership is a set, so one is in the result"
+        )],
+        "stderr was: {err}"
+    );
+    assert_eq!(collapses(&err), Vec::<&str>::new(), "stderr was: {err}");
+
+    // With more than one candidate field, a repeat counts only records keyed by the
+    // same field: `[name="a"]` is not a third `[id="a"]`. A floored date elsewhere
+    // in the file is what makes the run check the count at all.
+    let string = |text: &str| plist::Value::String(text.into());
+    let err = xml_run(
+        "two-fields",
+        pdict(vec![
+            (
+                "l",
+                plist::Value::Array(vec![
+                    pdict(vec![("id", string("a"))]),
+                    pdict(vec![("id", string("a"))]),
+                    pdict(vec![("name", string("a"))]),
+                ]),
+            ),
+            ("when", fraction(300_000_000)),
+        ]),
+        records(vec![pdict(vec![("id", string("z"))])]),
+        None,
+        &["--merge-key", "id,name"],
+    );
+    assert_eq!(
+        repeats(&err),
+        [
+            "config-graft: warning: array `l` in TARGET holds [id=\"a\"] 2 times; array \
+             membership is a set, so one is in the result"
+        ],
+        "stderr was: {err}"
+    );
+}
+
+#[test]
+fn a_collapse_inside_a_keyed_record_is_reported_at_the_record() {
+    // The merge matches the `web` record on both sides and merges its fields, so
+    // its `tags` arrays are combined like any other -- and named through the
+    // record, which is how the merge found it.
+    let fraction = |nanos| instant(1_000_000, nanos);
+    let servers = |tags| {
+        pdict(vec![(
+            "servers",
+            plist::Value::Array(vec![pdict(vec![
+                ("name", plist::Value::String("web".into())),
+                ("tags", plist::Value::Array(tags)),
+            ])]),
+        )])
+    };
+    let at_tags = format!(
+        "config-graft: warning: array `servers[name=\"web\"]:tags` held 2 values that \
+         normalizing made identical, and membership is a set, so only 1 survived; {FLOOR}"
+    );
+    let merge_key = ["--merge-key", "name"];
+
+    // One instant from each side, floored together.
+    let err = xml_run(
+        "across",
+        servers(vec![fraction(200_000_000)]),
+        servers(vec![fraction(700_000_000)]),
+        None,
+        &merge_key,
+    );
+    assert_eq!(collapses(&err), [at_tags.as_str()], "stderr was: {err}");
+
+    // Two instants on one side: a collapse, not a repeat the file held.
+    let err = xml_run(
+        "within",
+        servers(vec![fraction(200_000_000), fraction(700_000_000)]),
+        servers(vec![instant(5, 0)]),
+        None,
+        &merge_key,
+    );
+    assert_eq!(collapses(&err), [at_tags.as_str()], "stderr was: {err}");
+    assert_eq!(repeats(&err), Vec::<&str>::new(), "stderr was: {err}");
+
+    // The record sits at a different position in each input, and only DESIRED's
+    // array holds anything floored: what normalization rewrote is found where each
+    // input holds the record, not at one shared position.
+    let name = |name: &str| pdict(vec![("name", plist::Value::String(name.into()))]);
+    let web = |tags| {
+        pdict(vec![
+            ("name", plist::Value::String("web".into())),
+            ("tags", plist::Value::Array(tags)),
+        ])
+    };
+    let err = xml_run(
+        "moved",
+        pdict(vec![(
+            "servers",
+            plist::Value::Array(vec![name("a"), name("b"), web(vec![fraction(0)])]),
+        )]),
+        pdict(vec![(
+            "servers",
+            plist::Value::Array(vec![web(vec![fraction(700_000_000)])]),
+        )]),
+        None,
+        &merge_key,
+    );
+    assert_eq!(collapses(&err), [at_tags.as_str()], "stderr was: {err}");
+
+    // Inside a record, merge-key scopes start again from the record, as the merge
+    // does: `tags=id` keys the record's own `tags`, so two tags whose ids floor
+    // together are one key, not a repeat the file held.
+    let tag = |id, value| pdict(vec![("id", id), ("v", pint(value))]);
+    let err = xml_run(
+        "scoped",
+        servers(vec![
+            tag(fraction(100_000_000), 1),
+            tag(fraction(700_000_000), 2),
+        ]),
+        servers(vec![tag(instant(5, 0), 3)]),
+        None,
+        &["--merge-key", "servers=name", "--merge-key", "tags=id"],
+    );
+    assert_eq!(
+        collapses(&err),
+        [format!(
+            "config-graft: warning: array `servers[name=\"web\"]:tags` held 2 keys that \
+             normalizing made [id={FLOORED}], and records sharing a key are merged, so \
+             only 1 survived; {FLOOR}"
+        )],
+        "stderr was: {err}"
+    );
+    assert_eq!(repeats(&err), Vec::<&str>::new(), "stderr was: {err}");
 }

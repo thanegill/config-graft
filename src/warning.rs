@@ -14,14 +14,17 @@ use crate::value::{Leaf, Node};
 pub enum Step {
     /// An object key.
     Key(String),
+    /// A position in an array, rendered `[n]`: the element of an input that a
+    /// warning about one value is about.
+    Index(usize),
     /// The record of a keyed array, rendered `[field=value]`; `value` is the key
     /// value's `--diff` token, so a string is already quoted.
     Selector { field: String, value: String },
 }
 
-/// Where a diagnostic points. Wider than the engine's own
-/// [`crate::reconcile::ManagedPath`], which stops at an array because management
-/// does: this one can also step into a keyed record to name what a warning is
+/// Where a diagnostic points. The engine's [`crate::reconcile::ManagedPath`] stops
+/// at an array because management does; this one can also step into one, to an
+/// element by position or to a keyed record by its key, to name what a warning is
 /// about there. Only ever rendered and compared, never used to manage anything.
 #[derive(Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct DiagnosticPath(Vec<Step>);
@@ -132,10 +135,13 @@ pub enum Warning<L: Leaf> {
         character: char,
         because: &'static str,
     },
-    /// Normalization made array elements equal that an input distinguished, and
-    /// membership is a set, so fewer survived.
+    /// Normalization made array elements (or, under a merge key, their keys) equal
+    /// that an input distinguished, and membership is a set, so fewer survived.
     ArrayCollapsed {
         path: DiagnosticPath,
+        /// The `[field=value]` the collapsed records now share, when the array
+        /// matches its records by merge key; `None` when it matches by value.
+        key: Option<String>,
         distinct: usize,
         kept: usize,
         because: &'static str,
@@ -207,6 +213,7 @@ impl<L: Leaf> Warning<L> {
                 *character as u32
             ),
             Warning::ArrayCollapsed {
+                key: None,
                 distinct,
                 kept,
                 because,
@@ -214,6 +221,17 @@ impl<L: Leaf> Warning<L> {
             } => format!(
                 "array `{at}` held {distinct} values that normalizing made \
                  identical, and membership is a set, so only {kept} survived; \
+                 {because}"
+            ),
+            Warning::ArrayCollapsed {
+                key: Some(key),
+                distinct,
+                kept,
+                because,
+                ..
+            } => format!(
+                "array `{at}` held {distinct} keys that normalizing made {key}, and \
+                 records sharing a key are merged, so only {kept} survived; \
                  {because}"
             ),
             Warning::MoreValuesNormalized {

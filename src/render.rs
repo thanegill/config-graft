@@ -97,11 +97,11 @@ fn escape_unprintable(segment: &str) -> String {
 }
 
 impl DiagnosticPath {
-    /// Render as a user-facing string: steps joined by `sep`, or `<root>` for the
-    /// empty path. `sep` is format-specific. A selector attaches directly to
-    /// the preceding key with no separator, e.g. `servers[name="web"]`, so a key
-    /// holding a `[` is quoted (`x."[b]"`) or it would read as one -- and so is a
-    /// key opening with `"`, or a quoted key could be forged.
+    /// Render as a user-facing string: steps joined by `sep` (format-specific), or
+    /// `<root>` for the empty path. An index or a selector attaches directly to the
+    /// preceding key with no separator (`checks[0]:when`, `servers[name="web"]`),
+    /// so a key holding a `[` is quoted (`x."[b]"`) or it would read as one -- and
+    /// so is a key opening with `"`, or a quoted key could be forged.
     pub fn render(&self, sep: &str) -> String {
         if self.is_empty() {
             return "<root>".to_string();
@@ -120,6 +120,7 @@ impl DiagnosticPath {
                         out.push_str(&escape_unprintable(key));
                     }
                 }
+                Step::Index(index) => write!(out, "[{index}]").expect("writing to a String"),
                 Step::Selector { field, value } => {
                     let field = escape_unprintable(field);
                     let value = escape_unprintable(value);
@@ -265,6 +266,19 @@ mod tests {
         p.prepend(Step::Key("servers".to_string()));
         assert_eq!(p.render("."), "servers[name=\"web\"].tags");
         assert_eq!(p.render(":"), "servers[name=\"web\"]:tags");
+    }
+
+    #[test]
+    fn path_render_attaches_an_index_to_the_preceding_key() {
+        let mut p = keys(&["checks"]);
+        p.push(Step::Index(2));
+        p.push(Step::Key("when".to_string()));
+        assert_eq!(p.render(":"), "checks[2]:when");
+        // A key spelled like an index is quoted, so the two cannot be confused.
+        assert_eq!(
+            keys(&["checks", "[2]", "when"]).render(":"),
+            r#"checks:"[2]":when"#
+        );
     }
 
     #[test]
