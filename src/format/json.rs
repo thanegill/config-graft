@@ -31,31 +31,12 @@ pub enum JsonLeaf {
     String(String),
 }
 
-// `PartialEq`/`Eq`/`Hash` are hand-written so `Number` compares by the *value* its
-// literal denotes rather than by its spelling: `0.10`, `0.1` and `1e-1` are one
-// number, so a DESIRED spelled differently from TARGET is not a change. A literal
-// whose exponent doesn't fit an `i64` can't be normalized, so it falls back to
-// literal comparison -- conservative, and consistent between `eq` and `hash`.
+// `PartialEq`/`Eq`/`Hash` are hand-written so a number compares by the *value* its
+// literal denotes rather than by its spelling (see `Identity`): a DESIRED spelled
+// differently from TARGET is not a change.
 impl PartialEq for JsonLeaf {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (JsonLeaf::Null, JsonLeaf::Null) => true,
-            (JsonLeaf::Bool(a), JsonLeaf::Bool(b)) => a == b,
-            (JsonLeaf::String(a), JsonLeaf::String(b)) => a == b,
-            // Every number, whichever variant holds it, compares by the value its
-            // literal denotes: `10`, `10.0` and `1e1` are one number.
-            (a, b) if a.is_number() && b.is_number() => {
-                match (leaf_number_value(a), leaf_number_value(b)) {
-                    (Some(x), Some(y)) => x == y,
-                    // An exponent no `i64` can describe: fall back to the literals.
-                    _ => matches!(
-                        (a, b),
-                        (JsonLeaf::Number(x), JsonLeaf::Number(y)) if x == y
-                    ),
-                }
-            }
-            _ => false,
-        }
+        self.identity() == other.identity()
     }
 }
 
@@ -63,48 +44,34 @@ impl Eq for JsonLeaf {}
 
 impl Hash for JsonLeaf {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Numbers share one discriminant, since equality spans the three variants.
-        if self.is_number() {
-            NUMBER_DISCRIMINANT.hash(state);
-            match leaf_number_value(self) {
-                Some(value) => value.hash(state),
-                None => match self {
-                    JsonLeaf::Number(literal) => literal.hash(state),
-                    _ => unreachable!("only a literal can have an unusable exponent"),
-                },
-            }
-            return;
-        }
-        std::mem::discriminant(self).hash(state);
-        match self {
-            JsonLeaf::Null => {}
-            JsonLeaf::Bool(b) => b.hash(state),
-            JsonLeaf::String(s) => s.hash(state),
-            _ => unreachable!("numbers returned above"),
-        }
+        self.identity().hash(state);
     }
 }
 
-/// Stands in for the discriminant of a number, which may be any of three variants.
-const NUMBER_DISCRIMINANT: &str = "json-number";
-
-/// The identity of any JSON number leaf, so the three variants compare as one kind.
-/// `None` means "compare the literals instead" (an unrepresentable exponent).
-fn leaf_number_value(leaf: &JsonLeaf) -> Option<NumberValue<'_>> {
-    match leaf {
-        JsonLeaf::Int(i) => Some(NumberValue::Integer(i128::from(*i))),
-        JsonLeaf::Uint(u) => Some(NumberValue::Integer(i128::from(*u))),
-        JsonLeaf::Number(literal) => NumberValue::try_from(literal.as_str()).ok(),
-        _ => None,
-    }
+/// What a JSON leaf compares and hashes by. The three number variants share
+/// `Number`, so `10`, `10.0` and `1e1` are one number.
+#[derive(PartialEq, Eq, Hash)]
+enum Identity<'a> {
+    Null,
+    Bool(bool),
+    String(&'a str),
+    Number(NumberValue<'a>),
+    /// An exponent no `i64` can describe, so only the same literal is equal.
+    Literal(&'a str),
 }
 
 impl JsonLeaf {
-    fn is_number(&self) -> bool {
-        matches!(
-            self,
-            JsonLeaf::Int(_) | JsonLeaf::Uint(_) | JsonLeaf::Number(_)
-        )
+    fn identity(&self) -> Identity<'_> {
+        let integer = |value| Identity::Number(NumberValue::Integer(value));
+        match self {
+            JsonLeaf::Null => Identity::Null,
+            JsonLeaf::Bool(b) => Identity::Bool(*b),
+            JsonLeaf::String(s) => Identity::String(s),
+            JsonLeaf::Int(i) => integer(i128::from(*i)),
+            JsonLeaf::Uint(u) => integer(i128::from(*u)),
+            JsonLeaf::Number(literal) => NumberValue::try_from(literal.as_str())
+                .map_or(Identity::Literal(literal), Identity::Number),
+        }
     }
 }
 
