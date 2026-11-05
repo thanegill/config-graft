@@ -53,6 +53,10 @@ Each codec's mechanics are documented at the code. These are the decisions that 
 - A normalization collapse in an array is a **warning, not a refusal**. An earlier revision refused, and because an unresolvable path counted as zero survivors it failed valid runs -- don't reintroduce that. The warning cannot see a date inside an array of dicts (issue #37).
 - Depth is checked on the built `plist::Value` and a rejected tree is `dismantle`d, never dropped. The event API that would avoid building it sits behind an unstable crate feature -- not worth pinning plist to a tilde requirement.
 
+### YAML (`yaml.rs`)
+
+- Nesting is counted from `saphyr-parser`'s event stream **before** anything is loaded, with an alias counted as deep as the node it names. Don't move the check onto the loaded `Yaml`: saphyr bounds only flow nesting, and it hashes keys, clones aliased nodes and drops trees recursively, so a check on the finished tree aborts first -- a deep `? ? ?` key overflows inside the loader itself. The scan and the load share one parser construction (`Parser::new_from_iter`), so they agree on what parses and a saphyr bump without a matching saphyr-parser bump is a type error.
+
 ### TOML
 
 The root is always a table, so `NotTomlTable` is unreachable; it is kept only for `FormatKind` symmetry.

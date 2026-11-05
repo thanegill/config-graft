@@ -3,13 +3,14 @@
 //! first-apply targets are emitted canonically here.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 
-use super::{Format, FormatKind, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, ValueCodec, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{canonical_float_bits, Leaf, Node};
@@ -133,7 +134,11 @@ impl Format for Yaml {
 
     fn parse(bytes: &[u8]) -> Option<Node<YamlLeaf>> {
         let text = std::str::from_utf8(bytes).ok()?;
-        let docs = saphyr::Yaml::load_from_str(text).ok()?;
+        if !nests_within_limit(text) {
+            return None;
+        }
+        let mut parser = saphyr_parser::Parser::new_from_iter(text.chars());
+        let docs = saphyr::Yaml::load_from_parser(&mut parser).ok()?;
         match docs.as_slice() {
             [] if bytes.iter().all(u8::is_ascii_whitespace) => None,
             [] => Some(Node::empty_map()),
@@ -167,6 +172,59 @@ impl Format for Yaml {
 fn is_empty_document(text: &str) -> bool {
     saphyr::MarkedYaml::load_from_str(text)
         .is_ok_and(|docs| matches!(docs.as_slice(), [root] if root.span.start == root.span.end))
+}
+
+/// Whether every document in `text` nests no deeper than `MAX_DEPTH`, counted
+/// from the parser's event stream before any tree is built. saphyr bounds only
+/// flow nesting, and a deeper tree recurses past the stack while it loads (a
+/// mapping key is hashed, an alias cloned), and again when it is walked or
+/// dropped. An alias counts as deep as the node it names, because loading
+/// expands it in place. The scan reads the text the way the loader in
+/// `Yaml::parse` does, so text that fails to parse passes here for the loader
+/// to report.
+fn nests_within_limit(text: &str) -> bool {
+    use saphyr_parser::{Event, Parser};
+
+    struct OpenCollection {
+        anchor: usize,
+        deepest_child: usize,
+    }
+
+    let mut anchor_depths: HashMap<usize, usize> = HashMap::new();
+    let mut open: Vec<OpenCollection> = Vec::new();
+    for event in Parser::new_from_iter(text.chars()) {
+        let Ok((event, _)) = event else {
+            return true;
+        };
+        let (anchor, depth) = match event {
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+                if open.len() == MAX_DEPTH {
+                    return false;
+                }
+                open.push(OpenCollection {
+                    anchor,
+                    deepest_child: 0,
+                });
+                continue;
+            }
+            Event::SequenceEnd | Event::MappingEnd => match open.pop() {
+                Some(closed) => (closed.anchor, closed.deepest_child + 1),
+                None => continue,
+            },
+            Event::Alias(anchor) => (0, anchor_depths.get(&anchor).copied().unwrap_or(0)),
+            _ => continue,
+        };
+        if open.len() + depth > MAX_DEPTH {
+            return false;
+        }
+        if anchor != 0 {
+            anchor_depths.insert(anchor, depth);
+        }
+        if let Some(parent) = open.last_mut() {
+            parent.deepest_child = parent.deepest_child.max(depth);
+        }
+    }
+    true
 }
 
 /// Canonical YAML emission, used only when there is no original text to preserve.
