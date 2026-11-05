@@ -245,6 +245,11 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Node<F::Leaf>>, Error>
     parse_file::<F>(path, bytes.as_deref())
 }
 
+/// Whether `bytes` are only whitespace, as in a file staged for a first apply.
+pub fn is_blank(bytes: &[u8]) -> bool {
+    bytes.iter().all(u8::is_ascii_whitespace)
+}
+
 /// The bytes at `path`, or `None` when there is no file there.
 pub fn read_bytes(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
@@ -266,7 +271,7 @@ pub fn parse_file<F: Format>(
         Some(node) => Ok(Some(node)),
         // Checked only after parsing fails, so a format whose empty document is
         // meaningful (TOML's empty table) still parses it.
-        None if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
+        None if is_blank(bytes) => Ok(None),
         None => Err(Error::Unreadable {
             path: path.to_path_buf(),
             kind: F::KIND,

@@ -97,6 +97,16 @@ pub enum Warning<L: Leaf> {
         pass: usize,
         passes: usize,
     },
+    /// TARGET was empty or missing at pass `pass` of `passes` after an earlier pass
+    /// read content from it, as an app partway through a save leaves it, so that
+    /// pass wrote nothing rather than reconcile it as a first apply. `path` is
+    /// always the document root.
+    TargetEmptied {
+        path: KeyPath,
+        file: PathBuf,
+        pass: usize,
+        passes: usize,
+    },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -109,7 +119,8 @@ impl<L: Leaf> Warning<L> {
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. }
-            | Warning::TargetChanged { path, .. } => path,
+            | Warning::TargetChanged { path, .. }
+            | Warning::TargetEmptied { path, .. } => path,
         }
     }
 
@@ -123,7 +134,8 @@ impl<L: Leaf> Warning<L> {
             | Warning::MoreValuesNormalized { path, .. }
             | Warning::NonConformingByteKept { path, .. }
             | Warning::ArrayCollapsed { path, .. }
-            | Warning::TargetChanged { path, .. } => path,
+            | Warning::TargetChanged { path, .. }
+            | Warning::TargetEmptied { path, .. } => path,
         }
     }
 
@@ -200,6 +212,14 @@ impl<L: Leaf> Warning<L> {
             } => format!(
                 "{} changed between config-graft's read and its write, so pass {pass} \
                  of {passes} wrote nothing",
+                file.display()
+            ),
+            Warning::TargetEmptied {
+                file, pass, passes, ..
+            } => format!(
+                "{} is empty or missing after an earlier pass read content from it, as \
+                 an app partway through saving it would leave it, so pass {pass} of \
+                 {passes} wrote nothing",
                 file.display()
             ),
         }

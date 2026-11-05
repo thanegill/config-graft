@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{
-    parse_file, read_bytes, read_file, Format, FormatKind, Indent, Normalization, Normalized,
-    WriteOpts,
+    is_blank, parse_file, read_bytes, read_file, Format, FormatKind, Indent, Normalization,
+    Normalized, WriteOpts,
 };
 use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
@@ -35,6 +35,8 @@ pub(crate) enum Pass {
     Done(Outcome),
     /// TARGET changed before the write could replace it; nothing was written.
     TargetChanged,
+    /// TARGET was vacant after an earlier pass saw content, so the pass was not run.
+    TargetEmptied,
 }
 
 /// Output preferences as the flags asked for them, before any format settles what
@@ -202,6 +204,13 @@ pub(crate) trait Backend {
     /// Take this pass's [`Backend::Snapshot`] of TARGET.
     fn snapshot(args: &RunArgs) -> Result<Self::Snapshot, Error>;
 
+    /// Whether `snapshot` shows TARGET with nothing in it -- absent, or only
+    /// whitespace -- which a pass reconciles as a first apply. Default: never, as
+    /// for a tree, which no pass retries.
+    fn is_vacant(_snapshot: &Self::Snapshot) -> bool {
+        false
+    }
+
     /// TARGET as of `snapshot`, with [`Backend::read`]'s meaning of `Ok(None)`.
     fn read_target(
         args: &RunArgs,
@@ -263,21 +272,40 @@ pub(crate) trait Backend {
     /// `ByteBackend::<Json>::run(args)` / `Directory::run(args)`.
     ///
     /// A pass whose write finds TARGET changed since it was read starts over from
-    /// the new contents, for up to [`PASSES`] passes in all, then refuses.
+    /// the new contents, for up to [`PASSES`] passes in all, then refuses. A later
+    /// pass that finds TARGET vacant after an earlier one saw it hold something
+    /// writes nothing and counts as another change: that is an app caught between
+    /// truncating its file and refilling it, and reconciling it as a first apply
+    /// would write DESIRED alone over every key the app owns. Such a pass does no
+    /// work, so the next follows at once and usually ends the same way.
     fn run(args: &RunArgs) -> Result<Outcome, Error> {
+        let mut seen_content = false;
         for pass in 1..=PASSES {
-            match Self::pass(args)? {
+            let snapshot = Self::snapshot(args)?;
+            let vacant = Self::is_vacant(&snapshot);
+            let ended = if seen_content && vacant {
+                Pass::TargetEmptied
+            } else {
+                Self::pass(args, snapshot)?
+            };
+            seen_content |= !vacant;
+            let (path, file) = (KeyPath::new(), args.target.clone());
+            let warning = match ended {
                 Pass::Done(outcome) => return Ok(outcome),
-                Pass::TargetChanged => emit::<Self::Leaf>(
-                    &[Warning::TargetChanged {
-                        path: KeyPath::new(),
-                        file: args.target.clone(),
-                        pass,
-                        passes: PASSES,
-                    }],
-                    Self::COMPONENT_SEPARATOR,
-                ),
-            }
+                Pass::TargetChanged => Warning::TargetChanged {
+                    path,
+                    file,
+                    pass,
+                    passes: PASSES,
+                },
+                Pass::TargetEmptied => Warning::TargetEmptied {
+                    path,
+                    file,
+                    pass,
+                    passes: PASSES,
+                },
+            };
+            emit::<Self::Leaf>(&[warning], Self::COMPONENT_SEPARATOR);
         }
         Err(Error::TargetKeptChanging {
             path: args.target.clone(),
@@ -285,9 +313,8 @@ pub(crate) trait Backend {
         })
     }
 
-    /// One read-reconcile-write pass of [`Backend::run`].
-    fn pass(args: &RunArgs) -> Result<Pass, Error> {
-        let snapshot = Self::snapshot(args)?;
+    /// One read-reconcile-write pass of [`Backend::run`], from `snapshot`.
+    fn pass(args: &RunArgs, snapshot: Self::Snapshot) -> Result<Pass, Error> {
         // Settled before any input is parsed: every input is normalized for the
         // encoding the write will use, so all three stay comparable to each other
         // and to what lands on disk.
@@ -491,6 +518,10 @@ impl<F: Format> Backend for ByteBackend<F> {
         read_bytes(&args.target).map_err(|source| Error::read(&args.target, source))
     }
 
+    fn is_vacant(snapshot: &Option<Vec<u8>>) -> bool {
+        snapshot.as_deref().is_none_or(is_blank)
+    }
+
     fn read_target(
         args: &RunArgs,
         snapshot: &Option<Vec<u8>>,
@@ -665,14 +696,23 @@ mod tests {
 
     thread_local! {
         static SAVES_LEFT: Cell<usize> = const { Cell::new(0) };
-        static SAVES_KEEP_BYTES: Cell<bool> = const { Cell::new(false) };
+        static SAVE: Cell<Save> = const { Cell::new(Save::NewValue) };
         static WRITES: Cell<usize> = const { Cell::new(0) };
+        static SNAPSHOTS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// What the app's save does to TARGET.
+    #[derive(Clone, Copy)]
+    enum Save {
+        NewValue,
+        /// A new file holding the same bytes, renamed into TARGET's place.
+        SameBytes,
+        /// The first half of a save that truncates the file, then refills it.
+        Truncate,
     }
 
     /// The JSON backend with an app that saves TARGET just before each write
-    /// replaces it, until it has made `SAVES_LEFT` saves: each save writes a new
-    /// `app` value, or with `SAVES_KEEP_BYTES` puts a new file with the same bytes
-    /// in TARGET's place.
+    /// replaces it, until it has made `SAVES_LEFT` saves of the kind `SAVE` says.
     struct AppSavesDuringWrite;
 
     impl Backend for AppSavesDuringWrite {
@@ -713,7 +753,12 @@ mod tests {
         }
 
         fn snapshot(args: &RunArgs) -> Result<Snapshot, Error> {
+            SNAPSHOTS.set(SNAPSHOTS.get() + 1);
             JsonBackend::snapshot(args)
+        }
+
+        fn is_vacant(snapshot: &Snapshot) -> bool {
+            JsonBackend::is_vacant(snapshot)
         }
 
         fn read_target(args: &RunArgs, snapshot: &Snapshot) -> Result<Option<Node<Leaf>>, Error> {
@@ -741,12 +786,16 @@ mod tests {
             WRITES.set(writes);
             if SAVES_LEFT.get() > 0 {
                 SAVES_LEFT.set(SAVES_LEFT.get() - 1);
-                if SAVES_KEEP_BYTES.get() {
-                    let replacement = args.target.with_extension("app-save");
-                    fs::copy(&args.target, &replacement).unwrap();
-                    fs::rename(&replacement, &args.target).unwrap();
-                } else {
-                    fs::write(&args.target, format!("{{\"app\": {writes}}}\n")).unwrap();
+                match SAVE.get() {
+                    Save::NewValue => {
+                        fs::write(&args.target, format!("{{\"app\": {writes}}}\n")).unwrap();
+                    }
+                    Save::SameBytes => {
+                        let replacement = args.target.with_extension("app-save");
+                        fs::copy(&args.target, &replacement).unwrap();
+                        fs::rename(&replacement, &args.target).unwrap();
+                    }
+                    Save::Truncate => fs::write(&args.target, "").unwrap(),
                 }
             }
             JsonBackend::apply(args, snapshot, target, result, base, output)
@@ -754,18 +803,27 @@ mod tests {
     }
 
     /// A `json` run over a TARGET holding `{"app": 0}` and a DESIRED that manages
-    /// one key, with the app set to save `saves` times.
-    fn race(
+    /// one key, with the app set to make `saves` saves of kind `save`.
+    fn race(saves: usize, save: Save) -> (tempfile::TempDir, PathBuf, Result<Outcome, Error>) {
+        race_from(Some("{\"app\": 0}\n"), saves, save)
+    }
+
+    /// [`race`] over a TARGET holding `initial` (`None`: no file).
+    fn race_from(
+        initial: Option<&str>,
         saves: usize,
-        keep_bytes: bool,
+        save: Save,
     ) -> (tempfile::TempDir, PathBuf, Result<Outcome, Error>) {
         SAVES_LEFT.set(saves);
-        SAVES_KEEP_BYTES.set(keep_bytes);
+        SAVE.set(save);
         WRITES.set(0);
+        SNAPSHOTS.set(0);
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("t.json");
         let desired = dir.path().join("d.json");
-        fs::write(&target, "{\"app\": 0}\n").unwrap();
+        if let Some(initial) = initial {
+            fs::write(&target, initial).unwrap();
+        }
         fs::write(&desired, "{\"managed\": true}\n").unwrap();
         let cli = Cli::parse_from([
             "config-graft".as_ref(),
@@ -796,7 +854,7 @@ mod tests {
 
     #[test]
     fn a_save_during_the_write_is_reconciled_rather_than_lost() {
-        let (dir, target, outcome) = race(2, false);
+        let (dir, target, outcome) = race(2, Save::NewValue);
 
         assert_eq!(outcome.unwrap(), Outcome::Applied);
         assert_eq!(WRITES.get(), 3);
@@ -806,7 +864,7 @@ mod tests {
 
     #[test]
     fn an_app_that_keeps_saving_is_refused_after_the_last_pass() {
-        let (dir, target, outcome) = race(usize::MAX, false);
+        let (dir, target, outcome) = race(usize::MAX, Save::NewValue);
 
         assert!(
             matches!(outcome, Err(Error::TargetKeptChanging { passes: 3, .. })),
@@ -819,10 +877,46 @@ mod tests {
 
     #[test]
     fn a_new_file_holding_the_same_bytes_is_not_a_change() {
-        let (_dir, target, outcome) = race(1, true);
+        let (_dir, target, outcome) = race(1, Save::SameBytes);
 
         assert_eq!(outcome.unwrap(), Outcome::Applied);
         assert_eq!(WRITES.get(), 1);
         assert_eq!(json_at(&target), json!({"app": 0, "managed": true}));
+    }
+
+    #[test]
+    fn a_target_caught_mid_save_empty_is_not_reconciled_as_a_first_apply() {
+        let (dir, target, outcome) = race(1, Save::Truncate);
+
+        assert!(
+            matches!(outcome, Err(Error::TargetKeptChanging { passes: 3, .. })),
+            "{outcome:?}"
+        );
+        assert_eq!(WRITES.get(), 1);
+        assert_eq!(SNAPSHOTS.get(), 3);
+        assert_eq!(fs::read(&target).unwrap(), b"");
+        assert_eq!(names(dir.path()), ["d.json", "t.json"]);
+    }
+
+    #[test]
+    fn a_target_vacant_from_the_start_is_a_first_apply_in_one_pass() {
+        for initial in [None, Some(""), Some("\n")] {
+            let (_dir, target, outcome) = race_from(initial, 0, Save::NewValue);
+
+            assert_eq!(outcome.unwrap(), Outcome::Applied, "{initial:?}");
+            assert_eq!(SNAPSHOTS.get(), 1, "{initial:?}");
+            assert_eq!(json_at(&target), json!({"managed": true}), "{initial:?}");
+        }
+    }
+
+    #[test]
+    fn a_vacant_target_is_one_a_pass_would_reconcile_as_a_first_apply() {
+        let vacant = |bytes: Option<&[u8]>| JsonBackend::is_vacant(&bytes.map(<[u8]>::to_vec));
+
+        assert!(vacant(None));
+        assert!(vacant(Some(b"")));
+        assert!(vacant(Some(b" \n\t")));
+        assert!(!vacant(Some(b"{}")));
+        assert!(!vacant(Some(b" {")));
     }
 }
