@@ -12,6 +12,7 @@
 //! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::error::Error;
 use crate::reconcile::KeyPath;
@@ -215,25 +216,29 @@ pub trait ValueCodec {
 /// Output indentation for the JSON writer: a number of spaces, or a tab.
 #[derive(Clone, Copy, Debug)]
 pub enum Indent {
-    Spaces(usize),
+    Spaces(u8),
     Tab,
 }
 
-/// Parse a `--indent` value: a non-negative number of spaces, or `tab`. Used as a
-/// clap value parser, so an invalid value is a usage error (exit 2).
-pub fn parse_indent(spec: &str) -> Result<Indent, String> {
-    if spec == "tab" {
-        return Ok(Indent::Tab);
+/// A `--indent` value: a non-negative number of spaces, or `tab`. clap parses the
+/// flag through this, so an invalid value is a usage error (exit 2).
+impl FromStr for Indent {
+    type Err = String;
+
+    fn from_str(spec: &str) -> Result<Self, Self::Err> {
+        if spec == "tab" {
+            return Ok(Indent::Tab);
+        }
+        let spaces: usize = spec
+            .parse()
+            .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))?;
+        // The JSON writer takes a `u8`, and silently emitting a different shape
+        // than the one asked for is worse than refusing the width.
+        let max = u8::MAX;
+        u8::try_from(spaces)
+            .map(Indent::Spaces)
+            .map_err(|_| format!("indent must be at most {max}, got {spaces}"))
     }
-    let spaces: usize = spec
-        .parse()
-        .map_err(|_| format!("expected a number or 'tab', got {spec:?}"))?;
-    // The JSON writer takes a `u8`, and silently emitting a different shape than
-    // the one asked for is worse than refusing the width.
-    if spaces > usize::from(u8::MAX) {
-        return Err(format!("indent must be at most {}, got {spaces}", u8::MAX));
-    }
-    Ok(Indent::Spaces(spaces))
 }
 
 /// Read and parse `path` with format `F`. `Ok(None)` means the file is not there

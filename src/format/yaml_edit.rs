@@ -10,12 +10,10 @@
 //! edited text and refuse to return it unless it parses back to exactly the
 //! reconciled `result`**. Any edit we can't make correctly aborts the write.
 
-use std::borrow::Cow;
-
 use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Marker, Scalar, Yaml, YamlData};
 
-use super::yaml::YamlLeaf;
+use super::yaml::{yaml_string, YamlLeaf};
 use super::{Format, ValueCodec, Yaml as YamlCodec};
 use crate::error::Error;
 use crate::value::Node;
@@ -377,10 +375,7 @@ fn diff_map(
 /// Render a single `key: value` entry as YAML, indented by `ind` spaces.
 fn emit_entry(key: &str, value: &Node<YamlLeaf>, ind: usize) -> String {
     let mut m = saphyr::Mapping::new();
-    m.insert(
-        Yaml::Value(Scalar::String(Cow::Owned(key.to_string()))),
-        YamlCodec::encode(value),
-    );
+    m.insert(yaml_string(key.to_string()), YamlCodec::encode(value));
     indent_lines(&emit_fragment(&Yaml::Mapping(m)), ind)
 }
 

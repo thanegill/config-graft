@@ -1363,3 +1363,36 @@ fn a_merge_key_scope_names_a_bracketed_key_as_written() {
     );
     assert!(stderr.contains("`x.\"[s]\"[n=\"w\"].tags`"), "{stderr}");
 }
+
+#[test]
+fn indent_is_capped_at_the_widest_the_writer_takes() {
+    // The JSON writer takes a `u8` width; a wider one is refused rather than
+    // written in some other shape.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&desired, r#"{"a":1}"#).unwrap();
+    let with_indent = |width: &str| {
+        run(&[
+            "json",
+            "--stdout",
+            "--indent",
+            width,
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ])
+    };
+
+    let widest = with_indent("255");
+    assert!(widest.status.success());
+    let expected = format!("{{\n{}\"a\": 1\n}}\n", " ".repeat(255));
+    assert_eq!(String::from_utf8_lossy(&widest.stdout), expected);
+
+    let too_wide = with_indent("256");
+    assert_eq!(too_wide.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&too_wide.stderr);
+    assert!(
+        stderr.contains("indent must be at most 255, got 256"),
+        "got: {stderr}"
+    );
+}
