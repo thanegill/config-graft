@@ -1320,6 +1320,103 @@ fn a_duplicate_is_reported_only_when_the_file_really_held_one() {
 }
 
 #[test]
+fn a_key_collision_made_by_the_floor_is_reported_as_a_collapse() {
+    // Under `--merge-key`, records whose key dates differ only below a second share
+    // one floored key: the file never held that key twice, but the merge still
+    // keeps at most one of the records.
+    let dir = tempfile::tempdir().unwrap();
+    let record = |(secs, nanos), v| pdict(vec![("id", instant(secs, nanos)), ("v", pint(v))]);
+    let records = |ids: &[(u64, u32)], first: i64| {
+        let records = (first..).zip(ids).map(|(v, id)| record(*id, v)).collect();
+        pdict(vec![("l", plist::Value::Array(records))])
+    };
+    let other = (1_000_005, 0);
+    // The stderr of a run, and its (repeats, collapses) report counts.
+    let run_case = |name: &str,
+                    target_ids: &[(u64, u32)],
+                    desired_ids: &[(u64, u32)],
+                    base_ids: Option<&[(u64, u32)]>| {
+        let target = dir.path().join(format!("{name}.plist"));
+        let desired = dir.path().join(format!("{name}-desired.plist"));
+        let base = dir.path().join(format!("{name}-base.plist"));
+        records(target_ids, 1).to_file_binary(&target).unwrap();
+        records(desired_ids, 100).to_file_binary(&desired).unwrap();
+        // Forced, or `follow` keeps the binary target binary and floors nothing.
+        let mut args = vec![
+            "plist",
+            "--plist-format",
+            "xml",
+            "--merge-key",
+            "id",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ];
+        if let Some(base_ids) = base_ids {
+            records(base_ids, 1).to_file_binary(&base).unwrap();
+            args.push(base.to_str().unwrap());
+        }
+        let out = run(&args);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{name}: {err}");
+        let count = |needle: &str| err.lines().filter(|l| l.contains(needle)).count();
+        let counts = (
+            count("times; array membership"),
+            count("values that normalizing made identical"),
+        );
+        (err, counts)
+    };
+    let reports = |name: &str, target_ids: &[(u64, u32)]| {
+        run_case(name, target_ids, &[(1_000_000, 0)], None).1
+    };
+
+    let at = |nanos| (1_000_000, nanos);
+    assert_eq!(
+        reports("distinct", &[at(200_000_000), at(700_000_000)]),
+        (0, 1)
+    );
+    assert_eq!(
+        reports("repeated", &[at(700_000_000), at(700_000_000)]),
+        (1, 0)
+    );
+    assert_eq!(reports("untouched", &[at(0), at(700_000_000)]), (0, 1));
+    // Another record's key is a different identity, not a distinct original.
+    assert_eq!(
+        reports(
+            "beside-another",
+            &[at(700_000_000), at(700_000_000), (1_000_002, 300_000_000)]
+        ),
+        (1, 0)
+    );
+    // The floor folds an unmanaged record under a managed key that BASE then
+    // prunes: nothing of either survives, and that is still a loss.
+    let (_, counts) = run_case(
+        "pruned",
+        &[at(200_000_000), at(700_000_000)],
+        &[other],
+        Some(&[at(200_000_000)]),
+    );
+    assert_eq!(counts, (0, 1));
+    // Both inputs collapsing onto one key are one collapse, of all four values.
+    let (err, counts) = run_case(
+        "both-sides",
+        &[at(200_000_000), at(700_000_000)],
+        &[at(300_000_000), at(800_000_000)],
+        None,
+    );
+    assert_eq!(counts, (0, 1));
+    assert!(err.contains("held 4 values"), "{err}");
+    // An input's genuine repeat still counts toward the other input's collapse.
+    let (err, counts) = run_case(
+        "genuine-and-floored",
+        &[at(200_000_000), at(200_000_000)],
+        &[at(300_000_000), at(700_000_000)],
+        None,
+    );
+    assert_eq!(counts, (1, 1));
+    assert!(err.contains("held 3 values"), "{err}");
+}
+
+#[test]
 fn a_binary_target_is_refused_rather_than_rewritten_as_xml_with_the_byte() {
     // Rewriting a binary plist as XML emits every byte anew, so nothing in it is
     // "already written" and the pass-through cannot license it. Only reachable by

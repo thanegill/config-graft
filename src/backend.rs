@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
-use crate::reconcile::{reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
+use crate::reconcile::{identity, reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
 use crate::RunArgs;
@@ -30,6 +30,17 @@ fn requested_write_opts(args: &RunArgs) -> WriteOpts {
         plist_format: args.plist_format,
     }
 }
+
+/// The distinct originals normalization merged into one merge key, pooled across
+/// inputs, and why it rewrote any of them.
+struct KeyCollapse<'a, L: Leaf> {
+    originals: HashSet<&'a Node<L>>,
+    kept: usize,
+    because: Option<&'static str>,
+}
+
+/// Per `(array path, key value)`: the [`KeyCollapse`] behind it.
+type KeyCollapses<'a, L> = HashMap<(KeyPath, Node<L>), KeyCollapse<'a, L>>;
 
 /// The originals rewritten into each `(array path, resulting value)`, and why.
 type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
@@ -308,18 +319,24 @@ pub(crate) trait Backend {
         // that are repeats it genuinely held, still worth reporting. Only the
         // array's own elements count, which a normalization record cannot tell from
         // a nested array's.
+        //
+        // Under a merge key, records that only the floor made share a key are
+        // merged and the loser's other fields are gone, which no floor line says;
+        // that loss is reported as the collapse it is.
+        let mut key_collapses: KeyCollapses<'_, Self::Leaf> = HashMap::new();
         warnings.retain_mut(|w| match w {
             Warning::DuplicateCollapsed {
                 path,
                 source,
                 matched,
+                key,
                 held,
                 kept,
                 ..
             } => {
-                let (normalized, as_read) = match source {
-                    Source::Target => (&target, target_as_read.as_ref()),
-                    Source::Desired => (&desired, desired_as_read.as_ref()),
+                let (normalized, as_read, risks) = match source {
+                    Source::Target => (&target, target_as_read.as_ref(), &target_risks),
+                    Source::Desired => (&desired, desired_as_read.as_ref(), &desired_risks),
                 };
                 let made = match (
                     normalized.get_path(path),
@@ -331,12 +348,37 @@ pub(crate) trait Backend {
                             read_elements.len(),
                             "normalization resized the array at {path:?}"
                         );
+                        let (key, matched) = (key.as_deref(), &*matched);
+                        let denotes = |element: &Node<Self::Leaf>| match key {
+                            None => element == matched,
+                            Some(field) => identity(element, opts.merge_keys.candidates(path))
+                                .is_some_and(|(f, value)| f == *field && value == *matched),
+                        };
                         let originals: HashSet<&Node<Self::Leaf>> = normalized_elements
                             .iter()
                             .zip(read_elements)
-                            .filter(|(element, _)| *element == matched)
-                            .map(|(_, original)| original)
+                            .filter(|(element, _)| denotes(element))
+                            .filter_map(|(_, read)| match key {
+                                None => Some(read),
+                                Some(field) => read.as_map().and_then(|m| m.get(field)),
+                            })
                             .collect();
+                        if key.is_some() {
+                            let entry = key_collapses
+                                .entry((path.clone(), matched.clone()))
+                                .or_insert_with(|| KeyCollapse {
+                                    originals: HashSet::new(),
+                                    kept: *kept,
+                                    because: None,
+                                });
+                            entry.originals.extend(originals.iter().copied());
+                            entry.because = entry.because.or_else(|| {
+                                risks
+                                    .iter()
+                                    .find(|n| n.path.starts_with(path))
+                                    .map(|n| n.because)
+                            });
+                        }
                         originals.len().saturating_sub(1)
                     }
                     _ => 0,
@@ -348,6 +390,30 @@ pub(crate) trait Backend {
             }
             _ => true,
         });
+        // Two distinct originals mean at least one was rewritten, so `because` is
+        // set, and a keyed merge keeps at most one record per key, so `kept` stays
+        // below `originals.len()`.
+        let mut key_collapses: Vec<_> = key_collapses
+            .into_iter()
+            .filter(|(_, collapse)| collapse.originals.len() >= 2)
+            .filter_map(|((path, _), collapse)| {
+                debug_assert!(collapse.kept < collapse.originals.len());
+                let because = collapse.because?;
+                Some((path, collapse.originals.len(), collapse.kept, because))
+            })
+            .collect();
+        // A `HashMap` iterates in an arbitrary order.
+        key_collapses.sort();
+        warnings.extend(
+            key_collapses
+                .into_iter()
+                .map(|(path, distinct, kept, because)| Warning::ArrayCollapsed {
+                    path,
+                    distinct,
+                    kept,
+                    because,
+                }),
+        );
         // Diagnostics only: none of these change the exit code.
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));

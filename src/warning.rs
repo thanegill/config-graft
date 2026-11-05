@@ -47,6 +47,9 @@ pub enum Warning<L: Leaf> {
         /// value under a merge key. Carried so a caller can find the elements it
         /// denotes structurally rather than by rendering.
         matched: Node<L>,
+        /// The merge-key field `matched` is the value of, or `None` when the array
+        /// is matched by whole value.
+        key: Option<String>,
         /// How many times it appeared in that input, and how many survived.
         held: usize,
         kept: usize,

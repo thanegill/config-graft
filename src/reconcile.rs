@@ -11,6 +11,7 @@ use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 mod arrays;
+pub(crate) use arrays::identity;
 
 /// A list of array elements -- the payload of a `Node::Array`. It's what the
 /// array-combining strategies produce, and (on a `merge` conflict) report.
