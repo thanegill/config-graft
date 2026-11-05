@@ -214,7 +214,7 @@ Implemented in **Rust** (this repo):
 - `src/format/toml_edit_apply.rs` — the comment-preserving TOML writer: mutates `toml_edit`'s format-preserving `DocumentMut` in place (touching only the keys that changed), with the same round-trip backstop that refuses any write that wouldn't reproduce the reconciled result.
 - `src/error.rs` — a typed `Error` enum (format-specific DESIRED errors) and an `Outcome`; `src/main.rs` maps these to exit codes.
 - `src/main.rs` — CLI (clap, per-format subcommands) and the atomic write.
-- `tests/{json,plist,yaml,toml,directory}.rs` (+ `tests/common`) — per-format integration tests exercising exit codes and file behavior.
+- `tests/{json,plist,yaml,toml,directory}.rs` (+ `tests/common`) — per-format integration tests exercising exit codes and file behavior. `tests/stdout_failure.rs` holds the one test that needs a test binary to itself (a failed `--stdout` write).
 - Map nodes use `indexmap`, and the JSON codec reads objects as an ordered list of entries, so TARGET key order is kept and new keys are appended.
 
 A `jq` + shell implementation of the same core (minus `--check`/`--diff` and atomic rename) also exists as `sync-json` in the author's nixos-config; this Rust binary is the hardened generalization.
