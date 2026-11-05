@@ -969,9 +969,8 @@ fn indent_flag_is_a_usage_error_for_yaml() {
 
 #[test]
 fn a_deeply_nested_target_is_refused_not_aborted() {
-    // Flow nesting is bounded only by saphyr's own flow-level limit, not the
-    // engine's `MAX_DEPTH`; a parser upgrade that raised it would let the
-    // recursion abort the process.
+    // saphyr's own flow-level limit refuses this before the `MAX_DEPTH` scan
+    // does; either has to, or the recursion aborts the process.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.yaml");
     let desired = dir.path().join("desired.yaml");
@@ -1037,4 +1036,140 @@ fn a_diff_shows_a_float_as_it_is_written() {
         "~ a: 1.5 => .inf\n~ b: 2.5 => 1.0e-7\n"
     );
     assert_eq!(fs::read_to_string(&target).unwrap(), "a: .inf\nb: 1.0e-7\n");
+}
+
+// ----- nesting depth -----
+
+/// A block sequence nested `depth` deep under the key `a`, written on one line
+/// in compact form so the file stays small however deep it goes.
+fn deep_block_sequence(depth: usize) -> String {
+    format!("a:\n  {}x\n", "- ".repeat(depth))
+}
+
+/// A block mapping nested `depth` deep, each level an explicit `?` key holding
+/// the next, in compact form on one line.
+fn deep_block_mapping(depth: usize) -> String {
+    format!("{}x\n", "? ".repeat(depth))
+}
+
+/// String-keyed block mappings nested `depth` deep, the root included, each
+/// level one space deeper than the last.
+fn deep_keyed_mapping(depth: usize) -> String {
+    let mut text: String = (0..depth - 1)
+        .map(|i| format!("{}k:\n", " ".repeat(i)))
+        .collect();
+    text.push_str(&format!("{}k: x\n", " ".repeat(depth - 1)));
+    text
+}
+
+/// Anchors that each wrap the previous one in a flow sequence, so the text
+/// nests two deep while the loaded document nests `1 + count` deep.
+fn alias_chain(count: usize) -> String {
+    let mut text = String::from("a0: &a0 [1]\n");
+    for i in 1..count {
+        text.push_str(&format!("a{i}: &a{i} [*a{}]\n", i - 1));
+    }
+    text
+}
+
+/// Run with `text` as TARGET or DESIRED and the other side a plain mapping, and
+/// assert the run refuses as too deep (exit 1, not a stack-overflow abort) and
+/// leaves TARGET untouched.
+fn assert_refused_as_too_deep(text: &str, as_desired: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let (target_text, desired_text) = if as_desired {
+        ("a: 1\n", text)
+    } else {
+        (text, "b: 1\n")
+    };
+    fs::write(&target, target_text).unwrap();
+    fs::write(&desired, desired_text).unwrap();
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "aborted instead of refusing: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), target_text);
+}
+
+#[test]
+fn a_deeply_nested_block_sequence_is_refused_not_aborted() {
+    let deep = deep_block_sequence(100_000);
+    assert_refused_as_too_deep(&deep, false);
+    assert_refused_as_too_deep(&deep, true);
+}
+
+#[test]
+fn a_deeply_nested_block_mapping_is_refused_not_aborted() {
+    let deep = deep_block_mapping(100_000);
+    assert_refused_as_too_deep(&deep, false);
+    assert_refused_as_too_deep(&deep, true);
+}
+
+#[test]
+fn nesting_one_past_the_cap_is_refused() {
+    // The root mapping is one level, so 512 sequences under `a` make 513.
+    assert_refused_as_too_deep(&deep_block_sequence(512), false);
+    assert_refused_as_too_deep(&deep_keyed_mapping(513), false);
+    assert_refused_as_too_deep(&deep_keyed_mapping(513), true);
+}
+
+#[test]
+fn many_sibling_collections_are_not_nesting() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let wide = format!("items:\n{}", "  - a: 1\n".repeat(600));
+    fs::write(&target, &wide).unwrap();
+    fs::write(&desired, "b: 1\n").unwrap();
+    let out = run(&["yaml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "a wide document was refused: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        format!("{wide}b: 1\n")
+    );
+}
+
+#[test]
+fn nesting_built_from_aliases_counts_toward_the_cap() {
+    assert_refused_as_too_deep(&alias_chain(512), false);
+    assert_refused_as_too_deep(&alias_chain(512), true);
+}
+
+#[test]
+fn a_document_at_the_depth_cap_reconciles_end_to_end() {
+    for at_cap in [
+        deep_block_sequence(511),
+        deep_keyed_mapping(512),
+        alias_chain(511),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.yaml");
+        let desired = dir.path().join("desired.yaml");
+        let base = dir.path().join("base.yaml");
+        fs::write(&target, &at_cap).unwrap();
+        fs::write(&desired, "b: 1\n").unwrap();
+        fs::write(&base, &at_cap).unwrap();
+        let out = run(&[
+            "yaml",
+            "--diff",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+            base.to_str().unwrap(),
+        ]);
+        assert!(
+            out.status.success(),
+            "a document at the cap did not survive a run: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "b: 1\n");
+    }
 }

@@ -178,6 +178,7 @@ dependencies = [
  "plist",
  "ryu",
  "saphyr",
+ "saphyr-parser",
  "serde_json",
  "sha2",
  "tempfile",
