@@ -336,19 +336,30 @@ fn main() {
     }
 }
 
+/// Whether [`write_atomic`] replaced the target.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WriteOutcome {
+    Written,
+    /// The target no longer held the bytes the run reconciled; nothing was written.
+    TargetChanged,
+}
+
 /// Atomic in-place write: temp file in the same dir, fsync, then rename over the
 /// target. Preserves the target's existing mode (0644 for new files).
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+///
+/// Renames only while the target still holds `expected` (`None`: no file), the bytes
+/// the content was reconciled from; otherwise discards the temp file. The check runs
+/// as late as it can, but `rename(2)` cannot make it conditional, so a write landing
+/// between the two is still replaced.
+pub(crate) fn write_atomic(
+    path: &Path,
+    content: &[u8],
+    expected: Option<&[u8]>,
+) -> std::io::Result<WriteOutcome> {
     let mode = fs::metadata(path)
         .ok()
         .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0o644);
-    write_atomic_mode(path, content, mode)
-}
-
-/// Atomic in-place write with an explicit permission mode (temp file in the same
-/// dir, fsync, set mode, then rename over the target).
-fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
     let dir = dest_dir(path);
     fs::create_dir_all(&dir)?;
 
@@ -357,13 +368,19 @@ fn write_atomic_mode(path: &Path, content: &[u8], mode: u32) -> std::io::Result<
     tmp.as_file().sync_all()?;
     tmp.as_file()
         .set_permissions(fs::Permissions::from_mode(mode))?;
+    let current = format::read_bytes(path).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("reading it back before the rename: {e}"))
+    })?;
+    if current.as_deref() != expected {
+        return Ok(WriteOutcome::TargetChanged);
+    }
     tmp.persist(path).map_err(|e| e.error)?;
     // fsync the directory so the rename itself survives a crash (content fsync alone
     // doesn't make the new directory entry durable). Best-effort: the rename already
     // landed, so a filesystem that can't fsync a directory (e.g. some network mounts)
     // must not turn a successful write into an error.
     let _ = fsync_dir(&dir);
-    Ok(())
+    Ok(WriteOutcome::Written)
 }
 
 /// fsync a directory so its recent entry changes (renames/creates/unlinks) are
@@ -452,5 +469,106 @@ mod tests {
             scoped,
             HashMap::from([(strings(&["servers"]), strings(&["name", "id"]))])
         );
+    }
+
+    mod guarded_write {
+        use std::fs;
+        use std::path::Path;
+
+        use crate::{write_atomic, WriteOutcome};
+
+        /// The names in `dir`, sorted, so a leftover temp file shows up.
+        fn names(dir: &Path) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn replaces_a_target_that_still_holds_the_expected_bytes() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::write(&target, "{\"a\": 1}\n").unwrap();
+
+            let written = write_atomic(&target, b"{\"a\": 2}\n", Some(b"{\"a\": 1}\n")).unwrap();
+
+            assert_eq!(written, WriteOutcome::Written);
+            assert_eq!(fs::read(&target).unwrap(), b"{\"a\": 2}\n");
+        }
+
+        #[test]
+        fn creates_a_target_that_is_still_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+
+            let written = write_atomic(&target, b"{}\n", None).unwrap();
+
+            assert_eq!(written, WriteOutcome::Written);
+            assert_eq!(fs::read(&target).unwrap(), b"{}\n");
+        }
+
+        #[test]
+        fn leaves_a_target_rewritten_since_the_read_untouched() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            // Same length as what was read: a size check alone would miss it.
+            fs::write(&target, "{\"a\": 9}\n").unwrap();
+
+            let written = write_atomic(&target, b"{\"a\": 2}\n", Some(b"{\"a\": 1}\n")).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert_eq!(fs::read(&target).unwrap(), b"{\"a\": 9}\n");
+            assert_eq!(names(dir.path()), ["t.json"]);
+        }
+
+        #[test]
+        fn a_target_created_since_the_read_is_a_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::write(&target, "{}\n").unwrap();
+
+            let written = write_atomic(&target, b"{}\n", None).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert_eq!(names(dir.path()), ["t.json"]);
+        }
+
+        #[test]
+        fn a_target_deleted_since_the_read_is_a_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+
+            let written = write_atomic(&target, b"{}\n", Some(b"{}\n")).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert!(names(dir.path()).is_empty());
+        }
+
+        #[test]
+        fn an_empty_target_is_not_an_absent_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::write(&target, "").unwrap();
+
+            let written = write_atomic(&target, b"{}\n", None).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert_eq!(fs::read(&target).unwrap(), b"");
+        }
+
+        #[test]
+        fn a_target_that_cannot_be_read_back_is_an_error_not_a_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::create_dir(&target).unwrap();
+
+            let error = write_atomic(&target, b"{}\n", Some(b"{}\n")).unwrap_err();
+
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(names(dir.path()), ["t.json"]);
+        }
     }
 }
