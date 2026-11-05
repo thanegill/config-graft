@@ -220,6 +220,13 @@ pub enum Indent {
     Tab,
 }
 
+/// Two spaces, what `--indent` defaults to.
+impl Default for Indent {
+    fn default() -> Indent {
+        Indent::Spaces(2)
+    }
+}
+
 /// A `--indent` value: a non-negative number of spaces, or `tab`. clap parses the
 /// flag through this, so an invalid value is a usage error (exit 2).
 impl FromStr for Indent {
