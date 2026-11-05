@@ -924,13 +924,43 @@ fn not_a_mapping_error_names_json() {
 }
 
 #[test]
+fn a_control_character_in_a_parse_error_is_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("c.json");
+    let desired = dir.path().join("d.json");
+    fs::write(&desired, "{\"a\": \u{1b}[31m}").unwrap();
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        err.contains("unexpected character `\\u{1b}`"),
+        "got: {err:?}"
+    );
+    assert!(!err.contains('\u{1b}'), "raw ESC reached stderr: {err:?}");
+}
+
+#[test]
+fn a_newline_inside_a_string_is_named_in_a_parse_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("c.json");
+    let desired = dir.path().join("d.json");
+    fs::write(&desired, "{\"a\": \"x\n").unwrap();
+    let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        err.contains("(line 1, column 9: unexpected character `\\u{a}`)"),
+        "got: {err:?}"
+    );
+}
+
+#[test]
 fn parse_failure_error_names_json() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("c.json");
     let desired = dir.path().join("d.json");
-    fs::write(&desired, "not json {").unwrap();
+    fs::write(&desired, "{\"a\": 1,\n  oops}").unwrap();
     let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(err.contains("not valid JSON"), "got: {err}");
+    assert!(
+        err.contains("is not valid JSON (line 2, column 3: unexpected character `o`)"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -1305,7 +1335,12 @@ fn a_deeply_nested_target_is_refused_not_aborted() {
         Some(1),
         "aborted instead of refusing: {out:?}"
     );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not valid JSON"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("nests deeper than the 512 levels config-graft reads"),
+        "got: {err}"
+    );
+    assert!(!err.contains("not valid JSON"), "got: {err}");
     assert_eq!(fs::read_to_string(&target).unwrap(), deep);
 }
 
@@ -1357,6 +1392,13 @@ fn a_deeply_nested_desired_is_refused_not_aborted() {
         Some(1),
         "aborted instead of refusing: {out:?}"
     );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("DESIRED at"), "got: {err}");
+    assert!(
+        err.contains("nests deeper than the 512 levels config-graft reads"),
+        "got: {err}"
+    );
+    assert!(!err.contains("not valid JSON"), "got: {err}");
     assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"a":1}"#);
 }
 

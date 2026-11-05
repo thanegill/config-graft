@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime};
 use indexmap::IndexMap;
 
 use super::{
-    Format, FormatKind, Normalization, Normalized, PlistFormat, ValueCodec, WriteOpts, MAX_DEPTH,
+    Format, FormatKind, Normalization, Normalized, ParseFailure, PlistFormat, ValueCodec,
+    WriteOpts, MAX_DEPTH,
 };
 use crate::error::Error;
 use crate::reconcile::KeyPath;
@@ -111,8 +112,8 @@ impl ValueCodec for Plist {
     type Leaf = PlistLeaf;
     type Value<'a> = plist::Value;
 
-    fn decode(value: &plist::Value) -> Option<Node<PlistLeaf>> {
-        Some(match value {
+    fn decode(value: &plist::Value) -> Result<Node<PlistLeaf>, ParseFailure> {
+        Ok(match value {
             plist::Value::Dictionary(d) => {
                 let mut map = IndexMap::with_capacity(d.len());
                 for (k, v) in d {
@@ -121,7 +122,7 @@ impl ValueCodec for Plist {
                 Node::Map(map)
             }
             plist::Value::Array(a) => {
-                Node::Array(a.iter().map(Plist::decode).collect::<Option<_>>()?)
+                Node::Array(a.iter().map(Plist::decode).collect::<Result<_, _>>()?)
             }
             plist::Value::Boolean(b) => Node::Leaf(PlistLeaf::Bool(*b)),
             plist::Value::Integer(i) => Node::Leaf(match (i.as_signed(), i.as_unsigned()) {
@@ -199,11 +200,17 @@ impl Format for Plist {
     const KIND: FormatKind = FormatKind::Plist;
     const PATH_SEP: &'static str = ":";
 
-    fn parse(bytes: &[u8]) -> Option<Node<PlistLeaf>> {
-        let value = plist::Value::from_reader(Cursor::new(bytes)).ok()?;
+    fn parse(bytes: &[u8]) -> Result<Node<PlistLeaf>, ParseFailure> {
+        let value = plist::Value::from_reader(Cursor::new(bytes)).map_err(|error| {
+            if error.is_io() || error.is_eof() {
+                ParseFailure::syntax("ends early or is malformed")
+            } else {
+                ParseFailure::syntax(error)
+            }
+        })?;
         if !nests_within_limit(&value) {
             dismantle(value);
-            return None;
+            return Err(ParseFailure::TooDeep);
         }
         Plist::decode(&value)
     }
@@ -685,11 +692,17 @@ mod tests {
 
     #[test]
     fn nesting_is_capped_at_the_container_count() {
-        assert!(Plist::parse(deep_xml(MAX_DEPTH).as_bytes()).is_some());
-        assert!(Plist::parse(deep_xml(MAX_DEPTH + 1).as_bytes()).is_none());
+        assert!(Plist::parse(deep_xml(MAX_DEPTH).as_bytes()).is_ok());
+        assert!(matches!(
+            Plist::parse(deep_xml(MAX_DEPTH + 1).as_bytes()),
+            Err(ParseFailure::TooDeep)
+        ));
         // Deep enough that walking or dropping the tree would abort the process,
         // so reaching this assertion at all is the thing being tested.
-        assert!(Plist::parse(deep_xml(50_000).as_bytes()).is_none());
+        assert!(matches!(
+            Plist::parse(deep_xml(50_000).as_bytes()),
+            Err(ParseFailure::TooDeep)
+        ));
     }
 
     /// A dictionary exercising every plist scalar type, including the exotic
