@@ -31,7 +31,7 @@ use indexmap::IndexMap;
 use sha2::{Digest as _, Sha256};
 
 use crate::error::Error;
-use crate::reconcile::KeyPath;
+use crate::reconcile::ManagedPath;
 use crate::render::write_separated;
 use crate::value::{Leaf, Node};
 
@@ -559,15 +559,15 @@ pub fn apply_tree(
 /// app-created *empty* subdirectory also counts as unmanaged content -- mirroring
 /// the reserved-key leaf that `Node::leaf_paths` would have seen.
 fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<FsLeaf>>) -> bool {
-    fn unmanaged_at(path: &KeyPath, base: Option<&Node<FsLeaf>>) -> bool {
+    fn unmanaged_at(path: &ManagedPath, base: Option<&Node<FsLeaf>>) -> bool {
         base.and_then(|b| b.get_path(path)).is_none()
     }
-    fn walk(node: &FsTree, path: &mut KeyPath, base: Option<&Node<FsLeaf>>) -> bool {
+    fn walk(node: &FsTree, path: &mut ManagedPath, base: Option<&Node<FsLeaf>>) -> bool {
         match node {
             FsTree::File { .. } | FsTree::Symlink { .. } => unmanaged_at(path, base),
             FsTree::Dir { attrs, entries } => {
                 if attrs.is_some() {
-                    path.push_key(DIR_ATTRS_KEY.to_string());
+                    path.push(DIR_ATTRS_KEY.to_string());
                     let unmanaged = unmanaged_at(path, base);
                     path.pop();
                     if unmanaged {
@@ -575,7 +575,7 @@ fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<FsLeaf>>) -> bool {
                     }
                 }
                 entries.iter().any(|(name, child)| {
-                    path.push_key((*name).to_string());
+                    path.push((*name).to_string());
                     let r = walk(child, path, base);
                     path.pop();
                     r
@@ -583,7 +583,7 @@ fn fstree_has_unmanaged(cur: &FsTree, base: Option<&Node<FsLeaf>>) -> bool {
             }
         }
     }
-    walk(cur, &mut KeyPath::new(), base)
+    walk(cur, &mut ManagedPath::new(), base)
 }
 
 /// Reconcile the entries of one directory: apply its own attributes, create/update
