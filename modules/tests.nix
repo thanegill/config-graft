@@ -6,10 +6,11 @@
 #
 # Almost everything here is a pure evaluation of `lib/common.nix` -- no platform
 # module, no home-manager input -- so the assertions read as plain
-# expected/actual. `binaryTargetRun`, `homeFileMigrationRun`, `domainRuns` and
-# `runningRuns` are the exceptions: they run the generated script, with the real
-# binary, against files the builder makes. `hmActivation` evaluates the
-# home-manager module itself, with home-manager's own pieces stubbed.
+# expected/actual. `binaryTargetRun`, `homeFileMigrationRun`, `domainRuns`,
+# `runningRuns` and `restartRuns` are the exceptions: they run the generated
+# script, with the real binary, against files the builder makes. `hmActivation`
+# evaluates the home-manager module itself, with home-manager's own pieces
+# stubbed.
 {
   lib,
   pkgs,
@@ -28,8 +29,20 @@ let
       format = pkgs.formats.plist { };
       cfprefsdDomain = null;
       binary = false;
-      whileRunning.skip = [ ];
       followSymlinks = false;
+    }
+    // overrides
+    // {
+      whileRunning = whileRunning (overrides.whileRunning or { });
+    };
+
+  # `whileRunning` as the submodule would fill it in.
+  whileRunning =
+    overrides:
+    {
+      skip = [ ];
+      restart = [ ];
+      quitTimeout = 10;
     }
     // overrides;
 
@@ -61,6 +74,41 @@ let
     };
 
   script = scriptOn true;
+
+  # A file entry's script with `whileRunning.restart` set, as `user` would run it
+  # (null for home-manager).
+  restartScript =
+    user:
+    common.mkEntryReconcileScript {
+      inherit lib pkgs;
+      format = {
+        name = "plist";
+      };
+      entry = entry { whileRunning.restart = [ "com.example.First" ]; };
+      desired = "/desired.plist";
+      target = "/target.plist";
+      restartUser = user;
+    };
+
+  # The messages of the `whileRunning.restart` assertions that fail for one entry
+  # that sets it.
+  restartFailures =
+    {
+      darwin ? true,
+      needsUser ? false,
+      restartUser ? null,
+    }:
+    map (a: a.message) (
+      builtins.filter (a: !a.assertion) (
+        common.mkRestartAssertions {
+          inherit lib needsUser restartUser;
+          pkgs = hostPkgs darwin;
+          parent = "environment";
+          optionName = "managedPlist";
+          entries.probe = entry { whileRunning.restart = [ "com.example.First" ]; };
+        }
+      )
+    );
 
   plistEntryType =
     parent:
@@ -421,7 +469,7 @@ let
   );
 
   runningDomainScenario = scenario "running-cfprefsd-scenario" (
-    domainScript (domainEntry // { whileRunning.skip = watched; })
+    domainScript (domainEntry // { whileRunning = whileRunning { skip = watched; }; })
   );
 
   directoryScenario = scenario "running-directory-scenario" (
@@ -436,7 +484,7 @@ let
         manageRoot = false;
         noOwner = true;
         xattrs = "none";
-        whileRunning.skip = watched;
+        whileRunning = whileRunning { skip = watched; };
       };
       target = "target-dir";
       commands.pgrep = stubPgrep;
@@ -501,6 +549,185 @@ let
         echo "whileRunning.skip ok" > $out
       '';
 
+  # `whileRunning.restart` against stub `osascript`, `open` and `sleep` (never the
+  # real ones). Each app's running state is a file the stubs share: `osascript`
+  # answers `is running` from it (or fails, `queryfails`, or fails as an app that
+  # is not installed does, `notinstalled`, -1728) and, told to quit, clears it
+  # (`ok`), leaves it set (`stuck`), clears it but reports the reply timing out
+  # (`slow`, -1712) or the connection dropping (`dies`, -609), keeps answering
+  # `true` from the first check after the quit and while the poll sleeps between
+  # checks, then exits at the first check not preceded by a sleep (`late`: after
+  # the poll gives up, by either bound), or refuses with the Automation error
+  # (`denied`), per app; `open` sets it again and logs the relaunch. The stub
+  # `sleep` only marks that a sleep happened.
+  stubOsascript = pkgs.writeShellScript "stub-osascript" ''
+    script="$*"
+    id=''${script#*application id \"}
+    id=''${id%%\"*}
+    echo "$script" >> "$STUB_DIR/osascript.log"
+    case "$id" in
+      com.example.First) mode=$STUB_QUIT_FIRST ;;
+      *) mode=$STUB_QUIT_SECOND ;;
+    esac
+    case "$script" in
+      *"is running"*)
+        if [ "$mode" = queryfails ]; then
+          echo "execution error: Connection is invalid. (-609)" >&2
+          exit 1
+        fi
+        if [ "$mode" = notinstalled ]; then
+          # As macOS prints it, curly apostrophe (U+2019) and all.
+          printf 'syntax error: Can\342\200\231t get application id "%s". (-1728)\n' "$id" >&2
+          exit 1
+        fi
+        echo "warning: noise on stderr" >&2
+        if [ -f "$STUB_DIR/late.$id" ]; then
+          if [ "$(cat "$STUB_DIR/late.$id")" = quit ]; then
+            echo polling > "$STUB_DIR/late.$id"
+          elif ! rm "$STUB_DIR/slept" 2>/dev/null; then
+            echo false > "$STUB_DIR/app.$id"
+          fi
+        fi
+        cat "$STUB_DIR/app.$id"
+        ;;
+      *"to quit"*)
+        case "$mode" in
+          ok) echo false > "$STUB_DIR/app.$id" ;;
+          stuck) ;;
+          slow)
+            echo false > "$STUB_DIR/app.$id"
+            echo "execution error: AppleEvent timed out. (-1712)" >&2
+            exit 1
+            ;;
+          dies)
+            echo false > "$STUB_DIR/app.$id"
+            echo "execution error: Connection is invalid. (-609)" >&2
+            exit 1
+            ;;
+          late) echo quit > "$STUB_DIR/late.$id" ;;
+          denied)
+            echo "execution error: Not authorized to send Apple events to $id. (-1743)" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
+  '';
+
+  stubOpen = pkgs.writeShellScript "stub-open" ''
+    echo "$*" >> "$STUB_DIR/open.log"
+    echo true > "$STUB_DIR/app.''${*: -1}"
+  '';
+
+  restartScenario = scenario "restart-scenario" (
+    common.mkEntryReconcileScript {
+      inherit lib pkgs;
+      format = {
+        name = "json";
+      };
+      entry = entry {
+        inherit package;
+        whileRunning = {
+          skip = [ "MeetingBar" ];
+          restart = [
+            "com.example.First"
+            "com.example.Second"
+          ];
+          quitTimeout = 1;
+        };
+      };
+      desired = pkgs.writeText "desired.json" ''{"a": 1}'';
+      target = "target.json";
+      commands = {
+        pgrep = stubPgrep;
+        osascript = stubOsascript;
+        open = stubOpen;
+        sleep = pkgs.writeShellScript "stub-sleep" ''touch "$STUB_DIR/slept"'';
+      };
+    }
+  );
+
+  # One case per line: name, then each app's state before the run and how it
+  # answers a quit, then what must happen. `relaunched` lists the apps `open` must
+  # be called for, `grafted` whether the target was reconciled, and `warning` a
+  # substring the skip warning must carry (`-` for no warning).
+  restartRuns =
+    pkgs.runCommand "config-graft-module-restart"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+      }
+      ''
+        export STUB_DIR=$PWD STUB_FIRST=1 STUB_SECOND=1
+        fail() { echo "$1 ($case strict=$STRICT)"; cat out; exit 1; }
+        while read -r case first second quitFirst quitSecond target grafted relaunched warning; do
+          for STRICT in 1 0; do
+            export STRICT STUB_QUIT_FIRST=$quitFirst STUB_QUIT_SECOND=$quitSecond
+            rm -f osascript.log open.log pgrep.log out late.* slept
+            echo "$first" > app.com.example.First
+            echo "$second" > app.com.example.Second
+            if [ "$target" = bad ]; then echo 'not json' > target.json; else echo '{"app": true}' > target.json; fi
+            [ "$case" = skip ] && export STUB_FIRST=0 || export STUB_FIRST=1
+            [ "$case" = dryRun ] && export DRY_RUN=1 || unset DRY_RUN
+
+            status=0
+            ${restartScenario} > out 2>&1 || status=$?
+            if [ "$target" = bad ] && [ "$STRICT" = 1 ]; then
+              [ "$status" != 0 ] || fail "a failed reconcile did not fail the activation"
+            else
+              [ "$status" = 0 ] || fail "the scenario exited $status"
+              grep -q "reached the next entry" out || fail "the script stopped short"
+            fi
+
+            if [ "$grafted" = yes ]; then
+              [ "$(jq -r .a target.json)" = 1 ] || fail "the entry was not reconciled"
+            elif [ "$target" = good ]; then
+              [ "$(cat target.json)" = '{"app": true}' ] || fail "a skipped entry was reconciled"
+            fi
+
+            touch open.log
+            actual=$(sed 's/^-g -b com\.example\.//' open.log | paste -sd , -)
+            [ "''${actual:--}" = "$relaunched" ] || fail "relaunched ''${actual:--}, not $relaunched"
+
+            if [ "$warning" = - ]; then
+              ! grep -q "warning: Skipping" out || fail "skipped without cause"
+            else
+              grep -qF "''${warning//_/ }" out || fail "no warning carrying \"''${warning//_/ }\""
+            fi
+            case "$case:$first:$second" in
+              skip:* | dryRun:* | *:false:false)
+                ! grep -q "to quit" osascript.log 2>/dev/null || fail "asked an app to quit"
+                ;;
+              notInstalled:*)
+                ! grep -q 'First" to quit' osascript.log || fail "asked an app that is not installed to quit"
+                ;;
+              firstStuck:* | queryFails:*)
+                ! grep -q 'Second" to quit' osascript.log || fail "went on to Second after First was blocked"
+                ;;
+            esac
+            if [ "$case" = queryFails ]; then
+              grep -qF "(-609)" out || fail "the failed check's stderr was not shown"
+            fi
+            [ "$case" != skip ] || [ ! -e osascript.log ] || fail "restart ran after a skip"
+          done
+        done <<'CASES'
+        quits true true ok ok good yes First,Second -
+        notRunning false false ok ok good yes - -
+        oneRunning false true ok ok good yes Second -
+        timesOut true true ok stuck good no First com.example.Second_did_not_quit_within_1_second
+        firstStuck true true stuck ok good no - com.example.First_did_not_quit_within_1_second
+        slowReply true false slow ok good yes First -
+        dies true false dies ok good no First asking_com.example.First_to_quit_failed
+        lateExit true false late ok good no First com.example.First_did_not_quit_within_1_second
+        denied true true ok denied good no First Privacy_&_Security_>_Automation
+        queryFails true true queryfails ok good no - could_not_tell_whether_com.example.First_is_running
+        notInstalled true true notinstalled ok good yes Second -
+        graftFails true false ok ok bad no First -
+        skip true true ok ok good no - MeetingBar_is_running
+        dryRun true true ok ok good yes - -
+        CASES
+        echo "whileRunning.restart ok" > $out
+      '';
+
   # A generator distinguishable from the default only by what it emits. Under the
   # old `builtins.toJSON` path the entry's `format` was bypassed, so this produced
   # a derivation identical to the default one -- which is exactly the regression
@@ -546,7 +773,7 @@ let
         manageRoot = false;
         noOwner = false;
         xattrs = "all";
-        whileRunning.skip = [ ];
+        whileRunning = whileRunning { };
       }
       // overrides;
       target = "/target";
@@ -799,6 +1026,70 @@ let
         || lib.hasInfix "pgrep" (directoryFlags { });
     }
     {
+      name = "an entry without whileRunning.restart quits nothing";
+      expected = false;
+      actual =
+        lib.hasInfix "osascript" (script { })
+        || lib.hasInfix "osascript" (script {
+          cfprefsdDomain = "com.example.app";
+        })
+        || lib.hasInfix "osascript" (directoryFlags { });
+    }
+    {
+      # nix-darwin's own pattern for acting as `system.primaryUser`.
+      name = "a system restart quits and relaunches as system.primaryUser";
+      expected = true;
+      actual =
+        let
+          asAlice = ''/bin/launchctl asuser "$(/usr/bin/id -u -- alice)" /usr/bin/sudo --user=alice -- '';
+          systemScript = restartScript "alice";
+        in
+        lib.hasInfix "${asAlice}/usr/bin/osascript -e 'application id \"com.example.First\" is running'" systemScript
+        && lib.hasInfix "${asAlice}/usr/bin/osascript -e 'with timeout of 10 seconds' -e 'tell application id \"com.example.First\" to quit'" systemScript
+        && lib.hasInfix "${asAlice}/usr/bin/open -g -b com.example.First" systemScript
+        && !(lib.hasInfix "DRY_RUN" systemScript);
+    }
+    {
+      name = "a home-manager restart runs osascript and open as the activating user";
+      expected = true;
+      actual =
+        let
+          homeScript = restartScript null;
+        in
+        !(lib.hasInfix "launchctl" homeScript)
+        && lib.hasInfix "/usr/bin/open -g -b com.example.First" homeScript
+        && lib.hasInfix "[[ -v DRY_RUN ]]" homeScript;
+    }
+    {
+      # Once, for the platform: NixOS has no system.primaryUser to point at.
+      name = "restart on a non-Darwin host is rejected";
+      expected = 1;
+      actual = builtins.length (restartFailures {
+        darwin = false;
+        needsUser = true;
+      });
+    }
+    {
+      name = "a system restart without system.primaryUser is rejected";
+      expected = 1;
+      actual = builtins.length (restartFailures {
+        needsUser = true;
+      });
+    }
+    {
+      name = "a system restart with system.primaryUser is accepted";
+      expected = 0;
+      actual = builtins.length (restartFailures {
+        needsUser = true;
+        restartUser = "alice";
+      });
+    }
+    {
+      name = "a home-manager restart needs no user";
+      expected = 0;
+      actual = builtins.length (restartFailures { });
+    }
+    {
       # macOS's pgrep matches the basename of argv[0] in full.
       name = "on macOS the whole name is matched, as a literal, by /usr/bin/pgrep";
       expected = true;
@@ -833,4 +1124,5 @@ pkgs.runCommand "config-graft-module-tests" { } ''
   cat ${domainRuns} >> $out
   cat ${runningRuns} >> $out
   cat ${homeFileMigrationRun} >> $out
+  cat ${restartRuns} >> $out
 ''

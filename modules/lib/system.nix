@@ -29,6 +29,7 @@ in
   pkgs,
   defaultPackage,
   activationWiring,
+  restartUser ? null,
 }:
 let
   managedOption =
@@ -64,9 +65,10 @@ let
           deep-merges and prunes, and {command}`defaults import` writes it back, so
           the change isn't lost to cfprefsd's in-memory cache. Runs as root, so it
           targets system/global domains under {file}`/Library/Preferences`. Name
-          a process that writes the domain in {option}`whileRunning.skip` to
-          leave it alone while that process runs. {option}`target` is ignored in
-          this mode.
+          an app that writes the domain in {option}`whileRunning.restart` to quit
+          and relaunch it around the reconcile (as {option}`system.primaryUser`),
+          or its process in {option}`whileRunning.skip` to leave the domain alone
+          while it runs. {option}`target` is ignored in this mode.
         '';
       };
     };
@@ -106,7 +108,12 @@ let
     inherit entry;
     snapshotRel = "config-graft/managed-directory/${configGraftLib.safeName name}";
     script = configGraftLib.mkDirectoryReconcileScript {
-      inherit lib pkgs entry;
+      inherit
+        lib
+        pkgs
+        entry
+        restartUser
+        ;
       target = entry.target;
     };
   }) config.environment.managedDirectory;
@@ -172,7 +179,7 @@ let
       e:
       prevSnapshot e.snapshotRel
       + configGraftLib.mkEntryReconcileScript {
-        inherit lib pkgs;
+        inherit lib pkgs restartUser;
         inherit (e) format entry desired;
         target = e.entry.target;
       }
@@ -231,6 +238,23 @@ in
           parent = "environment";
         }
       ) activeByFormat
+      ++ lib.concatMap (
+        { format, active }:
+        configGraftLib.mkRestartAssertions {
+          inherit lib pkgs restartUser;
+          parent = "environment";
+          inherit (format) optionName;
+          entries = active;
+          needsUser = true;
+        }
+      ) activeByFormat
+      ++ configGraftLib.mkRestartAssertions {
+        inherit lib pkgs restartUser;
+        parent = "environment";
+        optionName = "managedDirectory";
+        entries = config.environment.managedDirectory;
+        needsUser = true;
+      }
       ++ (
         # config-graft reconciles a mutable file/tree in place; `environment.etc`
         # symlinks an immutable store path into /etc. Reject a target that is also an
