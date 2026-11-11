@@ -730,6 +730,35 @@ fn preserves_existing_file_mode() {
 }
 
 #[test]
+fn a_privileged_rewrite_keeps_the_owner() {
+    use std::os::unix::fs::{chown, MetadataExt, PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    fs::write(&target, r#"{"a":1}"#).unwrap();
+    fs::write(&desired, r#"{"b":2}"#).unwrap();
+    if fs::metadata(&target).unwrap().uid() != 0 {
+        eprintln!("skipping a_privileged_rewrite_keeps_the_owner: not running as root");
+        return;
+    }
+    chown(&target, Some(1), Some(1)).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+
+    assert!(
+        run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        fs::read_to_string(&target).unwrap().contains("\"b\""),
+        "nothing written"
+    );
+    let written = fs::metadata(&target).unwrap();
+    assert_eq!((written.uid(), written.gid()), (1, 1));
+    assert_eq!(written.permissions().mode() & 0o777, 0o640);
+}
+
+#[test]
 fn writes_to_bare_filename_in_cwd() {
     // TARGET has no directory component -> write_atomic falls back to ".".
     let dir = tempfile::tempdir().unwrap();
