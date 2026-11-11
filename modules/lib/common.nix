@@ -25,6 +25,11 @@ let
 
         This narrows the window rather than closing it: an app that starts after
         the check, or writes while the reconcile runs, can still race it.
+
+        A skipped entry is left as it is, but the activation still records this
+        generation's settings as the ones last applied, so a key removed from the
+        settings while the entry is skipped is never pruned: it stays in the
+        target as if the app had written it until it is removed by hand.
       '';
       type = lib.types.submodule {
         options.skip = lib.mkOption {
@@ -49,8 +54,163 @@ let
             character may do that on Linux.
           '';
         };
+
+        options.restart = lib.mkOption {
+          type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9.-]+");
+          default = [ ];
+          example = [ "com.leits.MeetingBar" ];
+          description = ''
+            Bundle ids of apps to quit before this entry is reconciled and to
+            relaunch afterwards (macOS only; a build-time assertion rejects it
+            on any other host). Checked after {option}`skip`, which still skips
+            without quitting anything.
+
+            Each listed app that is running is asked to quit with an Apple Event
+            ({command}`osascript`, `tell application id ... to quit`) and given
+            {option}`quitTimeout` seconds to exit; it is never force-killed. If
+            one does not exit in time, or the quit fails, the entry is skipped
+            with a warning, as {option}`skip` would, and every app the quit was
+            sent to and that has exited is relaunched. One still running then
+            (behind a save dialog, say) is left alone, and is not relaunched if it
+            quits later. Otherwise the entry is reconciled and the apps that were
+            running are relaunched in the background ({command}`open -g -b`), even
+            when the reconcile fails.
+
+            The first quit asks for the Automation permission: macOS shows a
+            prompt naming the app that runs the activation (your terminal, for
+            example) and the app being quit. Until it is allowed under System
+            Settings > Privacy & Security > Automation, the quit fails with error
+            -1743 and the entry is skipped. A running check that fails (a listed
+            app that is not installed may make it fail) skips the entry too. In a
+            system (nix-darwin) entry the app is quit and relaunched as
+            {option}`system.primaryUser`, which must be set; a copy another
+            logged-in user runs is not seen. A home-manager dry run only reports
+            what it would quit.
+          '';
+        };
+
+        options.quitTimeout = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 10;
+          description = ''
+            Seconds to wait for each app in {option}`restart` to exit after
+            being asked to quit, before giving up and skipping the entry.
+          '';
+        };
       };
     };
+
+  # Wraps an entry's reconcile `body` in quitting the running apps in `ids` and
+  # relaunching them afterwards. Running is asked of AppleScript by bundle id,
+  # which never launches the app; osascript exits 0 whether it prints `true` or
+  # `false`, so the output is what is compared. The quit is sent only after a
+  # `true`, since telling an app that is not running to quit can launch it, and
+  # under `with timeout`, since the reply waits on the app (a save sheet holds it
+  # for AppleScript's default two minutes); one deadline covers the reply and the
+  # poll, and a reply timeout (-1712) leaves the poll to decide. Every app the
+  # quit reached, even with an error (-609 when it exits before replying), is
+  # relaunched afterwards unless it is still running: `open` on a running app
+  # sends it a reopen event, which can open a window. A home-manager dry run
+  # (`DRY_RUN`) only reports what it would quit.
+  #
+  # The body runs in a subshell with errexit on, so it stops at its first failure
+  # and its status can be taken: home-manager's own errexit is lifted around the
+  # subshell, or the failure would end the activation before the relaunch. A
+  # failed reconcile still relaunches, then fails with `false`. That stops
+  # home-manager; in the system script it reaches the activation only as the
+  # script's last command.
+  guardRestart =
+    {
+      lib,
+      ids,
+      quitTimeout,
+      label,
+      user,
+      commands,
+      body,
+    }:
+    let
+      esc = lib.escapeShellArg;
+      osascript = commands.osascript or "/usr/bin/osascript";
+      open = commands.open or "/usr/bin/open";
+      sleep = commands.sleep or "/bin/sleep";
+      asUser =
+        if user == null then
+          ""
+        else
+          "/bin/launchctl asuser \"$(/usr/bin/id -u -- ${esc user})\" /usr/bin/sudo --user=${esc user} -- ";
+      timeout = toString quitTimeout;
+      seconds = if quitTimeout == 1 then "1 second" else "${timeout} seconds";
+      # Only stdout is compared, so a warning on stderr cannot turn `true` into
+      # something else; the first check lets stderr through to explain a failure.
+      isRunning = id: "${asUser}${osascript} -e ${esc ''application id "${id}" is running''}";
+      quitted = i: "_cgQuit${toString i}";
+      # Only home-manager has a dry run. The system script's `run` shim would
+      # still reconcile, so honouring `DRY_RUN` there would graft with the app up.
+      dryRun = if user == null then "[[ -v DRY_RUN ]]" else "false";
+      quit = i: id: ''
+        ${quitted i}=""
+        if [[ -z "$_restartBlocked" ]]; then
+          _state=$(${isRunning id}) || _state=""
+          if [[ $_state != true && $_state != false ]]; then
+            _restartBlocked="could not tell whether ${id} is running"
+          elif [[ $_state == false ]]; then
+            :
+          elif ${dryRun}; then
+            _i "Would quit %s and relaunch it after the reconcile" ${esc id}
+          else
+            _deadline=$((SECONDS + ${timeout}))
+            if ! _state=$(${asUser}${osascript} -e ${esc "with timeout of ${timeout} seconds"} -e ${esc ''tell application id "${id}" to quit''} -e 'end timeout' 2>&1 >/dev/null) \
+              && [[ $_state != *-1712* ]]; then
+              if [[ $_state == *-1743* || $_state == *-1744* ]]; then
+                _restartBlocked="not allowed to ask ${id} to quit; allow it under Privacy & Security > Automation"
+              else
+                ${quitted i}=1
+                _restartBlocked="asking ${id} to quit failed: $_state"
+              fi
+            else
+              ${quitted i}=1
+              _tries=0
+              until [[ "$(${isRunning id} 2>/dev/null)" == false ]]; do
+                if (( ++_tries > ${toString (quitTimeout * 2)} || SECONDS > _deadline )); then
+                  _restartBlocked="${id} did not quit within ${seconds}"
+                  break
+                fi
+                ${sleep} 0.5
+              done
+            fi
+          fi
+        fi
+      '';
+      relaunch = i: id: ''
+        if [[ -n "''$${quitted i}" && "$(${isRunning id} 2>/dev/null)" != true ]]; then
+          ${asUser}${open} -g -b ${esc id} \
+            || _iWarn "Could not relaunch %s after %s (whileRunning.restart)" ${esc id} ${esc label}
+        fi
+      '';
+    in
+    if ids == [ ] then
+      body
+    else
+      ''
+        _restartBlocked=""
+        _graftStatus=0
+        ${lib.concatStrings (lib.imap0 quit ids)}
+        if [[ -n "$_restartBlocked" ]]; then
+          _iWarn "Skipping %s: %s (whileRunning.restart)" ${esc label} "$_restartBlocked"
+        else
+          _errexit=""
+          if [[ $- == *e* ]]; then _errexit=1; set +e; fi
+          (
+            set -e
+        ${body}
+          )
+          _graftStatus=$?
+          if [[ -n "$_errexit" ]]; then set -e; fi
+        fi
+        ${lib.concatStrings (lib.imap0 relaunch ids)}
+        if (( _graftStatus != 0 )); then false; fi
+      '';
 
   # Wraps an entry's reconcile `body` so it runs only while none of `names` is
   # running. pgrep exits 1 when nothing matches; a match (0) or a pgrep failure
@@ -254,6 +414,9 @@ in
   # The caller sets `_prev` (the BASE snapshot path) beforehand and passes the
   # resolved `target`. `commands` replaces the system tools the script calls by
   # absolute path, for tests that run it against stubs; the modules never pass it.
+  # `restartUser` is who `whileRunning.restart` quits and relaunches apps as: null
+  # (home-manager) runs them as the activating user, a name (the system modules)
+  # goes through `launchctl asuser` and `sudo --user`.
   #
   # Shell vars are `_`-prefixed because home-manager runs this inline in its
   # activation shell, shared with every other module's activation code, so bare
@@ -268,10 +431,12 @@ in
       desired,
       target,
       commands ? { },
+      restartUser ? null,
     }:
     let
       defaults = commands.defaults or "/usr/bin/defaults";
       isDomain = format.name == "plist" && entry.cfprefsdDomain != null;
+      label = if isDomain then entry.cfprefsdDomain else target;
 
       domainScript = ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
@@ -315,8 +480,14 @@ in
     guardRunning {
       inherit lib pkgs commands;
       names = entry.whileRunning.skip;
-      label = if isDomain then entry.cfprefsdDomain else target;
-      body = if isDomain then domainScript else fileScript;
+      inherit label;
+      body = guardRestart {
+        inherit lib label commands;
+        inherit (entry.whileRunning) quitTimeout;
+        ids = entry.whileRunning.restart;
+        user = restartUser;
+        body = if isDomain then domainScript else fileScript;
+      };
     };
 
   # Directory-format entry type. Unlike the byte formats there is no `settings`
@@ -412,6 +583,7 @@ in
       entry,
       target,
       commands ? { },
+      restartUser ? null,
     }:
     let
       flags = lib.concatStringsSep " " (
@@ -424,11 +596,18 @@ in
       inherit lib pkgs commands;
       names = entry.whileRunning.skip;
       label = target;
-      body = ''
-        _target=${lib.escapeShellArg target}
-        _i "Reconciling managed directory tree %s" "$_target"
-        run ${lib.getExe entry.package} directory ${flags} "$_target" ${entry.source} "$_prev"
-      '';
+      body = guardRestart {
+        inherit lib commands;
+        inherit (entry.whileRunning) quitTimeout;
+        ids = entry.whileRunning.restart;
+        label = target;
+        user = restartUser;
+        body = ''
+          _target=${lib.escapeShellArg target}
+          _i "Reconciling managed directory tree %s" "$_target"
+          run ${lib.getExe entry.package} directory ${flags} "$_target" ${entry.source} "$_prev"
+        '';
+      };
     };
 
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
@@ -502,4 +681,42 @@ in
         `source`; they are mutually exclusive; use one.
       '';
     }) active;
+
+  # Build-time guards for `whileRunning.restart` on any entry type: it drives
+  # osascript and open, which exist only on macOS, and a system entry acts as
+  # `restartUser` (`system.primaryUser`), which must be set (`needsUser`).
+  mkRestartAssertions =
+    {
+      lib,
+      pkgs,
+      parent,
+      optionName,
+      entries,
+      needsUser ? false,
+      restartUser ? null,
+    }:
+    lib.concatLists (
+      lib.mapAttrsToList (
+        name: entry:
+        lib.optionals (entry.whileRunning.restart != [ ]) [
+          {
+            assertion = pkgs.stdenv.hostPlatform.isDarwin;
+            message = ''
+              ${parent}.${optionName}."${name}".whileRunning.restart is set, but
+              quitting and relaunching an app uses osascript and open, which
+              exist only on macOS (this configuration targets
+              ${pkgs.stdenv.hostPlatform.system}). Use whileRunning.skip instead.
+            '';
+          }
+          {
+            assertion = !needsUser || !pkgs.stdenv.hostPlatform.isDarwin || restartUser != null;
+            message = ''
+              ${parent}.${optionName}."${name}".whileRunning.restart is set, but
+              system.primaryUser is not: a system entry quits and relaunches the
+              app as that user. Set system.primaryUser.
+            '';
+          }
+        ]
+      ) entries
+    );
 }
