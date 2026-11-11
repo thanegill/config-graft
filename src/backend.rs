@@ -26,7 +26,7 @@ use crate::RunArgs;
 /// depends on the target's bytes.
 fn requested_write_opts(args: &RunArgs) -> WriteOpts {
     WriteOpts {
-        indent: args.indent.unwrap_or_default(),
+        indent: args.indent,
         plist_format: args.plist_format,
     }
 }

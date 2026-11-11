@@ -189,7 +189,7 @@ pub(crate) struct RunArgs {
     pub(crate) stdout: bool,
     pub(crate) diff: bool,
     pub(crate) check: bool,
-    pub(crate) indent: Option<Indent>,
+    pub(crate) indent: Indent,
     pub(crate) plist_format: PlistFormat,
     pub(crate) sort_keys: bool,
     pub(crate) array_strategy: ArrayStrategy,
@@ -240,7 +240,7 @@ impl RunArgs {
     /// are format-specific, so the caller supplies them (JSON sets `indent`, plist
     /// sets `plist_format`, YAML/TOML use the defaults). The directory-only fields
     /// take their inert defaults.
-    fn from_byte(byte: ByteArgs, indent: Option<Indent>, plist_format: PlistFormat) -> RunArgs {
+    fn from_byte(byte: ByteArgs, indent: Indent, plist_format: PlistFormat) -> RunArgs {
         let CommonArgs {
             target,
             desired,
@@ -292,7 +292,7 @@ impl RunArgs {
             stdout: false,
             diff,
             check,
-            indent: None,
+            indent: Indent::default(),
             plist_format: PlistFormat::default(),
             sort_keys: false,
             // Matches the byte formats' `--array-strategy` default (`merge`); a tree
@@ -313,18 +313,24 @@ fn main() {
     let result = match cli.command {
         Command::Json(a) => ByteBackend::<Json>::run(&RunArgs::from_byte(
             a.byte,
-            Some(a.indent),
+            a.indent,
             PlistFormat::default(),
         )),
-        Command::Yaml(a) => {
-            ByteBackend::<Yaml>::run(&RunArgs::from_byte(a, None, PlistFormat::default()))
-        }
-        Command::Toml(a) => {
-            ByteBackend::<Toml>::run(&RunArgs::from_byte(a, None, PlistFormat::default()))
-        }
-        Command::Plist(a) => {
-            ByteBackend::<Plist>::run(&RunArgs::from_byte(a.byte, None, a.plist_format))
-        }
+        Command::Yaml(a) => ByteBackend::<Yaml>::run(&RunArgs::from_byte(
+            a,
+            Indent::default(),
+            PlistFormat::default(),
+        )),
+        Command::Toml(a) => ByteBackend::<Toml>::run(&RunArgs::from_byte(
+            a,
+            Indent::default(),
+            PlistFormat::default(),
+        )),
+        Command::Plist(a) => ByteBackend::<Plist>::run(&RunArgs::from_byte(
+            a.byte,
+            Indent::default(),
+            a.plist_format,
+        )),
         Command::Directory(a) => Directory::run(&RunArgs::from_dir(a)),
     };
     match result {
