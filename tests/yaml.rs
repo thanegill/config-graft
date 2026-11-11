@@ -197,6 +197,112 @@ fn removal_collapses_empty_parent() {
 }
 
 #[test]
+fn removal_keeps_a_parent_desired_declares_empty_and_reruns_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.yaml");
+    let desired = dir.path().join("desired.yaml");
+    let base = dir.path().join("base.yaml");
+    fs::write(&target, "a: 1  # keep\nsec:\n  only: 5\n").unwrap();
+    fs::write(&desired, "sec: {}\n").unwrap();
+    fs::write(&base, "sec:\n  only: 5\n").unwrap();
+    let paths = [
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ];
+
+    let out = run(&[&["yaml"], &paths[..]].concat());
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = fs::read_to_string(&target).unwrap();
+    assert_eq!(first, "a: 1  # keep\nsec: {}\n");
+
+    fs::copy(&desired, &base).unwrap();
+    let out = run(&[&["yaml", "--check"], &paths[..]].concat());
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), first);
+}
+
+#[test]
+fn filling_an_empty_flow_mapping_rewrites_it_as_a_block() {
+    yaml_golden(
+        "sec: {}\nz: 1  # keep\n",
+        "sec:\n  x: 1\n",
+        None,
+        "sec:\n  x: 1\nz: 1  # keep\n",
+    );
+}
+
+#[test]
+fn filling_an_empty_flow_mapping_drops_its_key_line_comment() {
+    yaml_golden(
+        "sec: {}  # note\n",
+        "sec:\n  x: 1\n",
+        None,
+        "sec:\n  x: 1\n",
+    );
+}
+
+#[test]
+fn emptying_a_mapping_drops_the_comments_up_to_its_last_entry() {
+    yaml_golden(
+        "# above\nsec:  # key\n  x: 1\n  # mid\n  y: 2  # last\n  # after\napp: true\n",
+        "sec: {}\n",
+        Some("sec:\n  x: 1\n  y: 2\n"),
+        "# above\nsec: {}\n  # after\napp: true\n",
+    );
+}
+
+#[test]
+fn a_declared_empty_flow_mapping_is_kept() {
+    yaml_golden(
+        "sec: {only: 5}  # c\napp: true\n",
+        "sec: {}\n",
+        Some("sec:\n  only: 5\n"),
+        "sec: {}\napp: true\n",
+    );
+}
+
+#[test]
+fn a_structural_change_under_an_explicit_key_is_written_at_the_line_indent() {
+    yaml_golden(
+        "? a\n: 5\nz: 1\n",
+        "a:\n  b: 1\n",
+        None,
+        "a:\n  b: 1\nz: 1\n",
+    );
+    yaml_golden("? a\n: 5\n", "a:\n  b: 1\n", None, "a:\n  b: 1\n");
+}
+
+#[test]
+fn a_structural_change_under_an_anchored_key_is_written_at_the_line_indent() {
+    yaml_golden("&k a:\n  b: 1\nz: 1\n", "a: 5\n", None, "a: 5\nz: 1\n");
+}
+
+#[test]
+fn a_structural_change_under_a_tagged_key_is_written_at_the_line_indent() {
+    yaml_golden("!!str a:\n  b: 1\nz: 1\n", "a: 5\n", None, "a: 5\nz: 1\n");
+}
+
+#[test]
+fn a_tab_before_a_flow_entry_is_not_counted_as_indent() {
+    yaml_golden(
+        "x: {\n  \ta: 1,\n  \tb: {c: 1}\n}\n",
+        "x:\n  b: 5\n",
+        None,
+        "x: {\n  \ta: 1,\n  b: 5\n}\n",
+    );
+}
+
+#[test]
 fn top_level_addition_keeps_existing_comment() {
     yaml_golden("a: 1  # c\n", "z: 9\n", None, "a: 1  # c\nz: 9\n");
 }
@@ -784,6 +890,51 @@ fn refuses_when_an_edit_would_desync_an_alias() {
     // Changing a value inside an anchored mapping would change the aliased copy
     // too; the round-trip backstop catches the mismatch and refuses.
     yaml_refuses("base: &b\n  x: 1\nuse: *b\n", "base:\n  x: 2\n");
+}
+
+#[test]
+fn a_declared_empty_mapping_before_a_sibling_is_kept() {
+    yaml_golden(
+        "sec:\n  only: 5\napp: true  # keep\n",
+        "sec: {}\n",
+        Some("sec:\n  only: 5\n"),
+        "sec: {}\napp: true  # keep\n",
+    );
+}
+
+#[test]
+fn a_declared_empty_mapping_under_an_explicit_key_is_kept() {
+    let base = Some("sec:\n  only: 5\n");
+    yaml_golden(
+        "? sec\n: only: 5\napp: true\n",
+        "sec: {}\n",
+        base,
+        "sec: {}\napp: true\n",
+    );
+    yaml_golden("? sec\n:\n  only: 5\n", "sec: {}\n", base, "sec: {}\n");
+    yaml_golden(
+        "p:\n  ? sec\n  : only: 5\n  z: 1\n",
+        "p:\n  sec: {}\n",
+        Some("p:\n  sec:\n    only: 5\n"),
+        "p:\n  sec: {}\n  z: 1\n",
+    );
+}
+
+#[test]
+fn a_nested_declared_empty_mapping_beside_a_pruned_sibling_is_kept() {
+    let base = "a:\n  b:\n    c: 1\n  d:\n    e: 2\n";
+    yaml_golden(
+        "app: true\na:\n  b:\n    c: 1\n  d:\n    e: 2\n",
+        "a:\n  b: {}\n",
+        Some(base),
+        "app: true\na:\n  b: {}\n",
+    );
+    yaml_golden(
+        "a:\n  b:\n    c: 1\n  d:\n    e: 2\napp: true\n",
+        "a:\n  b: {}\n",
+        Some(base),
+        "a:\n  b: {}\napp: true\n",
+    );
 }
 
 #[test]

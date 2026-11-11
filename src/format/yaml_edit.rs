@@ -297,7 +297,9 @@ fn past_indented_comments(src: &str, key_start: usize, end: usize) -> usize {
 }
 
 /// Diff `tmap` → `rmap` for one mapping (whose marked node is `node`), pushing
-/// edits. Recurses into mappings present on both sides.
+/// edits. Recurses into mappings non-empty on both sides. A mapping the result
+/// empties or fills is re-rendered whole: deleting its last entry would leave
+/// `key:`, which reads as null, and an empty `{}` has no entry to add after.
 fn diff_map(
     tmap: &IndexMap<String, Node<YamlLeaf>>,
     rmap: &IndexMap<String, Node<YamlLeaf>>,
@@ -326,7 +328,9 @@ fn diff_map(
         let Some(tv) = tmap.get(k) else { continue };
         let entry = find(k).ok_or(Error::YamlUnsafe)?;
         match (tv, rv) {
-            (Node::Map(tc), Node::Map(rc)) => diff_map(tc, rc, entry.value, src, offsets, edits)?,
+            (Node::Map(tc), Node::Map(rc)) if !tc.is_empty() && !rc.is_empty() => {
+                diff_map(tc, rc, entry.value, src, offsets, edits)?
+            }
             _ if tv == rv => {}
             (Node::Leaf(_), Node::Leaf(_)) => {
                 // Scalar → scalar: replace just the value span (keeps any inline
@@ -339,7 +343,7 @@ fn diff_map(
             }
             _ => {
                 // A structural change (to/from a block): re-render the whole entry.
-                let ind = indent_of(src, entry.key_start);
+                let ind = line_indent(src, entry.key_start);
                 let frag = emit_entry(k, rv, ind);
                 edits.push(Edit {
                     start: line_start(src, entry.key_start),
@@ -415,9 +419,17 @@ fn line_end(src: &str, idx: usize) -> usize {
     src[idx..].find('\n').map_or(src.len(), |p| idx + p + 1)
 }
 
-/// Leading-whitespace width (in bytes) of the line containing `idx`.
+/// Byte column of `idx` within its line.
 fn indent_of(src: &str, idx: usize) -> usize {
     idx - line_start(src, idx)
+}
+
+/// Leading-space width of the line containing `idx`: an entry's block indent,
+/// which differs from its key's column for an explicit `? key` and for a tagged
+/// or anchored key. Tabs are not YAML indentation, so only spaces count.
+fn line_indent(src: &str, idx: usize) -> usize {
+    let line = &src[line_start(src, idx)..];
+    line.len() - line.trim_start_matches(' ').len()
 }
 
 #[cfg(test)]
@@ -455,6 +467,18 @@ mod tests {
     fn removes_key_with_its_inline_comment() {
         let out = apply("a: 1\nb: 2  # bye\nc: 3\n", &result("a: 1\nc: 3\n")).unwrap();
         assert_eq!(out, "a: 1\nc: 3\n");
+    }
+
+    #[test]
+    fn empties_a_nested_mapping_to_an_empty_flow_mapping() {
+        let out = apply("a: 1\nb:\n  c: 2\n", &result("a: 1\nb: {}\n")).unwrap();
+        assert_eq!(out, "a: 1\nb: {}\n");
+    }
+
+    #[test]
+    fn fills_an_empty_flow_mapping() {
+        let out = apply("a: {}\nz: 1\n", &result("a:\n  x: 1\nz: 1\n")).unwrap();
+        assert_eq!(out, "a:\n  x: 1\nz: 1\n");
     }
 
     #[test]
