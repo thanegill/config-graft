@@ -803,12 +803,15 @@ fn a_privileged_rewrite_keeps_the_owner() {
         return;
     }
     chown(&target, Some(1), Some(1)).unwrap();
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+    // Root hands the file back, so the rewrite is in place and keeps setuid too.
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o4640)).unwrap();
 
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
     assert!(
-        run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()])
-            .status
-            .success()
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
     assert!(
         fs::read_to_string(&target).unwrap().contains("\"b\""),
@@ -816,7 +819,83 @@ fn a_privileged_rewrite_keeps_the_owner() {
     );
     let written = fs::metadata(&target).unwrap();
     assert_eq!((written.uid(), written.gid()), (1, 1));
-    assert_eq!(written.permissions().mode() & 0o777, 0o640);
+    assert_eq!(written.permissions().mode() & 0o7777, 0o4640);
+}
+
+#[test]
+fn a_rewrite_keeps_what_an_in_place_write_would_and_says_what_it_drops() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let mode_of = || fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+    fs::write(&target, "{\n  \"b\": 2\n}\n").unwrap();
+    fs::write(&desired, r#"{"b":2}"#).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o1755)).unwrap();
+    assert_eq!(
+        mode_of(),
+        0o1755,
+        "the sticky bit did not stick on the scratch file"
+    );
+
+    let reconcile = || run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    let unchanged = reconcile();
+    assert!(unchanged.status.success());
+    assert_eq!(
+        mode_of(),
+        0o1755,
+        "a run with nothing to write touched the mode"
+    );
+    assert!(
+        unchanged.stderr.is_empty(),
+        "warned without writing: {}",
+        String::from_utf8_lossy(&unchanged.stderr)
+    );
+
+    fs::write(&desired, r#"{"b":3}"#).unwrap();
+    let check = run(&[
+        "json",
+        "--check",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert_eq!(check.status.code(), Some(3));
+    assert!(check.stderr.is_empty(), "`--check` warned without writing");
+    assert_eq!(mode_of(), 0o1755, "`--check` touched the mode");
+
+    let rewritten = reconcile();
+    assert!(rewritten.status.success());
+    assert_eq!(mode_of(), 0o1755, "a rewrite dropped the sticky bit");
+    assert!(
+        rewritten.stderr.is_empty(),
+        "warned with nothing dropped: {}",
+        String::from_utf8_lossy(&rewritten.stderr)
+    );
+
+    // A privileged run keeps setuid, and the Nix build sandbox refuses to set it or
+    // silently drops it, so this half runs only unprivileged under plain `cargo test`.
+    if fs::metadata(&target).unwrap().uid() == 0 {
+        return;
+    }
+    match fs::set_permissions(&target, fs::Permissions::from_mode(0o4640)) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+        set => set.unwrap(),
+    }
+    if mode_of() != 0o4640 {
+        return;
+    }
+    fs::write(&desired, r#"{"b":4}"#).unwrap();
+    let rewritten = reconcile();
+    assert!(rewritten.status.success());
+    assert_eq!(mode_of(), 0o640);
+    assert_eq!(
+        String::from_utf8_lossy(&rewritten.stderr).trim_end(),
+        format!(
+            "config-graft: warning: `{}` had mode 04640; the rewrite cleared setuid, as \
+             an in-place write by this user would on this platform, so it is now 0640",
+            target.display()
+        )
+    );
 }
 
 #[test]

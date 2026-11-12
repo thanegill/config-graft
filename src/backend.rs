@@ -556,10 +556,21 @@ impl<F: Format> Backend for ByteBackend<F> {
         output: Option<&[u8]>,
     ) -> Result<(), Error> {
         let output = output.expect("byte backend always produces output");
-        crate::write_atomic(&args.target, output).map_err(|e| Error::Write {
+        let mode_change = crate::write_atomic(&args.target, output).map_err(|e| Error::Write {
             path: args.target.clone(),
             source: e,
-        })
+        })?;
+        if let Some(change) = mode_change {
+            emit::<F::Leaf>(
+                &[Warning::SpecialModeBitsCleared {
+                    path: KeyPath::new(),
+                    file: args.target.clone(),
+                    change,
+                }],
+                F::PATH_SEP,
+            );
+        }
+        Ok(())
     }
 }
 
