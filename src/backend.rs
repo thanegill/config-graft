@@ -17,9 +17,11 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
-use crate::reconcile::{identity, reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
+use crate::reconcile::{
+    key_of, merge_key_fields, reconcile, ArrayStrategy, ManagedPath, MergeKeys, Options,
+};
 use crate::value::{Leaf, Node};
-use crate::warning::{Source, Warning};
+use crate::warning::{DiagnosticPath, Source, Step, Warning};
 use crate::RunArgs;
 
 /// Output preferences as the flags asked for them, before any format settles what
@@ -31,22 +33,234 @@ fn requested_write_opts(args: &RunArgs) -> WriteOpts {
     }
 }
 
-/// The distinct originals normalization merged into one merge key, pooled across
-/// inputs, and why it rewrote any of them.
-struct KeyCollapse<'a, L: Leaf> {
-    originals: HashSet<&'a Node<L>>,
-    kept: usize,
+/// What the engine matched an array element by: `(None, element)` for its whole
+/// value, or `(Some(field), value)` for the merge-key field it carries.
+type Identity<'a, L> = (Option<&'a str>, &'a Node<L>);
+
+/// One input as the reconcile saw it, beside the same input as it was read and the
+/// records of what normalization rewrote in it. Normalization rewrites values in
+/// place, so `seen` and `read` have the same shape and pair off by position.
+struct Input<'a, L: Leaf> {
+    seen: &'a Node<L>,
+    read: &'a Node<L>,
+    rewritten: &'a [Normalized<L>],
+}
+
+impl<L: Leaf> Clone for Input<'_, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<L: Leaf> Copy for Input<'_, L> {}
+
+impl<'a, L: Leaf> Input<'a, L> {
+    /// The same input one map key down, if it holds that key.
+    fn child(self, key: &str) -> Option<Input<'a, L>> {
+        Some(Input {
+            seen: self.seen.as_map()?.get(key)?,
+            read: self.read.as_map()?.get(key)?,
+            rewritten: self.rewritten,
+        })
+    }
+
+    /// The same input at the element `index` of its array.
+    fn element(self, index: usize) -> Option<Input<'a, L>> {
+        match (self.seen, self.read) {
+            (Node::Array(seen), Node::Array(read)) => Some(Input {
+                seen: seen.get(index)?,
+                read: read.get(index)?,
+                rewritten: self.rewritten,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// An array the reconcile combined out of TARGET's and DESIRED's, where membership
+/// is a set and so an element can be lost to another. Per input, each element's
+/// identity as the engine matched it, beside what that identity was as read: the
+/// whole element, or its merge-key field's value.
+struct CombinedArray<'a, L: Leaf> {
+    path: DiagnosticPath,
+    target: Vec<(Identity<'a, L>, &'a Node<L>)>,
+    desired: Vec<(Identity<'a, L>, &'a Node<L>)>,
+    /// The identity of each element of the result.
+    survivors: Vec<Identity<'a, L>>,
+    /// Why normalization rewrote anything in this array; `None` when it rewrote
+    /// nothing, and so cannot have made two of its elements one.
     because: Option<&'static str>,
 }
 
-/// Per `(array path, key value)`: the [`KeyCollapse`] behind it.
-type KeyCollapses<'a, L> = HashMap<(KeyPath, Node<L>), KeyCollapse<'a, L>>;
+impl<'a, L: Leaf> CombinedArray<'a, L> {
+    fn origins(&self, source: Source) -> &[(Identity<'a, L>, &'a Node<L>)] {
+        match source {
+            Source::Target => &self.target,
+            Source::Desired => &self.desired,
+        }
+    }
+}
 
-/// The originals rewritten into each `(array path, resulting value)`, and why.
-type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>, &'static str)>;
+/// Every array the reconcile combined out of TARGET's and DESIRED's, found by
+/// walking both inputs and the result in step the way the engine walked them:
+/// through the map keys both inputs hold and, under `--merge-key`, into each record
+/// the two inputs share, which the engine merges field by field. Nothing else
+/// descends into an element: the engine takes one whole, so an array inside it is
+/// never combined with anything, and its position in the result says nothing about
+/// which input element it came from.
+fn combined_arrays<'a, L: Leaf>(
+    target: Input<'a, L>,
+    desired: Input<'a, L>,
+    result: &'a Node<L>,
+    opts: &Options,
+) -> Vec<CombinedArray<'a, L>> {
+    // `concat` keeps duplicates and `replace` discards TARGET's array by request,
+    // so neither can lose an element to another.
+    if !matches!(opts.arrays, ArrayStrategy::Merge | ArrayStrategy::Set) {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    collect_combined(
+        [target, desired],
+        result,
+        opts,
+        &mut ManagedPath::new(),
+        &mut DiagnosticPath::new(),
+        &mut [DiagnosticPath::new(), DiagnosticPath::new()],
+        &mut found,
+    );
+    found
+}
+
+/// [`combined_arrays`]' walk. `scope` is the path merge-key candidates are looked
+/// up by, which restarts inside a keyed record as the engine's does; `path` is
+/// where a warning about this level points; `positions` is where each input holds
+/// it, which is how normalization records name what they rewrote.
+fn collect_combined<'a, L: Leaf>(
+    [target, desired]: [Input<'a, L>; 2],
+    result: &'a Node<L>,
+    opts: &Options,
+    scope: &mut ManagedPath,
+    path: &mut DiagnosticPath,
+    positions: &mut [DiagnosticPath; 2],
+    found: &mut Vec<CombinedArray<'a, L>>,
+) {
+    match (target.seen, desired.seen, result) {
+        (Node::Map(_), Node::Map(desired_map), Node::Map(result_map)) => {
+            for key in desired_map.keys() {
+                let (Some(target), Some(desired), Some(result)) =
+                    (target.child(key), desired.child(key), result_map.get(key))
+                else {
+                    continue;
+                };
+                scope.push(key.clone());
+                path.push(Step::Key(key.clone()));
+                for position in positions.iter_mut() {
+                    position.push(Step::Key(key.clone()));
+                }
+                collect_combined(
+                    [target, desired],
+                    result,
+                    opts,
+                    scope,
+                    path,
+                    positions,
+                    found,
+                );
+                scope.pop();
+                path.pop();
+                for position in positions.iter_mut() {
+                    position.pop();
+                }
+            }
+        }
+        (Node::Array(target_seen), Node::Array(desired_seen), Node::Array(result_seen)) => {
+            let keys = merge_key_fields(target_seen, desired_seen, opts, scope);
+            let identify = |element: &'a Node<L>| match keys {
+                None => Some((None, element)),
+                Some(keys) => key_of(element, keys).map(|(field, value)| (Some(field), value)),
+            };
+            let origins = |input: Input<'a, L>| -> Vec<(Identity<'a, L>, &'a Node<L>)> {
+                let (Node::Array(seen), Node::Array(read)) = (input.seen, input.read) else {
+                    return Vec::new();
+                };
+                seen.iter()
+                    .zip(read)
+                    .filter_map(|(seen, read)| {
+                        let identity = identify(seen)?;
+                        let original = match identity.0 {
+                            None => read,
+                            Some(field) => read.as_map()?.get(field)?,
+                        };
+                        Some((identity, original))
+                    })
+                    .collect()
+            };
+            let because = [target, desired]
+                .iter()
+                .zip(positions.iter())
+                .find_map(|(input, position)| {
+                    input
+                        .rewritten
+                        .iter()
+                        .find(|record| record.path.starts_with(position))
+                })
+                .map(|record| record.because);
+            found.push(CombinedArray {
+                path: path.clone(),
+                target: origins(target),
+                desired: origins(desired),
+                survivors: result_seen.iter().filter_map(identify).collect(),
+                because,
+            });
+
+            let Some(keys) = keys else { return };
+            for survivor in result_seen {
+                let Some(identity) = key_of(survivor, keys) else {
+                    continue;
+                };
+                let first_with_key = |seen: &[Node<L>]| {
+                    seen.iter()
+                        .position(|element| key_of(element, keys) == Some(identity))
+                };
+                let (Some(target_index), Some(desired_index)) =
+                    (first_with_key(target_seen), first_with_key(desired_seen))
+                else {
+                    continue;
+                };
+                let (Some(target), Some(desired)) =
+                    (target.element(target_index), desired.element(desired_index))
+                else {
+                    continue;
+                };
+                let (field, value) = identity;
+                path.push(Step::Selector {
+                    field: field.to_string(),
+                    value: value.to_string(),
+                });
+                positions[0].push(Step::Index(target_index));
+                positions[1].push(Step::Index(desired_index));
+                collect_combined(
+                    [target, desired],
+                    survivor,
+                    opts,
+                    &mut ManagedPath::new(),
+                    path,
+                    positions,
+                    found,
+                );
+                path.pop();
+                for position in positions.iter_mut() {
+                    position.pop();
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Report arrays where normalization conflated values an input distinguished and
-/// the reconcile then kept fewer copies than there were distinct originals.
+/// the reconcile then kept fewer of them than there were distinct originals.
 ///
 /// Normalizing can make two array elements equal (an XML plist run floors dates, so
 /// two instants under a second apart become one value), and array membership is a
@@ -54,67 +268,76 @@ type Conflations<'a, L> = HashMap<(&'a KeyPath, &'a Node<L>), (Vec<&'a Node<L>>,
 /// conflated and writes anyway, because the same normalization is what keeps TARGET
 /// comparable to BASE.
 ///
-/// Only paths that name an array on both sides can be judged. `KeyPath` addresses
-/// map keys, so a date inside an array of dicts is recorded under the array's key
-/// and is unreachable here; a path the result no longer holds was pruned, which is
-/// a removal rather than a collapse. Both are skipped -- see issue #37.
-fn lossy_collapses<L: Leaf>(
-    target_rewritten: &[Normalized<L>],
-    desired_rewritten: &[Normalized<L>],
-    target: &Node<L>,
-    desired: &Node<L>,
-    result: &Node<L>,
-    arrays: ArrayStrategy,
-) -> Vec<Warning<L>> {
-    // `concat` keeps duplicates and `replace` discards TARGET's array by request,
-    // so neither can lose anything this way.
-    if !matches!(arrays, ArrayStrategy::Merge | ArrayStrategy::Set) {
-        return Vec::new();
-    }
-    let mut rewritten: Conflations<'_, L> = HashMap::new();
-    for n in target_rewritten.iter().chain(desired_rewritten.iter()) {
-        let entry = rewritten.entry((&n.path, &n.value)).or_default();
-        entry.0.push(&n.original);
-        // From a record that produced *this* value, not one merely sharing the path.
-        entry.1 = n.because;
-    }
+/// Judged per element, by the identity the engine matched it by, rather than per
+/// rewritten value: membership is a set over elements, so a date anywhere inside
+/// one counts (issue #37), while two elements that still differ elsewhere do not,
+/// however equal a value nested in them became. The originals are pooled across
+/// both inputs, since membership unions the two arrays and a collapse can fall
+/// between them rather than inside either one.
+fn lossy_collapses<L: Leaf>(arrays: &[CombinedArray<'_, L>]) -> Vec<Warning<L>> {
     // Collected as plain fields so the sort key is total without matching on a
     // variant the list cannot hold.
-    let mut reported: Vec<(KeyPath, usize, usize, &'static str)> = Vec::new();
-    for ((path, value), (originals, because)) in &rewritten {
-        let array = |node: &Node<L>| match node.get_path(path) {
-            Some(Node::Array(a)) => Some(a.iter().filter(|e| e == value).count()),
-            _ => None,
+    let mut reported: Vec<(DiagnosticPath, Option<String>, usize, usize, &'static str)> =
+        Vec::new();
+    for array in arrays {
+        let Some(because) = array.because else {
+            continue;
         };
-        let Some(kept) = array(result) else { continue };
-        let before = array(target).unwrap_or(0) + array(desired).unwrap_or(0);
-        if before == 0 {
-            continue;
+        let mut originals: HashMap<Identity<'_, L>, HashSet<&Node<L>>> = HashMap::new();
+        for (identity, original) in array.target.iter().chain(&array.desired) {
+            originals.entry(*identity).or_default().insert(*original);
         }
-        // What the inputs distinguished before normalization: the originals it
-        // rewrote, plus the value itself when an element already held it untouched
-        // -- that element is a distinct input value the collapse also cost.
-        let mut distinct: HashSet<&Node<L>> = originals.iter().copied().collect();
-        if before > originals.len() {
-            distinct.insert(value);
+        let mut survivors: HashMap<Identity<'_, L>, usize> = HashMap::new();
+        for identity in &array.survivors {
+            *survivors.entry(*identity).or_default() += 1;
         }
-        if distinct.len() < 2 || kept >= distinct.len() {
-            continue;
+        for (identity, distinct) in originals {
+            let kept = survivors.get(&identity).copied().unwrap_or(0);
+            if distinct.len() < 2 || kept >= distinct.len() {
+                continue;
+            }
+            let (field, value) = identity;
+            let key = field.map(|field| format!("[{field}={value}]"));
+            reported.push((array.path.clone(), key, distinct.len(), kept, because));
         }
-        reported.push(((*path).clone(), distinct.len(), kept, because));
     }
     // A `HashMap` iterates in an arbitrary order, and two collapses can share a
     // path, so order on the whole record.
     reported.sort();
     reported
         .into_iter()
-        .map(|(path, distinct, kept, because)| Warning::ArrayCollapsed {
-            path,
-            distinct,
-            kept,
-            because,
-        })
+        .map(
+            |(path, key, distinct, kept, because)| Warning::ArrayCollapsed {
+                path,
+                key,
+                distinct,
+                kept,
+                because,
+            },
+        )
         .collect()
+}
+
+/// How many times one input's array at `path` genuinely held the identity a
+/// duplicate warning names: the most any one original repeats among the elements
+/// that now share it. The engine sees normalized inputs, so it counts every element
+/// normalization made equal as a repeat; the rest of them are a collapse, which
+/// [`lossy_collapses`] reports as one. `None` for an array the walk did not find,
+/// which leaves the engine's own count standing.
+fn genuine_repeats<L: Leaf>(
+    arrays: &[CombinedArray<'_, L>],
+    path: &DiagnosticPath,
+    source: Source,
+    identity: Identity<'_, L>,
+) -> Option<usize> {
+    let array = arrays.iter().find(|array| array.path == *path)?;
+    let mut times: HashMap<&Node<L>, usize> = HashMap::new();
+    for (element, original) in array.origins(source) {
+        if *element == identity {
+            *times.entry(*original).or_default() += 1;
+        }
+    }
+    times.into_values().max()
 }
 
 /// The diagnostics for values normalization rewrote in one input. Built here rather
@@ -260,7 +483,8 @@ pub(crate) trait Backend {
         if !desired.is_map() {
             return Err(Self::error_desired_not_mapping(args.desired.clone()));
         }
-        // Kept as read for the duplicate discount below.
+        // Kept as read: what an array lost to normalization is only visible against
+        // what its elements held before.
         let mut desired_as_read = None;
         let desired_risks = match Self::normalize_for_run(args, write_opts, &desired)? {
             Some(normalized) => {
@@ -277,9 +501,9 @@ pub(crate) trait Backend {
             Some(_) => return Err(Self::error_target_not_mapping(args.target.clone())),
             None => Node::empty_map(),
         };
-        // Kept as read for the duplicate discount below, and for `--diff`, which
-        // against the normalized node would show nothing and disagree with the
-        // `--check` that compares against the bytes on disk.
+        // Kept as read, as DESIRED is, and for `--diff`, which against the
+        // normalized node would show nothing and disagree with the `--check` that
+        // compares against the bytes on disk.
         let mut target_as_read = None;
         let target_risks = match Self::normalize_for_run(args, write_opts, &target)? {
             Some(normalized) => {
@@ -313,17 +537,26 @@ pub(crate) trait Backend {
             merge_keys: Self::merge_keys(args),
         };
         let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
-        // The engine sees normalized inputs, so two values normalization made equal
-        // reach it as a repeat the file "held". `n` distinct originals behind one
-        // value introduce `n - 1` equalities the file never had; occurrences beyond
-        // that are repeats it genuinely held, still worth reporting. Only the
-        // array's own elements count, which a normalization record cannot tell from
-        // a nested array's.
-        //
-        // Under a merge key, records that only the floor made share a key are
-        // merged and the loser's other fields are gone, which no floor line says;
-        // that loss is reported as the collapse it is.
-        let mut key_collapses: KeyCollapses<'_, Self::Leaf> = HashMap::new();
+        // Only normalization can make two elements one that an input distinguished,
+        // so a run it left alone has nothing to judge.
+        let combined = if target_as_read.is_some() || desired_as_read.is_some() {
+            combined_arrays(
+                Input {
+                    seen: &target,
+                    read: target_as_read.as_ref().unwrap_or(&target),
+                    rewritten: &target_risks,
+                },
+                Input {
+                    seen: &desired,
+                    read: desired_as_read.as_ref().unwrap_or(&desired),
+                    rewritten: &desired_risks,
+                },
+                &result,
+                &opts,
+            )
+        } else {
+            Vec::new()
+        };
         warnings.retain_mut(|w| match w {
             Warning::DuplicateCollapsed {
                 path,
@@ -334,101 +567,21 @@ pub(crate) trait Backend {
                 kept,
                 ..
             } => {
-                let (normalized, as_read, risks) = match source {
-                    Source::Target => (&target, target_as_read.as_ref(), &target_risks),
-                    Source::Desired => (&desired, desired_as_read.as_ref(), &desired_risks),
-                };
-                let made = match (
-                    normalized.get_path(path),
-                    as_read.and_then(|node| node.get_path(path)),
-                ) {
-                    (Some(Node::Array(normalized_elements)), Some(Node::Array(read_elements))) => {
-                        debug_assert_eq!(
-                            normalized_elements.len(),
-                            read_elements.len(),
-                            "normalization resized the array at {path:?}"
-                        );
-                        let (key, matched) = (key.as_deref(), &*matched);
-                        let denotes = |element: &Node<Self::Leaf>| match key {
-                            None => element == matched,
-                            Some(field) => identity(element, opts.merge_keys.candidates(path))
-                                .is_some_and(|(f, value)| f == *field && value == *matched),
-                        };
-                        let originals: HashSet<&Node<Self::Leaf>> = normalized_elements
-                            .iter()
-                            .zip(read_elements)
-                            .filter(|(element, _)| denotes(element))
-                            .filter_map(|(_, read)| match key {
-                                None => Some(read),
-                                Some(field) => read.as_map().and_then(|m| m.get(field)),
-                            })
-                            .collect();
-                        if key.is_some() {
-                            let entry = key_collapses
-                                .entry((path.clone(), matched.clone()))
-                                .or_insert_with(|| KeyCollapse {
-                                    originals: HashSet::new(),
-                                    kept: *kept,
-                                    because: None,
-                                });
-                            entry.originals.extend(originals.iter().copied());
-                            entry.because = entry.because.or_else(|| {
-                                risks
-                                    .iter()
-                                    .find(|n| n.path.starts_with(path))
-                                    .map(|n| n.because)
-                            });
-                        }
-                        originals.len().saturating_sub(1)
-                    }
-                    _ => 0,
-                };
-                *held = held.saturating_sub(made);
-                // `value_duplicates` reports a loss, so there has to be one: after
-                // the subtraction the repeat must still outnumber what survived.
+                let identity = (key.as_deref(), &*matched);
+                if let Some(repeats) = genuine_repeats(&combined, path, *source, identity) {
+                    *held = repeats;
+                }
+                // `value_duplicates` reports a loss, so there has to be one: the
+                // repeat the file held must still outnumber what survived.
                 *held >= 2 && *held > *kept
             }
             _ => true,
         });
-        // Two distinct originals mean at least one was rewritten, so `because` is
-        // set, and a keyed merge keeps at most one record per key, so `kept` stays
-        // below `originals.len()`.
-        let mut key_collapses: Vec<_> = key_collapses
-            .into_iter()
-            .filter(|(_, collapse)| collapse.originals.len() >= 2)
-            .filter_map(|((path, _), collapse)| {
-                debug_assert!(collapse.kept < collapse.originals.len());
-                let because = collapse.because?;
-                Some((path, collapse.originals.len(), collapse.kept, because))
-            })
-            .collect();
-        // A `HashMap` iterates in an arbitrary order.
-        key_collapses.sort();
-        warnings.extend(
-            key_collapses
-                .into_iter()
-                .map(|(path, distinct, kept, because)| Warning::ArrayCollapsed {
-                    path,
-                    distinct,
-                    kept,
-                    because,
-                }),
-        );
         // Diagnostics only: none of these change the exit code.
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
         emit(&warnings, Self::COMPONENT_SEPARATOR);
-        emit(
-            &lossy_collapses(
-                &target_risks,
-                &desired_risks,
-                &target,
-                &desired,
-                &result,
-                opts.arrays,
-            ),
-            Self::COMPONENT_SEPARATOR,
-        );
+        emit(&lossy_collapses(&combined), Self::COMPONENT_SEPARATOR);
 
         if args.sort_keys {
             result = result.sort_keys();

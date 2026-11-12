@@ -5,75 +5,60 @@
 //! is reconciled and pruned as a whole, never element-by-element.
 
 use crate::value::{Leaf, Node};
-use crate::warning::Warning;
+use crate::warning::{Step, Warning};
 use clap::ValueEnum;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 mod arrays;
-pub(crate) use arrays::identity;
+
+pub(crate) use arrays::{key_of, merge_key_fields};
 
 /// A list of array elements -- the payload of a `Node::Array`. It's what the
 /// array-combining strategies produce, and (on a `merge` conflict) report.
 pub type NodeList<L> = Vec<Node<L>>;
 
-/// One step of a [`KeyPath`].
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Segment {
-    /// An object key.
-    Key(String),
-    /// The record of a keyed array that a warning path points into, rendered
-    /// `[field=value]`; `value` is the key value's `--diff` token, so a string is
-    /// already quoted. Only ever rendered, never looked up.
-    Selector { field: String, value: String },
-}
-
-/// A path through a document. Arrays and scalars are atomic leaves. Distinct
-/// from `std::path::Path` -- this addresses keys, not files.
+/// What the engine can address, and so manage: a sequence of object keys. Arrays
+/// and scalars are atomic leaves, so nothing inside an array is separately managed
+/// and this path never descends into one. Distinct from `std::path::Path` -- this
+/// addresses keys, not files.
 ///
-/// Pruning only ever builds key segments. A warning path may additionally carry a
-/// [`Segment::Selector`] naming a keyed-array record it points into; such paths
-/// are used only for rendering, never for pruning lookups.
+/// A warning that has to point past an array uses
+/// [`crate::warning::DiagnosticPath`] instead, so a key here is only ever a key.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct KeyPath(Vec<Segment>);
+pub struct ManagedPath(Vec<String>);
 
-impl KeyPath {
+impl ManagedPath {
     /// An empty path (the document root).
-    pub(crate) fn new() -> KeyPath {
-        KeyPath(Vec::new())
+    pub(crate) fn new() -> ManagedPath {
+        ManagedPath(Vec::new())
     }
 
-    /// Append a key segment.
-    pub(crate) fn push_key(&mut self, key: String) {
-        self.0.push(Segment::Key(key));
+    /// Append a key.
+    pub(crate) fn push(&mut self, key: String) {
+        self.0.push(key);
     }
 
-    /// Drop the last segment.
+    /// Drop the last key.
     pub(crate) fn pop(&mut self) {
         self.0.pop();
     }
 
-    /// Prepend a segment -- used as a conflict bubbles up out of a subtree,
-    /// gaining its parent key (or its record's selector) at each level.
-    fn prepend(&mut self, segment: Segment) {
-        self.0.insert(0, segment);
-    }
-
-    /// The path of the first `n` segments (a proper ancestor when `n < len`).
-    fn prefix(&self, n: usize) -> KeyPath {
-        KeyPath(self.0[..n].to_vec())
+    /// The path of the first `n` keys (a proper ancestor when `n < len`).
+    fn prefix(&self, n: usize) -> ManagedPath {
+        ManagedPath(self.0[..n].to_vec())
     }
 }
 
-impl FromIterator<String> for KeyPath {
-    fn from_iter<I: IntoIterator<Item = String>>(keys: I) -> KeyPath {
-        KeyPath(keys.into_iter().map(Segment::Key).collect())
+impl FromIterator<String> for ManagedPath {
+    fn from_iter<I: IntoIterator<Item = String>>(keys: I) -> ManagedPath {
+        ManagedPath(keys.into_iter().collect())
     }
 }
 
-impl std::ops::Deref for KeyPath {
-    type Target = [Segment];
-    fn deref(&self) -> &[Segment] {
+impl std::ops::Deref for ManagedPath {
+    type Target = [String];
+    fn deref(&self) -> &[String] {
         &self.0
     }
 }
@@ -112,13 +97,13 @@ pub struct MergeKeys {
     /// root) -> candidate fields. Arrays are atomic in this path model, so a path
     /// addresses within one array-free subtree; a matched keyed record is its own
     /// subtree, so a scope anchors at the document root or the nearest such record.
-    pub scoped: HashMap<KeyPath, Vec<String>>,
+    pub scoped: HashMap<ManagedPath, Vec<String>>,
 }
 
 impl MergeKeys {
     /// The candidate key fields for an array at `path` (its full path from the
     /// reconcile root): the scoped rule whose path matches exactly, else `global`.
-    pub(crate) fn candidates(&self, path: &KeyPath) -> &[String] {
+    pub(crate) fn candidates(&self, path: &ManagedPath) -> &[String] {
         self.scoped
             .get(path)
             .map_or(self.global.as_slice(), Vec::as_slice)
@@ -166,10 +151,10 @@ pub fn reconcile<L: Leaf>(
     // 1-3: prune leaves we managed before (present in BASE) but no longer do
     // (gone from DESIRED) -- but only where TARGET still holds the BASE value, so
     // a value the user/app changed by hand is left alone.
-    let mut removed: Vec<KeyPath> = Vec::new();
+    let mut removed: Vec<ManagedPath> = Vec::new();
     if opts.prune {
         if let Some(base) = base {
-            let desired_leaves: HashSet<KeyPath> = desired.leaf_paths().into_iter().collect();
+            let desired_leaves: HashSet<ManagedPath> = desired.leaf_paths().into_iter().collect();
             removed = base
                 .leaf_paths()
                 .into_iter()
@@ -188,11 +173,11 @@ pub fn reconcile<L: Leaf>(
     // alongside so the three-way `Merge` array strategy can see it. Array
     // warnings bubble up as `deep_merge`'s return, gaining a path segment at each
     // level, so a location is built only for the (rare) warnings.
-    let warnings = deep_merge(&mut result, desired, base, opts, &mut KeyPath::new());
+    let warnings = deep_merge(&mut result, desired, base, opts, &mut ManagedPath::new());
 
     // 5: collapse objects left empty by the prune (deepest first, cascading).
     if !removed.is_empty() {
-        let mut ancestors: Vec<KeyPath> = Vec::new();
+        let mut ancestors: Vec<ManagedPath> = Vec::new();
         for p in &removed {
             for i in 1..p.len() {
                 ancestors.push(p.prefix(i));
@@ -217,34 +202,27 @@ pub fn reconcile<L: Leaf>(
 impl<L: Leaf> Node<L> {
     /// Managed leaf paths: descend only through objects, so arrays and scalars are
     /// atomic leaves.
-    pub(crate) fn leaf_paths(&self) -> Vec<KeyPath> {
+    pub(crate) fn leaf_paths(&self) -> Vec<ManagedPath> {
         let mut out = Vec::new();
-        let mut prefix = KeyPath::new();
+        let mut prefix = ManagedPath::new();
         collect(self, &mut prefix, &mut out);
         out
     }
 
-    /// Value at an object path, if present. A selector addresses nothing.
-    pub(crate) fn get_path(&self, path: &[Segment]) -> Option<&Node<L>> {
+    /// Value at an object path, if present.
+    pub(crate) fn get_path(&self, path: &[String]) -> Option<&Node<L>> {
         let mut cur = self;
-        for segment in path {
-            cur = match segment {
-                Segment::Key(key) => cur.as_map()?.get(key)?,
-                Segment::Selector { .. } => return None,
-            };
+        for key in path {
+            cur = cur.as_map()?.get(key)?;
         }
         Some(cur)
     }
 
     /// Delete the value at an object path, preserving the order of the surviving
-    /// keys; a no-op if the path is empty, not present, or holds a selector.
-    fn del_path(&mut self, path: &[Segment]) {
+    /// keys; a no-op if the path is empty or not present.
+    fn del_path(&mut self, path: &[String]) {
         let Some((first, rest)) = path.split_first() else {
             return;
-        };
-        let first = match first {
-            Segment::Key(key) => key,
-            Segment::Selector { .. } => return,
         };
         let Some(obj) = self.as_map_mut() else {
             return;
@@ -275,11 +253,11 @@ impl<L: Leaf> Node<L> {
 }
 
 /// Recurse into `v`, pushing the path of every leaf (non-map node) into `out`.
-fn collect<L: Leaf>(v: &Node<L>, prefix: &mut KeyPath, out: &mut Vec<KeyPath>) {
+fn collect<L: Leaf>(v: &Node<L>, prefix: &mut ManagedPath, out: &mut Vec<ManagedPath>) {
     match v {
         Node::Map(map) => {
             for (k, val) in map {
-                prefix.push_key(k.clone());
+                prefix.push(k.clone());
                 collect(val, prefix, out);
                 prefix.pop();
             }
@@ -306,7 +284,7 @@ pub fn deep_merge<L: Leaf>(
     desired: &Node<L>,
     base: Option<&Node<L>>,
     opts: &Options,
-    path: &mut KeyPath,
+    path: &mut ManagedPath,
 ) -> Vec<Warning<L>> {
     match desired {
         Node::Map(d) => {
@@ -315,11 +293,11 @@ pub fn deep_merge<L: Leaf>(
                 for (k, dv) in d {
                     let bv = base.and_then(|b| b.as_map()).and_then(|bm| bm.get(k));
                     if let Some(tv) = t.get_mut(k) {
-                        path.push_key(k.clone());
+                        path.push(k.clone());
                         let sub = deep_merge(tv, dv, bv, opts, path);
                         path.pop();
                         for mut c in sub {
-                            c.path_mut().prepend(Segment::Key(k.clone()));
+                            c.path_mut().prepend(Step::Key(k.clone()));
                             warnings.push(c);
                         }
                     } else {
@@ -1255,16 +1233,8 @@ mod tests {
     }
 
     /// A path of object keys.
-    fn keys(segments: &[&str]) -> KeyPath {
+    fn keys(segments: &[&str]) -> ManagedPath {
         segments.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn keypath_render_uses_the_given_separator() {
-        let p = keys(&["a", "b"]);
-        assert_eq!(p.render("."), "a.b");
-        assert_eq!(p.render(":"), "a:b");
-        assert_eq!(KeyPath::new().render(":"), "<root>"); // empty path
     }
 
     #[test]
@@ -1337,63 +1307,6 @@ mod tests {
             ArrayStrategy::Replace
         )
         .is_empty());
-    }
-
-    #[test]
-    fn keypath_render_attaches_element_selector_to_the_preceding_key() {
-        let mut p = keys(&["tags"]);
-        p.prepend(Segment::Selector {
-            field: "name".to_string(),
-            value: "\"web\"".to_string(),
-        });
-        p.prepend(Segment::Key("servers".to_string()));
-        assert_eq!(p.render("."), "servers[name=\"web\"].tags");
-        assert_eq!(p.render(":"), "servers[name=\"web\"]:tags");
-    }
-
-    #[test]
-    fn keypath_render_quotes_a_key_that_would_read_as_a_selector() {
-        assert_eq!(keys(&["x", "[b]"]).render("."), r#"x."[b]""#);
-        assert_eq!(keys(&["x", "a[b]"]).render(":"), r#"x:"a[b]""#);
-        assert_eq!(keys(&["[b]", "y"]).render("."), r#""[b]".y"#);
-        // A key opening with a quote is quoted too, so `"[b]"` cannot be forged.
-        assert_eq!(keys(&[r#""[b]""#]).render("."), r#""\"[b]\"""#);
-    }
-
-    #[test]
-    fn keypath_render_leaves_other_punctuation_unquoted() {
-        assert_eq!(keys(&["a]", "b=c", r#"d"e"#]).render("."), r#"a].b=c.d"e"#);
-    }
-
-    /// A quoted key escapes a control byte the JSON way, not as the
-    /// `escape_unprintable` form an unquoted key gets.
-    #[test]
-    fn keypath_render_escapes_a_control_byte_in_a_quoted_key_as_json_does() {
-        let escape = char::from(0x1b_u8);
-        let quoted = format!("{escape}[b]");
-        let plain = format!("{escape}b");
-        assert_eq!(keys(&["x", &quoted]).render("."), r#"x."\u001b[b]""#);
-        assert_eq!(keys(&["x", &plain]).render("."), r"x.\u{1b}b");
-    }
-
-    /// JSON leaves DEL raw, which would reach the terminal, so a quoted key
-    /// escapes it too.
-    #[test]
-    fn keypath_render_escapes_a_delete_byte_in_a_quoted_key() {
-        let delete = format!("[{}", char::from(0x7f_u8));
-        assert_eq!(keys(&["x", &delete]).render("."), r#"x."[\u007f""#);
-    }
-
-    #[test]
-    fn a_selector_addresses_nothing() {
-        let v = n(json!({"a":{"b":7}}));
-        let mut p = keys(&["b"]);
-        p.prepend(Segment::Selector {
-            field: "b".to_string(),
-            value: "7".to_string(),
-        });
-        p.prepend(Segment::Key("a".to_string()));
-        assert_eq!(v.get_path(&p), None);
     }
 
     #[test]
