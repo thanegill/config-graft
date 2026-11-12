@@ -19,14 +19,17 @@ use std::hash::{Hash, Hasher};
 /// A JSON number's identity: what decides whether two of them are the same value,
 /// however each was spelled.
 ///
-/// `Integer` is the common case and covers every spelling that denotes a whole
-/// number small enough to hold, so `10`, `10.0` and `1e1` share one identity --
-/// which also lets a literal equal an `i64`/`u64` held in another leaf variant.
-/// Anything else keeps its digits as slices of the literal, normalized so `0.10`,
-/// `0.1` and `1e-1` agree.
+/// `Integer` is the common case: every spelling of a whole number small enough to
+/// hold, so `10`, `10.0` and `1e1` share one identity -- which also lets a literal
+/// equal an `i64`/`u64` held in another leaf variant. A negative zero is the
+/// exception ([`NegativeZero`](Self::NegativeZero)). Anything else keeps its digits
+/// as slices of the literal, normalized so `0.10`, `0.1` and `1e-1` agree.
 #[derive(Debug)]
 pub(crate) enum NumberValue<'a> {
     Integer(i128),
+    /// `-0`, `-0.0`, `-0e5`: a reader that parses the literal as a float keeps the
+    /// sign, so this is not the `Integer(0)` an unsigned zero is.
+    NegativeZero,
     /// Sign, the significant digits split across the literal's integer and fraction
     /// parts (leading and trailing zeros already trimmed), and the decimal exponent
     /// of the last digit.
@@ -47,6 +50,7 @@ impl PartialEq for NumberValue<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (NumberValue::Integer(a), NumberValue::Integer(b)) => a == b,
+            (NumberValue::NegativeZero, NumberValue::NegativeZero) => true,
             (
                 NumberValue::Decimal {
                     negative: a,
@@ -73,6 +77,7 @@ impl Hash for NumberValue<'_> {
         std::mem::discriminant(self).hash(state);
         match self {
             NumberValue::Integer(value) => value.hash(state),
+            NumberValue::NegativeZero => {}
             NumberValue::Decimal {
                 negative,
                 integer,
@@ -142,8 +147,11 @@ impl<'a> TryFrom<&'a str> for NumberValue<'a> {
         }
 
         if integer.is_empty() && fraction.is_empty() {
-            // Every spelling of zero is one number, `-0` included (`-0.0 == 0.0`).
-            return Ok(NumberValue::Integer(0));
+            return Ok(if negative {
+                NumberValue::NegativeZero
+            } else {
+                NumberValue::Integer(0)
+            });
         }
         // A whole number that fits an `i128` gets the integer identity, so it can
         // equal an `Int`/`Uint` spelled the ordinary way. The digits are integer and
@@ -181,7 +189,7 @@ fn whole(negative: bool, integer: &str, fraction: &str, exponent: i64) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bigdecimal::BigDecimal;
+    use bigdecimal::{BigDecimal, Zero};
     use std::hash::DefaultHasher;
     use std::str::FromStr;
 
@@ -232,11 +240,22 @@ mod tests {
     }
 
     #[test]
-    fn every_spelling_of_zero_is_one_number() {
+    fn every_unsigned_spelling_of_zero_is_one_number() {
         assert_same("0", "0.0");
-        assert_same("0", "-0");
         assert_same("0", "0e100");
-        assert_same("0", "-0.000");
+        assert_same("0", "0.000e-5");
+    }
+
+    /// The sign of a zero survives into any reader that parses it as a float, so
+    /// it is part of the value rather than of the spelling.
+    #[test]
+    fn negative_zero_is_its_own_number() {
+        assert_same("-0", "-0.0");
+        assert_same("-0", "-0e5");
+        assert_same("-0", "-0.000");
+        assert_different("0", "-0");
+        assert_different("0.0", "-0.0");
+        assert_ne!(hash_of("0"), hash_of("-0"));
     }
 
     #[test]
@@ -274,6 +293,9 @@ mod tests {
         "0",
         "-0",
         "0.0",
+        "-0.0",
+        "-0e5",
+        "-0.000",
         "1",
         "-1",
         "10",
@@ -308,6 +330,15 @@ mod tests {
         "100e38",
     ];
 
+    /// The oracle's answer to "the same number?": equal as decimals and, for a
+    /// zero, signed alike. `BigDecimal` has no negative zero, so a zero's sign is
+    /// read off its literal.
+    fn oracle_same(a: &str, bx: &BigDecimal, b: &str, by: &BigDecimal) -> bool {
+        let negative_zero =
+            |literal: &str, value: &BigDecimal| literal.starts_with('-') && value.is_zero();
+        bx == by && negative_zero(a, bx) == negative_zero(b, by)
+    }
+
     /// Cross-check the hand-written normalization against an arbitrary-precision
     /// decimal. `bigdecimal` is a dev-dependency only: it allocates per comparison
     /// and cannot spell the exponents `NumberValue` deliberately declines, so it is
@@ -326,10 +357,10 @@ mod tests {
                 compared += 1;
                 assert_eq!(
                     x == y,
-                    bx == by,
+                    oracle_same(a, &bx, b, &by),
                     "disagreed on {a} vs {b}: NumberValue said {}, BigDecimal said {}",
                     x == y,
-                    bx == by
+                    oracle_same(a, &bx, b, &by)
                 );
                 if x == y {
                     assert_eq!(hash_of(a), hash_of(b), "{a} == {b} but hashes differ");
@@ -383,7 +414,11 @@ mod tests {
                 panic!("the oracle cannot describe {a} or {b}");
             };
             compared += 1;
-            assert_eq!(x == y, bx == by, "disagreed on {a} vs {b}");
+            assert_eq!(
+                x == y,
+                oracle_same(&a, &bx, &b, &by),
+                "disagreed on {a} vs {b}"
+            );
             if x == y {
                 assert_eq!(hash_of(&a), hash_of(&b), "{a} == {b} but hashes differ");
             }
