@@ -32,7 +32,7 @@ pub fn apply(text: &str, result: &Node<TomlLeaf>) -> Result<String, Error> {
     let out = doc.to_string();
     // Backstop: the edited text must parse back to exactly the reconciled result.
     match Toml::parse(out.as_bytes()) {
-        Some(ref got) if got == result => Ok(out),
+        Ok(ref got) if got == result => Ok(out),
         _ => Err(Error::TomlUnsafe),
     }
 }
@@ -72,7 +72,7 @@ fn merge_table(table: &mut Table, desired: &IndexMap<String, Node<TomlLeaf>>) {
 
 /// Whether `item` already decodes to exactly `node`.
 fn item_eq(item: &Item, node: &Node<TomlLeaf>) -> bool {
-    Toml::decode(item).as_ref() == Some(node)
+    Toml::decode(item).ok().as_ref() == Some(node)
 }
 
 /// Set `key` to `node`, preserving the existing value's decor (leading whitespace

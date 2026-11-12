@@ -279,7 +279,36 @@ fn invalid_desired_exits_one_and_names_toml() {
     fs::write(&desired, "= not valid\n").unwrap();
 
     let err = stderr_of(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(err.contains("not valid TOML"), "got: {err}");
+    assert!(
+        err.contains("is not valid TOML (line 1, column 1: "),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn a_toml_syntax_error_reads_on_one_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.toml");
+    let desired = dir.path().join("desired.toml");
+    fs::write(&desired, "[a\n").unwrap();
+    let err = stderr_of(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        err.contains(
+            "is not valid TOML (line 1, column 3: invalid table header; expected `.`, `]`)"
+        ),
+        "got: {err}"
+    );
+
+    fs::write(&desired, "\"a\\nb\" = 1\n\"a\\nb\" = 2\n").unwrap();
+    let err = stderr_of(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(err.contains("duplicate key `a\\u{a}b`"), "got: {err}");
+
+    fs::write(&desired, "a = ").unwrap();
+    let err = stderr_of(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(
+        err.contains("is not valid TOML (line 1, column 5);"),
+        "got: {err}"
+    );
 }
 
 #[test]

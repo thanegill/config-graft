@@ -11,6 +11,7 @@
 //! byte-oriented [`Format`] trait -- it provides its own tree reader/writer and
 //! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
+use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -100,8 +101,8 @@ pub trait Format: ValueCodec {
     /// Separator between key-path segments in user-facing diagnostics (`--diff`,
     /// conflict warnings).
     const PATH_SEP: &'static str;
-    /// Parse `bytes`, or `None` if they don't parse as this format.
-    fn parse(bytes: &[u8]) -> Option<Node<Self::Leaf>>;
+    /// Parse `bytes`, or say why they don't parse as this format.
+    fn parse(bytes: &[u8]) -> Result<Node<Self::Leaf>, ParseFailure>;
     /// Settle any output preference that depends on what the target already is,
     /// given its current bytes. plist answers [`PlistFormat::Follow`] from them;
     /// every other format writes one encoding and keeps what it was given.
@@ -206,9 +207,10 @@ pub struct WriteOpts {
 pub trait ValueCodec {
     type Leaf: Leaf;
     type Value<'a>;
-    /// Native → `Node`. `None` means "refuse" -- only YAML produces it (for
-    /// non-string keys, tags, etc.); JSON/plist are total.
-    fn decode(value: &Self::Value<'_>) -> Option<Node<Self::Leaf>>;
+    /// Native → `Node`. An `Err` means "refuse" -- only YAML produces one (for
+    /// non-string keys, tags, etc.); JSON and plist are total, and TOML's one
+    /// `Err` (`Item::None`) cannot come from a parsed document.
+    fn decode(value: &Self::Value<'_>) -> Result<Node<Self::Leaf>, ParseFailure>;
     /// `Node` → native.
     fn encode(node: &Node<Self::Leaf>) -> Self::Value<'static>;
 }
@@ -241,6 +243,91 @@ impl FromStr for Indent {
     }
 }
 
+/// Why a file's bytes did not become a [`Node`], for the refusal to say.
+#[derive(Debug)]
+pub enum ParseFailure {
+    /// Not well-formed: the parser's own message, led by the line and column
+    /// where the parser gives a position. Built through [`ParseFailure::syntax`]
+    /// and its siblings, which escape control and invisible formatting chars.
+    Syntax(String),
+    /// Nested deeper than [`MAX_DEPTH`] containers.
+    TooDeep,
+    /// Well-formed, but holding something config-graft cannot reconcile, named
+    /// as a noun phrase ("a tagged value").
+    Unsupported(&'static str),
+}
+
+impl ParseFailure {
+    /// A syntax error with no position.
+    fn syntax(message: impl fmt::Display) -> Self {
+        ParseFailure::Syntax(printable(&message.to_string()))
+    }
+
+    /// A syntax error `message` at 1-based `line` and `column`.
+    fn syntax_at_line(line: usize, column: usize, message: impl fmt::Display) -> Self {
+        let message = printable(&message.to_string());
+        if message.is_empty() {
+            ParseFailure::Syntax(format!("line {line}, column {column}"))
+        } else {
+            ParseFailure::Syntax(format!("line {line}, column {column}: {message}"))
+        }
+    }
+
+    /// A syntax error `message` at byte `offset` of `text`, counted in chars
+    /// from the start of its line. An offset past the end or inside a char is
+    /// moved back to the nearest char boundary.
+    fn syntax_at(text: &str, offset: usize, message: impl fmt::Display) -> Self {
+        let mut offset = offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let before = &text[..offset];
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        let line = before.matches('\n').count() + 1;
+        let column = before[line_start..].chars().count() + 1;
+        Self::syntax_at_line(line, column, message)
+    }
+
+    /// `bytes` are not UTF-8: the position where their valid prefix ends.
+    fn not_utf8(bytes: &[u8], error: std::str::Utf8Error) -> Self {
+        let valid = std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default();
+        Self::syntax_at(valid, valid.len(), "not UTF-8")
+    }
+}
+
+/// `message` with every control character, and every invisible formatting
+/// character a terminal may act on (bidi marks, overrides and isolates,
+/// zero-width and soft-hyphen characters, line and paragraph separators, the
+/// byte-order mark, tag characters), escaped as `\u{1b}`, so a file cannot
+/// write to the terminal through a refusal.
+fn printable(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    for c in message.trim().chars() {
+        if c.is_control() || is_invisible_format(c) {
+            write!(out, "\\u{{{:x}}}", c as u32).expect("writing to a String");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{61c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
 /// Read and parse `path` with format `F`. `Ok(None)` means the file is not there
 /// (or is empty, which is how a caller stages a first apply); an `Err` means it is
 /// there and could not be understood. Keeping those apart matters: the run treats
@@ -258,13 +345,66 @@ pub fn read_file<F: Format>(path: &Path) -> Result<Option<Node<F::Leaf>>, Error>
         }
     };
     match F::parse(&bytes) {
-        Some(node) => Ok(Some(node)),
+        Ok(node) => Ok(Some(node)),
         // Checked only after parsing fails, so a format whose empty document is
         // meaningful (TOML's empty table) still parses it.
-        None if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
-        None => Err(Error::Unreadable {
+        Err(_) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(None),
+        Err(failure) => Err(Error::Unreadable {
             path: path.to_path_buf(),
             kind: F::KIND,
+            failure,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detail(failure: ParseFailure) -> String {
+        match failure {
+            ParseFailure::Syntax(detail) => detail,
+            other => panic!("expected a syntax failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn syntax_at_counts_lines_and_chars() {
+        let at = |text: &str, offset| detail(ParseFailure::syntax_at(text, offset, "m"));
+        assert_eq!(at("abc", 0), "line 1, column 1: m");
+        assert_eq!(at("ééx", "éé".len()), "line 1, column 3: m");
+        assert_eq!(at("a\r\nbc", 4), "line 2, column 2: m");
+        assert_eq!(at("a\nb", 2), "line 2, column 1: m");
+        assert_eq!(at("ab\n", 3), "line 2, column 1: m");
+        assert_eq!(at("é", 1), "line 1, column 1: m");
+        assert_eq!(at("ab", 99), "line 1, column 3: m");
+    }
+
+    #[test]
+    fn a_syntax_message_is_one_printable_line() {
+        let at = |message: &str| detail(ParseFailure::syntax_at("", 0, message));
+        assert_eq!(at(""), "line 1, column 1");
+        assert_eq!(at("first\nsecond\n"), "line 1, column 1: first\\u{a}second");
+        assert_eq!(at("a\u{202e}b"), "line 1, column 1: a\\u{202e}b");
+        assert_eq!(
+            at("\u{ad}\u{61c}\u{180e}\u{200b}\u{2028}\u{206f}\u{fff9}\u{fffb}\u{e0001}\u{e0020}\u{e007f}"),
+            "line 1, column 1: \\u{ad}\\u{61c}\\u{180e}\\u{200b}\\u{2028}\\u{206f}\\u{fff9}\\u{fffb}\\u{e0001}\\u{e0020}\\u{e007f}"
+        );
+        assert_eq!(
+            at("\u{2027}\u{e0080}"),
+            "line 1, column 1: \u{2027}\u{e0080}"
+        );
+        assert_eq!(at("key \u{1b}[31m"), "line 1, column 1: key \\u{1b}[31m");
+        assert_eq!(at("\u{feff}"), "line 1, column 1: \\u{feff}");
+    }
+
+    #[test]
+    fn not_utf8_points_at_the_first_bad_byte() {
+        let bytes = [b"ok\n".as_slice(), &[0xc3, b'(']].concat();
+        let error = std::str::from_utf8(&bytes).unwrap_err();
+        assert_eq!(
+            detail(ParseFailure::not_utf8(&bytes, error)),
+            "line 2, column 1: not UTF-8"
+        );
     }
 }
