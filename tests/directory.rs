@@ -142,6 +142,25 @@ fn prune_collapses_emptied_parent_dir() {
 }
 
 #[test]
+fn prune_removes_a_dir_the_app_already_emptied() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    let base = dir.path().join("base");
+    fs::create_dir_all(target.join("sub")).unwrap();
+    write(&desired.join("keep.txt"), "k");
+    write(&base.join("sub/only.txt"), "v");
+
+    let out = graft(&[
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(!target.join("sub").exists()); // its own attributes leaf is pruned
+}
+
+#[test]
 fn no_prune_keeps_dropped_file() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");

@@ -166,19 +166,14 @@ pub fn reconcile<L: Leaf>(
     // 1-3: prune leaves we managed before (present in BASE) but no longer do
     // (gone from DESIRED) -- but only where TARGET still holds the BASE value, so
     // a value the user/app changed by hand is left alone.
-    let mut removed: Vec<KeyPath> = Vec::new();
+    let mut pruned: Vec<KeyPath> = Vec::new();
     if opts.prune {
         if let Some(base) = base {
             let desired_leaves: HashSet<KeyPath> = desired.leaf_paths().into_iter().collect();
-            removed = base
-                .leaf_paths()
-                .into_iter()
-                .filter(|p| !desired_leaves.contains(p))
-                .collect();
-            for p in &removed {
-                let live = result.get_path(p);
-                if live.is_some() && live == base.get_path(p) {
-                    result.del_path(p);
+            for p in base.leaf_paths() {
+                if !desired_leaves.contains(&p) && result.get_path(&p) == base.get_path(&p) {
+                    result.del_path(&p);
+                    pruned.push(p);
                 }
             }
         }
@@ -190,10 +185,11 @@ pub fn reconcile<L: Leaf>(
     // level, so a location is built only for the (rare) warnings.
     let warnings = deep_merge(&mut result, desired, base, opts, &mut KeyPath::new());
 
-    // 5: collapse objects left empty by the prune (deepest first, cascading).
-    if !removed.is_empty() {
+    // 5: collapse objects left empty by the prune (deepest first, cascading), and
+    // only above a leaf it deleted, so an object the app had emptied is kept.
+    if !pruned.is_empty() {
         let mut ancestors: Vec<KeyPath> = Vec::new();
-        for p in &removed {
+        for p in &pruned {
             for i in 1..p.len() {
                 ancestors.push(p.prefix(i));
             }
@@ -669,6 +665,32 @@ mod tests {
     }
 
     #[test]
+    fn prune_keeps_an_object_the_app_already_emptied() {
+        assert_eq!(
+            reconciled(
+                json!({"a":{},"app":true}),
+                json!({}),
+                Some(json!({"a":{"b":1}})),
+                true
+            ),
+            json!({"a":{},"app":true})
+        );
+    }
+
+    #[test]
+    fn prune_collapse_cascades_only_through_what_it_emptied() {
+        assert_eq!(
+            reconciled(
+                json!({"p":{"c":{"x":1},"d":{}},"q":{"r":{"s":1}},"app":true}),
+                json!({}),
+                Some(json!({"p":{"c":{"x":1},"d":{"y":1}},"q":{"r":{"s":1}}})),
+                true
+            ),
+            json!({"p":{"d":{}},"app":true})
+        );
+    }
+
+    #[test]
     fn prune_keeps_an_object_desired_declares_empty() {
         assert_eq!(
             reconciled(
@@ -700,6 +722,19 @@ mod tests {
             reconciled_keyed(
                 json!({"s":[{"name":"w","cfg":{"x":1}}]}),
                 json!({"s":[{"name":"w","cfg":{}}]}),
+                Some(json!({"s":[{"name":"w","cfg":{"x":1}}]})),
+                &["name"],
+            ),
+            json!({"s":[{"name":"w","cfg":{}}]})
+        );
+    }
+
+    #[test]
+    fn prune_keeps_an_object_the_app_emptied_in_a_keyed_record() {
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s":[{"name":"w","cfg":{}}]}),
+                json!({"s":[{"name":"w"}]}),
                 Some(json!({"s":[{"name":"w","cfg":{"x":1}}]})),
                 &["name"],
             ),
