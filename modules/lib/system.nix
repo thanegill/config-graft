@@ -29,6 +29,7 @@ in
   pkgs,
   defaultPackage,
   activationWiring,
+  restartUser ? null,
 }:
 let
   managedOption =
@@ -63,8 +64,11 @@ let
           {command}`defaults export` reads the live domain, {command}`config-graft`
           deep-merges and prunes, and {command}`defaults import` writes it back, so
           the change isn't lost to cfprefsd's in-memory cache. Runs as root, so it
-          targets system/global domains under {file}`/Library/Preferences`.
-          {option}`target` is ignored in this mode.
+          targets system/global domains under {file}`/Library/Preferences`. Name
+          an app that writes the domain in {option}`whileRunning.restart` to quit
+          and relaunch it around the reconcile (as {option}`system.primaryUser`),
+          or its process in {option}`whileRunning.skip` to leave the domain alone
+          while it runs. {option}`target` is ignored in this mode.
         '';
       };
     };
@@ -104,7 +108,12 @@ let
     inherit entry;
     snapshotRel = "config-graft/managed-directory/${configGraftLib.safeName name}";
     script = configGraftLib.mkDirectoryReconcileScript {
-      inherit lib entry;
+      inherit
+        lib
+        pkgs
+        entry
+        restartUser
+        ;
       target = entry.target;
     };
   }) config.environment.managedDirectory;
@@ -145,25 +154,32 @@ let
   '';
 
   # A single activation script for all managed system files. The system activation
-  # environment has none of home-manager's helpers, so define pass-through `run` and
-  # `_i` shims (the reconcile body, shared with home-manager, calls them).
+  # environment has none of home-manager's helpers, so define pass-through `run`,
+  # `_i` and `_iWarn` shims (the reconcile body, shared with home-manager, calls
+  # them).
   activationScript = pkgs.writeShellScript "config-graft-activation" (
     ''
-      # The reconcile body (shared with home-manager) calls `run` and `_i`.
-      # home-manager defines them in its activation context; here there are none, so
-      # shim them: `run` executes its arguments, `_i` prints an info line.
+      # The reconcile body (shared with home-manager) calls `run`, `_i` and
+      # `_iWarn`. home-manager defines them in its activation context; here there
+      # are none, so shim them: `run` executes its arguments, `_i` prints an info
+      # line, `_iWarn` a warning on stderr.
       run() { "$@"; }
       _i() {
         _fmt="$1"
         shift
         printf "config-graft: $_fmt\n" "$@"
       }
+      _iWarn() {
+        _fmt="$1"
+        shift
+        printf "config-graft: warning: $_fmt\n" "$@" >&2
+      }
     ''
     + lib.concatMapStringsSep "\n" (
       e:
       prevSnapshot e.snapshotRel
       + configGraftLib.mkEntryReconcileScript {
-        inherit lib;
+        inherit lib pkgs restartUser;
         inherit (e) format entry desired;
         target = e.entry.target;
       }
@@ -222,6 +238,23 @@ in
           parent = "environment";
         }
       ) activeByFormat
+      ++ lib.concatMap (
+        { format, active }:
+        configGraftLib.mkRestartAssertions {
+          inherit lib pkgs restartUser;
+          parent = "environment";
+          inherit (format) optionName;
+          entries = active;
+          needsUser = true;
+        }
+      ) activeByFormat
+      ++ configGraftLib.mkRestartAssertions {
+        inherit lib pkgs restartUser;
+        parent = "environment";
+        optionName = "managedDirectory";
+        entries = config.environment.managedDirectory;
+        needsUser = true;
+      }
       ++ (
         # config-graft reconciles a mutable file/tree in place; `environment.etc`
         # symlinks an immutable store path into /etc. Reject a target that is also an
