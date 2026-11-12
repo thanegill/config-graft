@@ -433,6 +433,48 @@ fn a_dotted_table_desired_declares_empty_survives_the_prune() {
 }
 
 #[test]
+fn a_table_the_app_already_emptied_survives_the_prune() {
+    for (target_text, base_text, expected) in [
+        (
+            "app = true\n\n[a]\n",
+            "[a.b]\nc = 1\n",
+            "app = true\n\n[a]\n",
+        ),
+        (
+            "app = true\n\n[a.b]\n",
+            "[a.b]\nc = 1\n",
+            "app = true\n\n[a.b]\n",
+        ),
+        (
+            "app = true\n\n[a]\nx = 1\n\n[a.b]\n",
+            "[a]\nx = 1\n[a.b]\nc = 1\n",
+            "app = true\n\n[a]\n\n[a.b]\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        let desired = dir.path().join("desired.toml");
+        let base = dir.path().join("base.toml");
+        fs::write(&target, target_text).unwrap();
+        fs::write(&desired, "").unwrap();
+        fs::write(&base, base_text).unwrap();
+
+        let out = run(&[
+            "toml",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+            base.to_str().unwrap(),
+        ]);
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), expected);
+    }
+}
+
+#[test]
 fn an_implicit_table_desired_declares_empty_survives_the_prune() {
     declared_empty_table_survives(
         "app = true\n[a.b]\nc = 1\n",

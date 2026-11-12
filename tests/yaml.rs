@@ -197,6 +197,17 @@ fn removal_collapses_empty_parent() {
 }
 
 #[test]
+fn removal_keeps_a_mapping_the_app_already_emptied() {
+    let target = "a: 1\nsec: {}  # app cleared\nother:\n  gone: 5\n  kept: {}\n";
+    yaml_golden(
+        target,
+        "a: 1\n",
+        Some("a: 1\nsec:\n  only: 5\nother:\n  gone: 5\n  kept:\n    x: 1\n"),
+        "a: 1\nsec: {}  # app cleared\nother:\n  kept: {}\n",
+    );
+}
+
+#[test]
 fn removal_keeps_a_parent_desired_declares_empty_and_reruns_clean() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.yaml");
