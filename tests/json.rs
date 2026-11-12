@@ -105,6 +105,33 @@ fn a_nested_object_desired_declares_empty_survives_the_prune() {
 }
 
 #[test]
+fn an_object_the_app_already_emptied_survives_the_prune() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let desired = dir.path().join("desired.json");
+    let base = dir.path().join("base.json");
+    fs::write(&target, r#"{"a":{},"p":{"c":{"x":1},"d":{}},"app":true}"#).unwrap();
+    fs::write(&desired, "{}").unwrap();
+    fs::write(&base, r#"{"a":{"b":1},"p":{"c":{"x":1},"d":{"y":1}}}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "{\n  \"a\": {},\n  \"p\": {\n    \"d\": {}\n  },\n  \"app\": true\n}\n"
+    );
+}
+
+#[test]
 fn check_reports_pending_change_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
