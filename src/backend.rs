@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
-use crate::format::{read_file, Format, FormatKind, Indent, Normalization, Normalized, WriteOpts};
+use crate::format::{read_file, Format, FormatKind, Normalization, Normalized, WriteOpts};
 use crate::reconcile::{identity, reconcile, ArrayStrategy, KeyPath, MergeKeys, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{Source, Warning};
@@ -26,7 +26,7 @@ use crate::RunArgs;
 /// depends on the target's bytes.
 fn requested_write_opts(args: &RunArgs) -> WriteOpts {
     WriteOpts {
-        indent: args.indent.unwrap_or(Indent::Spaces(2)),
+        indent: args.indent,
         plist_format: args.plist_format,
     }
 }

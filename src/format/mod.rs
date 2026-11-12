@@ -11,6 +11,7 @@
 //! byte-oriented [`Format`] trait -- it provides its own tree reader/writer and
 //! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -218,6 +219,23 @@ pub trait ValueCodec {
 pub enum Indent {
     Spaces(u8),
     Tab,
+}
+
+/// Two spaces, what `--indent` defaults to.
+impl Default for Indent {
+    fn default() -> Indent {
+        Indent::Spaces(2)
+    }
+}
+
+/// How `--help` shows an indent: the spelling `FromStr` accepts.
+impl fmt::Display for Indent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Indent::Spaces(n) => write!(f, "{n}"),
+            Indent::Tab => f.write_str("tab"),
+        }
+    }
 }
 
 /// A `--indent` value: a non-negative number of spaces, or `tab`. clap parses the
