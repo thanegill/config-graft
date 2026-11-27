@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
@@ -13,52 +13,20 @@ use saphyr::LoadableYamlNode;
 use super::{Format, FormatKind, ParseFailure, ValueCodec, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{CanonicalF64, Leaf, Node};
 
 /// YAML codec.
 pub struct Yaml;
 
 /// A YAML leaf value. saphyr resolves integers to `i64`, so there is no unsigned
 /// variant, and YAML has none of plist's exotic scalars.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum YamlLeaf {
     Null,
     Bool(bool),
     Int(i64),
-    Float(f64),
+    Float(CanonicalF64),
     String(String),
-}
-
-// `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
-// `Hash`. `Float` compares and hashes via `canonical_float_bits`.
-impl PartialEq for YamlLeaf {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (YamlLeaf::Null, YamlLeaf::Null) => true,
-            (YamlLeaf::Bool(a), YamlLeaf::Bool(b)) => a == b,
-            (YamlLeaf::Int(a), YamlLeaf::Int(b)) => a == b,
-            (YamlLeaf::Float(a), YamlLeaf::Float(b)) => {
-                canonical_float_bits(*a) == canonical_float_bits(*b)
-            }
-            (YamlLeaf::String(a), YamlLeaf::String(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for YamlLeaf {}
-
-impl Hash for YamlLeaf {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            YamlLeaf::Null => {}
-            YamlLeaf::Bool(b) => b.hash(state),
-            YamlLeaf::Int(i) => i.hash(state),
-            YamlLeaf::Float(f) => canonical_float_bits(*f).hash(state),
-            YamlLeaf::String(s) => s.hash(state),
-        }
-    }
 }
 
 impl fmt::Display for YamlLeaf {
@@ -67,7 +35,7 @@ impl fmt::Display for YamlLeaf {
             YamlLeaf::Null => f.write_str("null"),
             YamlLeaf::Bool(b) => write!(f, "{b}"),
             YamlLeaf::Int(i) => write!(f, "{i}"),
-            YamlLeaf::Float(v) => f.write_str(&yaml_float(*v)),
+            YamlLeaf::Float(v) => f.write_str(&yaml_float(v.0)),
             YamlLeaf::String(s) => f.write_str(&quote(s)),
         }
     }
@@ -106,7 +74,7 @@ impl ValueCodec for Yaml {
                 saphyr::Scalar::Null => YamlLeaf::Null,
                 saphyr::Scalar::Boolean(b) => YamlLeaf::Bool(*b),
                 saphyr::Scalar::Integer(i) => YamlLeaf::Int(*i),
-                saphyr::Scalar::FloatingPoint(f) => YamlLeaf::Float(f.into_inner()),
+                saphyr::Scalar::FloatingPoint(f) => YamlLeaf::Float(CanonicalF64(f.into_inner())),
                 saphyr::Scalar::String(s) => YamlLeaf::String(s.to_string()),
             })),
             saphyr::Yaml::Tagged(..) => Err(ParseFailure::Unsupported("a tagged value")),
@@ -259,7 +227,7 @@ impl From<&YamlLeaf> for saphyr::Yaml<'static> {
             YamlLeaf::Bool(b) => saphyr::Yaml::Value(saphyr::Scalar::Boolean(*b)),
             YamlLeaf::Int(i) => saphyr::Yaml::Value(saphyr::Scalar::Integer(*i)),
             YamlLeaf::Float(f) => {
-                saphyr::Yaml::Representation(yaml_float(*f), saphyr::ScalarStyle::Plain, None)
+                saphyr::Yaml::Representation(yaml_float(f.0), saphyr::ScalarStyle::Plain, None)
             }
             YamlLeaf::String(s) => yaml_string(s.clone()),
         }
@@ -331,7 +299,7 @@ mod tests {
         assert_eq!(leaf(&node, "a"), YamlLeaf::Int(1));
         assert_eq!(leaf(&node, "b"), YamlLeaf::Bool(true));
         assert_eq!(leaf(&node, "c"), YamlLeaf::String("hello".to_string()));
-        assert_eq!(leaf(&node, "g"), YamlLeaf::Float(2.5));
+        assert_eq!(leaf(&node, "g"), YamlLeaf::Float(CanonicalF64(2.5)));
         assert_eq!(
             node.as_map().unwrap()["d"],
             Node::Array(vec![
@@ -397,27 +365,30 @@ mod tests {
     fn every_nan_is_one_value() {
         // A sound `Eq` needs NaN to equal itself, and set-union's `HashSet` needs
         // equal values to hash alike, whatever the NaN's sign or payload bits.
-        use std::hash::DefaultHasher;
+        use std::hash::{DefaultHasher, Hasher};
         let hash = |leaf: &YamlLeaf| {
             let mut hasher = DefaultHasher::new();
             leaf.hash(&mut hasher);
             hasher.finish()
         };
-        let nan = YamlLeaf::Float(f64::NAN);
+        let nan = YamlLeaf::Float(CanonicalF64(f64::NAN));
         for other in [-f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)] {
-            let other = YamlLeaf::Float(other);
+            let other = YamlLeaf::Float(CanonicalF64(other));
             assert_eq!(nan, other);
             assert_eq!(hash(&nan), hash(&other));
         }
         // ... without making anything else equal.
-        assert_ne!(nan, YamlLeaf::Float(0.0));
-        assert_ne!(YamlLeaf::Float(1.0), YamlLeaf::Float(2.0));
+        assert_ne!(nan, YamlLeaf::Float(CanonicalF64(0.0)));
+        assert_ne!(
+            YamlLeaf::Float(CanonicalF64(1.0)),
+            YamlLeaf::Float(CanonicalF64(2.0))
+        );
     }
 
     fn float_document(value: f64) -> Node<YamlLeaf> {
         Node::Map(IndexMap::from([(
             "a".to_string(),
-            Node::Leaf(YamlLeaf::Float(value)),
+            Node::Leaf(YamlLeaf::Float(CanonicalF64(value))),
         )]))
     }
 
@@ -448,7 +419,7 @@ mod tests {
 
     fn assert_float_round_trips(value: f64) {
         match float_round_trip(value) {
-            (text, Some(YamlLeaf::Float(back))) => {
+            (text, Some(YamlLeaf::Float(CanonicalF64(back)))) => {
                 assert_eq!(
                     back.to_bits(),
                     value.to_bits(),
@@ -477,7 +448,12 @@ mod tests {
                 ("negative_infinity", f64::NEG_INFINITY),
                 ("not_a_number", f64::NAN),
             ]
-            .map(|(key, value)| (key.to_string(), Node::Leaf(YamlLeaf::Float(value)))),
+            .map(|(key, value)| {
+                (
+                    key.to_string(),
+                    Node::Leaf(YamlLeaf::Float(CanonicalF64(value))),
+                )
+            }),
         ));
         assert_eq!(
             write_canonical(&node),
@@ -509,7 +485,7 @@ mod tests {
         }
         let (text, back) = float_round_trip(f64::NAN);
         assert!(
-            matches!(back, Some(YamlLeaf::Float(f)) if f.is_nan()),
+            matches!(back, Some(YamlLeaf::Float(CanonicalF64(f))) if f.is_nan()),
             "NaN was emitted as {text:?} and read back as {back:?}"
         );
     }

@@ -11,50 +11,32 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 use super::{Format, FormatKind, ParseFailure, ValueCodec, WriteOpts};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{CanonicalF64, Leaf, Node};
 
 /// TOML codec.
 pub struct Toml;
 
 /// A TOML leaf value. TOML has no null; datetimes (offset/local date-time, date,
 /// and time) ride through the engine as an opaque leaf, like plist's `Date`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TomlLeaf {
     Bool(bool),
     Int(i64),
-    Float(f64),
+    Float(CanonicalF64),
     String(String),
     Datetime(toml_edit::Datetime),
 }
 
-// `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
-// `Hash`. `Float` compares and hashes via `canonical_float_bits`. `Datetime` is
-// `Eq` but not `Hash`, so it hashes via its canonical `Display` form: equal
-// datetimes render identically, which keeps the hash consistent with `Eq`.
-impl PartialEq for TomlLeaf {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (TomlLeaf::Bool(a), TomlLeaf::Bool(b)) => a == b,
-            (TomlLeaf::Int(a), TomlLeaf::Int(b)) => a == b,
-            (TomlLeaf::Float(a), TomlLeaf::Float(b)) => {
-                canonical_float_bits(*a) == canonical_float_bits(*b)
-            }
-            (TomlLeaf::String(a), TomlLeaf::String(b)) => a == b,
-            (TomlLeaf::Datetime(a), TomlLeaf::Datetime(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for TomlLeaf {}
-
+// Hand-written because `Datetime` is `Eq` but not `Hash`: it hashes via its
+// canonical `Display` form, and equal datetimes render identically, which keeps
+// the hash consistent with `Eq`.
 impl Hash for TomlLeaf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
             TomlLeaf::Bool(b) => b.hash(state),
             TomlLeaf::Int(i) => i.hash(state),
-            TomlLeaf::Float(f) => canonical_float_bits(*f).hash(state),
+            TomlLeaf::Float(f) => f.hash(state),
             TomlLeaf::String(s) => s.hash(state),
             TomlLeaf::Datetime(d) => d.to_string().hash(state),
         }
@@ -66,7 +48,7 @@ impl fmt::Display for TomlLeaf {
         match self {
             TomlLeaf::Bool(b) => write!(f, "{b}"),
             TomlLeaf::Int(i) => write!(f, "{i}"),
-            TomlLeaf::Float(v) => f.write_str(&render_f64(*v)),
+            TomlLeaf::Float(v) => f.write_str(&render_f64(v.0)),
             TomlLeaf::String(s) => f.write_str(&quote(s)),
             // No JSON rendering -- a readable token, mirroring plist's `<date ...>`.
             TomlLeaf::Datetime(d) => write!(f, "<datetime {d}>"),
@@ -192,7 +174,7 @@ fn decode_value(v: &Value) -> Result<Node<TomlLeaf>, ParseFailure> {
     Ok(match v {
         Value::String(f) => Node::Leaf(TomlLeaf::String(f.value().clone())),
         Value::Integer(f) => Node::Leaf(TomlLeaf::Int(*f.value())),
-        Value::Float(f) => Node::Leaf(TomlLeaf::Float(*f.value())),
+        Value::Float(f) => Node::Leaf(TomlLeaf::Float(CanonicalF64(*f.value()))),
         Value::Boolean(f) => Node::Leaf(TomlLeaf::Bool(*f.value())),
         Value::Datetime(f) => Node::Leaf(TomlLeaf::Datetime(*f.value())),
         Value::Array(a) => {
@@ -252,7 +234,7 @@ impl From<&TomlLeaf> for Value {
         match toml_leaf {
             TomlLeaf::Bool(b) => Value::from(*b),
             TomlLeaf::Int(i) => Value::from(*i),
-            TomlLeaf::Float(f) => Value::from(*f),
+            TomlLeaf::Float(f) => Value::from(f.0),
             TomlLeaf::String(s) => Value::from(s.clone()),
             TomlLeaf::Datetime(d) => Value::from(*d),
         }
@@ -262,6 +244,25 @@ impl From<&TomlLeaf> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hash_of(leaf: &TomlLeaf) -> u64 {
+        use std::hash::{DefaultHasher, Hasher};
+        let mut hasher = DefaultHasher::new();
+        leaf.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn leaves_that_differ_hash_apart() {
+        let date: toml_edit::Datetime = "1979-05-27".parse().unwrap();
+        let time: toml_edit::Datetime = "07:32:00".parse().unwrap();
+        // Not required by the `Hash` contract; this guards against a constant hash.
+        assert_ne!(
+            hash_of(&TomlLeaf::Datetime(date)),
+            hash_of(&TomlLeaf::Datetime(time))
+        );
+        assert_ne!(hash_of(&TomlLeaf::Int(1)), hash_of(&TomlLeaf::Int(2)));
+    }
 
     /// Parse TOML text into a `Node` (mirrors `Toml::parse`).
     fn toml_to_node(text: &str) -> Option<Node<TomlLeaf>> {
@@ -283,7 +284,7 @@ mod tests {
         assert_eq!(leaf(&node, "a"), TomlLeaf::Int(1));
         assert_eq!(leaf(&node, "b"), TomlLeaf::Bool(true));
         assert_eq!(leaf(&node, "c"), TomlLeaf::String("hello".to_string()));
-        assert_eq!(leaf(&node, "g"), TomlLeaf::Float(2.5));
+        assert_eq!(leaf(&node, "g"), TomlLeaf::Float(CanonicalF64(2.5)));
         assert_eq!(
             node.as_map().unwrap()["d"],
             Node::Array(vec![
@@ -359,20 +360,17 @@ mod tests {
     fn every_nan_is_one_value() {
         // A sound `Eq` needs NaN to equal itself, and set-union's `HashSet` needs
         // equal values to hash alike, whatever the NaN's sign or payload bits.
-        use std::hash::DefaultHasher;
-        let hash = |leaf: &TomlLeaf| {
-            let mut hasher = DefaultHasher::new();
-            leaf.hash(&mut hasher);
-            hasher.finish()
-        };
-        let nan = TomlLeaf::Float(f64::NAN);
+        let nan = TomlLeaf::Float(CanonicalF64(f64::NAN));
         for other in [-f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)] {
-            let other = TomlLeaf::Float(other);
+            let other = TomlLeaf::Float(CanonicalF64(other));
             assert_eq!(nan, other);
-            assert_eq!(hash(&nan), hash(&other));
+            assert_eq!(hash_of(&nan), hash_of(&other));
         }
         // ... without making anything else equal.
-        assert_ne!(nan, TomlLeaf::Float(0.0));
-        assert_ne!(TomlLeaf::Float(1.0), TomlLeaf::Float(2.0));
+        assert_ne!(nan, TomlLeaf::Float(CanonicalF64(0.0)));
+        assert_ne!(
+            TomlLeaf::Float(CanonicalF64(1.0)),
+            TomlLeaf::Float(CanonicalF64(2.0))
+        );
     }
 }

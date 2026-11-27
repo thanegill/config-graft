@@ -25,18 +25,44 @@ pub trait Leaf: Clone + Eq + Hash + std::fmt::Debug + std::fmt::Display {
     }
 }
 
-/// Canonical `f64` bit pattern for the float-carrying leaf types' `Eq`/`Hash`.
+/// An `f64` that is `Eq` and `Hash`, so the float-carrying leaves can derive `Eq`
+/// and keep `Hash` consistent with it.
 ///
-/// Maps every `NaN` to one quiet-NaN pattern, so a `NaN` leaf equals itself and
-/// hashes stably -- which a sound `Eq` and `HashSet` dedup both need. Every other
-/// value keeps its bits, so `-0.0` and `0.0` differ: the sign survives into
-/// anything that reads the file, so a DESIRED `-0.0` must be able to replace a
-/// `0.0`.
-pub fn canonical_float_bits(f: f64) -> u64 {
-    if f.is_nan() {
-        0x7ff8_0000_0000_0000
-    } else {
-        f.to_bits()
+/// Every `NaN` is one value, so a `NaN` leaf equals itself and hashes stably --
+/// which a sound `Eq` and `HashSet` dedup both need. Every other value compares by
+/// its bits, so `-0.0` and `0.0` differ: the sign survives into anything that
+/// reads the file, so a DESIRED `-0.0` must be able to replace a `0.0`.
+#[derive(Clone, Copy)]
+pub struct CanonicalF64(pub f64);
+
+impl CanonicalF64 {
+    fn bits(self) -> u64 {
+        if self.0.is_nan() {
+            0x7ff8_0000_0000_0000
+        } else {
+            self.0.to_bits()
+        }
+    }
+}
+
+impl PartialEq for CanonicalF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits() == other.bits()
+    }
+}
+
+impl Eq for CanonicalF64 {}
+
+impl Hash for CanonicalF64 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bits().hash(state);
+    }
+}
+
+/// Shows the bare `f64`, so a leaf's derived `Debug` reads `Float(2.5)`.
+impl std::fmt::Debug for CanonicalF64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -118,5 +144,42 @@ impl<L: Leaf> Node<L> {
             Node::Map(m) => Some(m),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    use super::CanonicalF64;
+
+    fn hash_of(value: CanonicalF64) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn values_that_differ_hash_apart_and_every_nan_hashes_alike() {
+        // Not required by the `Hash` contract; this guards against a constant hash.
+        // `DefaultHasher::new()` is deterministic, so it is stable.
+        let distinct = [0.0, -0.0, 1.0, 2.0, f64::INFINITY];
+        for pair in distinct.windows(2) {
+            assert_ne!(
+                hash_of(CanonicalF64(pair[0])),
+                hash_of(CanonicalF64(pair[1]))
+            );
+        }
+        let payload_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        assert_eq!(
+            hash_of(CanonicalF64(f64::NAN)),
+            hash_of(CanonicalF64(payload_nan))
+        );
+    }
+
+    #[test]
+    fn debug_shows_the_bare_float() {
+        assert_eq!(format!("{:?}", CanonicalF64(2.5)), "2.5");
+        assert_eq!(format!("{:?}", CanonicalF64(-0.0)), "-0.0");
     }
 }
