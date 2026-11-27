@@ -63,7 +63,7 @@ impl Toml {
     pub(super) fn decode(value: &Item) -> Result<Node<TomlLeaf>, ParseFailure> {
         match value {
             Item::Table(t) => decode_table(t),
-            Item::Value(v) => decode_value(v),
+            Item::Value(v) => Ok(decode_value(v)),
             Item::ArrayOfTables(aot) => {
                 let mut out = Vec::with_capacity(aot.len());
                 for t in aot.iter() {
@@ -166,28 +166,22 @@ fn decode_table(t: &Table) -> Result<Node<TomlLeaf>, ParseFailure> {
 }
 
 /// Decode a TOML value (scalar, array, or inline table) into a node.
-fn decode_value(v: &Value) -> Result<Node<TomlLeaf>, ParseFailure> {
-    Ok(match v {
+fn decode_value(v: &Value) -> Node<TomlLeaf> {
+    match v {
         Value::String(f) => Node::Leaf(TomlLeaf::String(f.value().clone())),
         Value::Integer(f) => Node::Leaf(TomlLeaf::Int(*f.value())),
         Value::Float(f) => Node::Leaf(TomlLeaf::Float(CanonicalF64(*f.value()))),
         Value::Boolean(f) => Node::Leaf(TomlLeaf::Bool(*f.value())),
         Value::Datetime(f) => Node::Leaf(TomlLeaf::Datetime(*f.value())),
-        Value::Array(a) => {
-            let mut out = Vec::with_capacity(a.len());
-            for e in a.iter() {
-                out.push(decode_value(e)?);
-            }
-            Node::Array(out)
-        }
+        Value::Array(a) => Node::Array(a.iter().map(decode_value).collect()),
         Value::InlineTable(it) => {
             let mut map = IndexMap::with_capacity(it.len());
             for (k, val) in it.iter() {
-                map.insert(k.to_string(), decode_value(val)?);
+                map.insert(k.to_string(), decode_value(val));
             }
             Node::Map(map)
         }
-    })
+    }
 }
 
 /// Build a TOML table from a map node (children become `[section]` tables).
