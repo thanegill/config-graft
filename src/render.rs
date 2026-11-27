@@ -4,8 +4,8 @@
 //! Three format-agnostic primitives -- `quote` (a JSON-escaped string),
 //! `render_f64` (a float as JSON spells it) and `write_separated` (a
 //! `Display`-based join) -- then `escape_unprintable`, shared by every path
-//! label, and [`KeyPath::render`], the key paths that warnings and refusals name;
-//! and the two renderings of a whole [`Node`]: its `Display` (the compact
+//! label, and [`DiagnosticPath::render`], the paths that warnings and refusals
+//! name; and the two renderings of a whole [`Node`]: its `Display` (the compact
 //! single-line token) and [`Node::diff`], the leaf-level `+`/`-`/`~` listing
 //! behind `--diff`. Each format's leaf `Display` lives with that format's codec
 //! and uses the primitives from here.
@@ -18,8 +18,9 @@ use std::fmt::{self, Write as _};
 
 use json_syntax::Print;
 
-use crate::reconcile::{KeyPath, Segment};
+use crate::reconcile::ManagedPath;
 use crate::value::{Leaf, Node};
+use crate::warning::{DiagnosticPath, Step};
 
 /// JSON-escape and quote a string, for `--diff` and the leaf `Display` impls.
 pub fn quote(s: &str) -> String {
@@ -95,20 +96,20 @@ fn escape_unprintable(segment: &str) -> String {
         .collect()
 }
 
-impl KeyPath {
-    /// Render as a user-facing string: segments joined by `sep`, or `<root>` for
-    /// the empty path. `sep` is format-specific. A selector attaches directly to
-    /// the preceding key with no separator, e.g. `servers[name="web"]`, so a key
-    /// holding a `[` is quoted (`x."[b]"`) or it would read as one -- and so is a
-    /// key opening with `"`, or a quoted key could be forged.
+impl DiagnosticPath {
+    /// Render as a user-facing string: steps joined by `sep` (format-specific), or
+    /// `<root>` for the empty path. An index or a selector attaches directly to the
+    /// preceding key with no separator (`checks[0]:when`, `servers[name="web"]`),
+    /// so a key holding a `[` is quoted (`x."[b]"`) or it would read as one -- and
+    /// so is a key opening with `"`, or a quoted key could be forged.
     pub fn render(&self, sep: &str) -> String {
         if self.is_empty() {
             return "<root>".to_string();
         }
         let mut out = String::new();
-        for (i, segment) in self.iter().enumerate() {
-            match segment {
-                Segment::Key(key) => {
+        for (i, step) in self.iter().enumerate() {
+            match step {
+                Step::Key(key) => {
                     if i > 0 {
                         out.push_str(sep);
                     }
@@ -119,7 +120,8 @@ impl KeyPath {
                         out.push_str(&escape_unprintable(key));
                     }
                 }
-                Segment::Selector { field, value } => {
+                Step::Index(index) => write!(out, "[{index}]").expect("writing to a String"),
+                Step::Selector { field, value } => {
                     let field = escape_unprintable(field);
                     let value = escape_unprintable(value);
                     write!(out, "[{field}={value}]").expect("writing to a String");
@@ -150,10 +152,10 @@ impl<L: Leaf> Node<L> {
         // (not the rendered string), so a key that itself contains the format separator
         // can't reorder against a nested path that renders identically; it also keeps a
         // directory's own line (its final segment empty) just before its children.
-        let mut lines: Vec<(KeyPath, String)> = Vec::new();
+        let mut lines: Vec<(ManagedPath, String)> = Vec::new();
 
-        let old_leaves: HashSet<KeyPath> = self.leaf_paths().into_iter().collect();
-        let new_leaves: HashSet<KeyPath> = new.leaf_paths().into_iter().collect();
+        let old_leaves: HashSet<ManagedPath> = self.leaf_paths().into_iter().collect();
+        let new_leaves: HashSet<ManagedPath> = new.leaf_paths().into_iter().collect();
         for path in old_leaves.union(&new_leaves) {
             // Decide the label from the actual node at this path, not the backend:
             // only a directory's own-attributes leaf collapses an empty component to
@@ -193,13 +195,15 @@ impl<L: Leaf> Node<L> {
     /// giving the bare-`/` root line or a trailing-`/` subdirectory line. Any other
     /// empty component is quoted (`""`) so an empty-named key is unambiguous rather
     /// than reading as a directory line.
-    fn diff_label(path: &KeyPath, sep: &str, is_dir_attrs: bool) -> String {
+    fn diff_label(path: &ManagedPath, sep: &str, is_dir_attrs: bool) -> String {
         let label = path
             .iter()
-            .map(|segment| match segment {
-                Segment::Key(key) if key.is_empty() && !is_dir_attrs => quote(key),
-                Segment::Key(key) => escape_unprintable(key),
-                Segment::Selector { .. } => unreachable!("a leaf path holds only keys"),
+            .map(|key| {
+                if key.is_empty() && !is_dir_attrs {
+                    quote(key)
+                } else {
+                    escape_unprintable(key)
+                }
             })
             .collect::<Vec<_>>()
             .join(sep);
@@ -237,6 +241,78 @@ impl<L: Leaf> fmt::Display for Node<L> {
 #[cfg(test)]
 mod tests {
     use super::{escape_unprintable, render_f64};
+    use crate::warning::{DiagnosticPath, Step};
+
+    /// A path of object keys.
+    fn keys(segments: &[&str]) -> DiagnosticPath {
+        segments.iter().map(|s| Step::Key(s.to_string())).collect()
+    }
+
+    #[test]
+    fn path_render_uses_the_given_separator() {
+        let p = keys(&["a", "b"]);
+        assert_eq!(p.render("."), "a.b");
+        assert_eq!(p.render(":"), "a:b");
+        assert_eq!(DiagnosticPath::new().render(":"), "<root>"); // empty path
+    }
+
+    #[test]
+    fn path_render_attaches_element_selector_to_the_preceding_key() {
+        let mut p = keys(&["tags"]);
+        p.prepend(Step::Selector {
+            field: "name".to_string(),
+            value: "\"web\"".to_string(),
+        });
+        p.prepend(Step::Key("servers".to_string()));
+        assert_eq!(p.render("."), "servers[name=\"web\"].tags");
+        assert_eq!(p.render(":"), "servers[name=\"web\"]:tags");
+    }
+
+    #[test]
+    fn path_render_attaches_an_index_to_the_preceding_key() {
+        let mut p = keys(&["checks"]);
+        p.push(Step::Index(2));
+        p.push(Step::Key("when".to_string()));
+        assert_eq!(p.render(":"), "checks[2]:when");
+        // A key spelled like an index is quoted, so the two cannot be confused.
+        assert_eq!(
+            keys(&["checks", "[2]", "when"]).render(":"),
+            r#"checks:"[2]":when"#
+        );
+    }
+
+    #[test]
+    fn path_render_quotes_a_key_that_would_read_as_a_selector() {
+        assert_eq!(keys(&["x", "[b]"]).render("."), r#"x."[b]""#);
+        assert_eq!(keys(&["x", "a[b]"]).render(":"), r#"x:"a[b]""#);
+        assert_eq!(keys(&["[b]", "y"]).render("."), r#""[b]".y"#);
+        // A key opening with a quote is quoted too, so `"[b]"` cannot be forged.
+        assert_eq!(keys(&[r#""[b]""#]).render("."), r#""\"[b]\"""#);
+    }
+
+    #[test]
+    fn path_render_leaves_other_punctuation_unquoted() {
+        assert_eq!(keys(&["a]", "b=c", r#"d"e"#]).render("."), r#"a].b=c.d"e"#);
+    }
+
+    /// A quoted key escapes a control byte the JSON way, not as the
+    /// `escape_unprintable` form an unquoted key gets.
+    #[test]
+    fn path_render_escapes_a_control_byte_in_a_quoted_key_as_json_does() {
+        let escape = char::from(0x1b_u8);
+        let quoted = format!("{escape}[b]");
+        let plain = format!("{escape}b");
+        assert_eq!(keys(&["x", &quoted]).render("."), r#"x."\u001b[b]""#);
+        assert_eq!(keys(&["x", &plain]).render("."), r"x.\u{1b}b");
+    }
+
+    /// JSON leaves DEL raw, which would reach the terminal, so a quoted key
+    /// escapes it too.
+    #[test]
+    fn path_render_escapes_a_delete_byte_in_a_quoted_key() {
+        let delete = format!("[{}", char::from(0x7f_u8));
+        assert_eq!(keys(&["x", &delete]).render("."), r#"x."[\u007f""#);
+    }
 
     #[test]
     fn escape_unprintable_escapes_only_c0_controls_and_delete() {
