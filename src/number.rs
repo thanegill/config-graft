@@ -175,7 +175,7 @@ impl<'a> TryFrom<&'a str> for NumberValue<'a> {
 /// The digits as an `i128`, scaled by `10^exponent`, or `None` if that overflows.
 fn whole(negative: bool, integer: &str, fraction: &str, exponent: i64) -> Option<i128> {
     let mut value: i128 = 0;
-    for digit in integer.bytes().chain(fraction.bytes()) {
+    for digit in digits(integer, fraction) {
         value = value
             .checked_mul(10)?
             .checked_add(i128::from(digit - b'0'))?;
