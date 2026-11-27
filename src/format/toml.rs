@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use indexmap::IndexMap;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
-use super::{Format, FormatKind, ParseFailure, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, ParseFailure, WriteOpts};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{CanonicalF64, Leaf, Node};
@@ -58,11 +58,9 @@ impl fmt::Display for TomlLeaf {
 
 impl Leaf for TomlLeaf {}
 
-impl ValueCodec for Toml {
-    type Leaf = TomlLeaf;
-    type Value<'a> = Item;
-
-    fn decode(value: &Item) -> Result<Node<TomlLeaf>, ParseFailure> {
+impl Toml {
+    /// Refuses only `Item::None`, which no parsed document holds.
+    pub(super) fn decode(value: &Item) -> Result<Node<TomlLeaf>, ParseFailure> {
         match value {
             Item::Table(t) => decode_table(t),
             Item::Value(v) => decode_value(v),
@@ -77,7 +75,7 @@ impl ValueCodec for Toml {
         }
     }
 
-    fn encode(node: &Node<TomlLeaf>) -> Item {
+    pub(super) fn encode(node: &Node<TomlLeaf>) -> Item {
         match node {
             // Maps become real `[section]` tables so canonical output is idiomatic.
             Node::Map(m) => Item::Table(encode_table(m)),
@@ -88,6 +86,7 @@ impl ValueCodec for Toml {
 }
 
 impl Format for Toml {
+    type Leaf = TomlLeaf;
     const KIND: FormatKind = FormatKind::Toml;
     const PATH_SEP: &'static str = ".";
 

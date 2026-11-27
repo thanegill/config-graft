@@ -4,8 +4,9 @@
 //!
 //! Reconciliation is homogeneous -- one format governs TARGET, DESIRED, BASE, and
 //! the output -- so there is never a cross-format conversion. Each format lives in
-//! its own module ([`json`], [`plist`], [`yaml`], [`toml`]); this module holds the
-//! shared [`Format`]/[`ValueCodec`] traits and the [`FormatKind`] tag. The
+//! its own module ([`json`], [`plist`], [`yaml`], [`toml`]), with its own
+//! `decode`/`encode` between its native value type and `Node`; this module holds
+//! the shared [`Format`] trait and the [`FormatKind`] tag. The
 //! [`directory`] module is the odd one out: the `directory` subcommand reconciles a
 //! whole tree, which has no single byte stream, so it does **not** implement the
 //! byte-oriented [`Format`] trait -- it provides its own tree reader/writer and
@@ -94,7 +95,10 @@ impl FormatKind {
 /// A format's I/O boundary: parse bytes into a `Node` of this format's leaf type
 /// and serialize one back to text. Not object-safe (the node type varies per
 /// format), so dispatch is static: `main` calls `ByteBackend::<F>::run` per format.
-pub trait Format: ValueCodec {
+pub trait Format {
+    /// This format's own leaf type, so a JSON node can't hold a plist `Date` and
+    /// each format's `Node` -> native encoder is total.
+    type Leaf: Leaf;
     /// The `FormatKind` this format corresponds to (for format-specific errors).
     const KIND: FormatKind;
     /// Separator between key-path segments in user-facing diagnostics (`--diff`,
@@ -195,24 +199,6 @@ pub struct WriteOpts {
     pub indent: Indent,
     /// The encoding a plist run writes.
     pub plist_format: PlistFormat,
-}
-
-/// Conversion between a format's native value type and the internal `Node` model.
-///
-/// Each format declares its own leaf type (`Leaf`), so a JSON node can't hold a
-/// plist `Date` and the encoders are total (no `unreachable!()`). `Value<'a>` is a
-/// GAT so saphyr's borrowed `Yaml<'a>` fits the same trait as the owning
-/// `json_syntax::Value`/`plist::Value`.
-pub trait ValueCodec {
-    type Leaf: Leaf;
-    type Value<'a>;
-    /// Native → `Node`. An `Err` means "refuse" -- produced by YAML (for
-    /// non-string keys, tags, etc.) and plist (a value type newer than this
-    /// build); JSON is total, and TOML's one `Err` (`Item::None`) cannot come
-    /// from a parsed document.
-    fn decode(value: &Self::Value<'_>) -> Result<Node<Self::Leaf>, ParseFailure>;
-    /// `Node` → native.
-    fn encode(node: &Node<Self::Leaf>) -> Self::Value<'static>;
 }
 
 /// Output indentation for the JSON writer: a number of spaces, or a tab.

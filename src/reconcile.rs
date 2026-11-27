@@ -330,7 +330,7 @@ pub fn deep_merge<L: Leaf>(
 mod tests {
     use super::*;
     use crate::format::json::JsonLeaf;
-    use crate::format::{Json, ValueCodec};
+    use crate::format::Json;
     use json_syntax::{Parse, Print};
     use serde_json::{json, Value};
 
@@ -339,7 +339,7 @@ mod tests {
     /// own value type by text, which is also what the engine sees at runtime.
     fn n(v: Value) -> Node<JsonLeaf> {
         let text = v.to_string();
-        Json::decode(&json_syntax::Value::parse_str(&text).unwrap().0).unwrap()
+        Json::decode(&json_syntax::Value::parse_str(&text).unwrap().0)
     }
 
     /// `Node` → JSON value, for comparing results against `json!(...)`.
