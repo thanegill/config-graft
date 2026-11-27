@@ -128,7 +128,7 @@ fn value_merge<L: Leaf>(
 ) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     let verts = membership_merge(target, desired, base);
     let id_of = |e: &Node<L>| verts.iter().position(|v| v == e);
-    let (out, mut warnings) = assemble(verts.len(), id_of, &verts, target, desired, base);
+    let (out, mut warnings) = assemble(id_of, &verts, target, desired, base);
     warnings.extend(value_duplicates(target, &out, Source::Target));
     warnings.extend(value_duplicates(desired, &out, Source::Desired));
     (out, warnings)
@@ -198,7 +198,7 @@ fn keyed_merge<L: Leaf>(
     }
 
     let id_of = |e: &Node<L>| key(e).and_then(|k| survivors.iter().position(|s| *s == k));
-    let (out, mut conflicts) = assemble(survivors.len(), id_of, &merged, target, desired, base);
+    let (out, mut conflicts) = assemble(id_of, &merged, target, desired, base);
     conflicts.append(&mut nested);
     conflicts.extend(key_duplicates(target, keys, &out, Source::Target));
     conflicts.extend(key_duplicates(desired, keys, &out, Source::Desired));
@@ -284,18 +284,18 @@ fn key_duplicates<L: Leaf>(
     warnings
 }
 
-/// Shared GTS assembly: given the survivor count `n`, a map from an input element
-/// to its survivor index (`id_of`), and the output value per survivor (`merged`),
-/// order the survivors move-aware and report any cross-over cycle as a single
+/// Shared GTS assembly: given a map from an input element to its survivor index
+/// (`id_of`) and the output value per survivor (`merged`), order the survivors
+/// move-aware and report any cross-over cycle as a single
 /// warning at this array (empty path -- callers prepend the array's own key).
 fn assemble<L: Leaf>(
-    n: usize,
     id_of: impl Fn(&Node<L>) -> Option<usize>,
     merged: &[Node<L>],
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
 ) -> (Vec<Node<L>>, Vec<Warning<L>>) {
+    let n = merged.len();
     if n <= 1 {
         return (merged.to_vec(), Vec::new());
     }
