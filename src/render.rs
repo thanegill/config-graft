@@ -160,7 +160,9 @@ impl DiagnosticPath {
     /// preceding key with no separator (`checks[0]:when`, `servers[name="web"]`),
     /// so a key holding a `[` is quoted (`x."[b]"`) or it would read as one -- as is
     /// a key opening with `"`, so a quote that opens a step always opens a quoted
-    /// key. A selector renders through [`render_selector`].
+    /// key. An empty key is quoted too (`l.""`, as `--diff` shows it), since it would
+    /// otherwise show as nothing at all. A selector renders through
+    /// [`render_selector`].
     pub fn render(&self, sep: &str) -> String {
         if self.is_empty() {
             return "<root>".to_string();
@@ -172,7 +174,7 @@ impl DiagnosticPath {
                     if i > 0 {
                         out.push_str(sep);
                     }
-                    if key.contains('[') || key.starts_with('"') {
+                    if key.is_empty() || key.contains('[') || key.starts_with('"') {
                         out.push_str(&quote_key(key));
                     } else {
                         out.push_str(&escape_debug(key));
@@ -360,6 +362,13 @@ mod tests {
         assert_eq!(keys(&["[b]", "y"]).render("."), r#""[b]".y"#);
         // A key opening with a quote is quoted too, so `"[b]"` cannot be forged.
         assert_eq!(keys(&[r#""[b]""#]).render("."), r#""\"[b]\"""#);
+    }
+
+    #[test]
+    fn path_render_quotes_an_empty_key() {
+        assert_eq!(keys(&["l", ""]).render("."), r#"l."""#);
+        assert_eq!(keys(&["", "x"]).render(":"), r#""":x"#);
+        assert_eq!(keys(&[""]).render("."), r#""""#);
     }
 
     #[test]

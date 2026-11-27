@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A warning or refusal names an empty key `""`** (`l.""`), as `--diff` does, where it printed nothing between the separators (`l.`).
 - **`--diff` shows an empty object added or removed** (`+ a = {}`), where it printed nothing while `--check` reported the change.
 - **Key paths and parser messages are escaped as Rust's `escape_debug` does** in warnings, refusals and `--diff`, so C1 controls, bidi and other format characters, non-ASCII spaces and unassigned code points no longer reach the terminal raw; `"`, `\`, `'`, tab, newline and carriage return now print as `\"`, `\\`, `\'`, `\t`, `\n` and `\r`, and a selector field holding a bracket or opening with `"` is quoted.
 - **TOML, plist:** `--diff` shows a non-finite float as `inf`, `-inf`, `nan` or `-nan` instead of `null`, which read as a different value; what was written was already right.

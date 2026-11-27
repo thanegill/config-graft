@@ -1819,3 +1819,21 @@ fn a_merge_key_scope_that_names_an_array_somewhere_is_quiet() {
     let err = json_stderr(r#"{"a":1}"#, r#"{"a":2}"#, None, &["--merge-key", "id"]);
     assert_eq!(err, "");
 }
+
+#[test]
+fn a_warning_names_an_empty_key_as_diff_does() {
+    // An empty key is a key like any other, so a warning about the array under it
+    // names it `""` rather than leaving nothing between the separators.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("t.json");
+    let desired = dir.path().join("d.json");
+    fs::write(&target, r#"{"l":{"":[1,1]}}"#).unwrap();
+    fs::write(&desired, r#"{"l":{"":[2]}}"#).unwrap();
+    let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "config-graft: warning: array `l.\"\"` in TARGET holds 1 2 times; array \
+         membership is a set, so one is in the result\n"
+    );
+}
