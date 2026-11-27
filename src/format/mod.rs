@@ -362,6 +362,12 @@ fn edit_in_place_or_emit(
     Ok(text.into_bytes())
 }
 
+/// Whether most of `text`'s lines end in CRLF: the line ending the in-place
+/// editors give the lines they write.
+fn mostly_crlf(text: &str) -> bool {
+    text.matches("\r\n").count() * 2 > text.matches('\n').count()
+}
+
 /// Read and parse `path` with format `F`. `Ok(None)` means the file is not there
 /// (or is empty, which is how a caller stages a first apply); an `Err` means it is
 /// there and could not be understood. Keeping those apart matters: the run treats

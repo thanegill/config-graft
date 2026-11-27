@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Marker, Scalar, Yaml, YamlData};
 
 use super::yaml::{emit_without_marker, yaml_string, YamlLeaf};
-use super::{Format, ValueCodec, Yaml as YamlCodec};
+use super::{mostly_crlf, Format, ValueCodec, Yaml as YamlCodec};
 use crate::error::Error;
 use crate::value::Node;
 
@@ -77,12 +77,6 @@ struct Edit {
 /// Parse YAML text into a `Node` by the same rules as reading a file.
 fn parse_node(text: &str) -> Option<Node<YamlLeaf>> {
     YamlCodec::parse(text.as_bytes()).ok()
-}
-
-/// Whether most of `text`'s lines end in CRLF, the line ending every new line is
-/// then written with.
-fn mostly_crlf(text: &str) -> bool {
-    text.matches("\r\n").count() * 2 > text.matches('\n').count()
 }
 
 /// The edit that appends every entry of `rmap` to `text`, a target holding no
