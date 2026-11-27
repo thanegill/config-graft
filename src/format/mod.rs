@@ -345,6 +345,23 @@ fn is_invisible_format(c: char) -> bool {
     )
 }
 
+/// The `serialize` YAML and TOML share: an existing target is edited in place so
+/// its comments survive; an empty or whitespace-only one (a first apply) is written
+/// canonically by `emit`, and so is one that is not UTF-8.
+fn edit_in_place_or_emit(
+    current: &[u8],
+    emit: impl FnOnce() -> String,
+    edit: impl FnOnce(&str) -> Result<String, Error>,
+) -> Result<Vec<u8>, Error> {
+    let current = std::str::from_utf8(current).unwrap_or("");
+    let text = if current.trim().is_empty() {
+        emit()
+    } else {
+        edit(current)?
+    };
+    Ok(text.into_bytes())
+}
+
 /// Read and parse `path` with format `F`. `Ok(None)` means the file is not there
 /// (or is empty, which is how a caller stages a first apply); an `Err` means it is
 /// there and could not be understood. Keeping those apart matters: the run treats

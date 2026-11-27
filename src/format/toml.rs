@@ -110,14 +110,11 @@ impl Format for Toml {
         current: &[u8],
         _opts: WriteOpts,
     ) -> Result<Vec<u8>, Error> {
-        // An existing target is edited in place to preserve comments; an empty /
-        // first-apply (or non-UTF-8) target is emitted canonically.
-        let current = std::str::from_utf8(current).unwrap_or("");
-        if current.trim().is_empty() {
-            Ok(write_canonical(node).into_bytes())
-        } else {
-            super::toml_edit_apply::apply(current, node).map(String::into_bytes)
-        }
+        super::edit_in_place_or_emit(
+            current,
+            || write_canonical(node),
+            |text| super::toml_edit_apply::apply(text, node),
+        )
     }
 }
 
