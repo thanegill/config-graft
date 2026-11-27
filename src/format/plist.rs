@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::io::Cursor;
 use std::time::{Duration, SystemTime};
 
@@ -16,7 +16,7 @@ use super::{
 use crate::error::Error;
 use crate::reconcile::KeyPath;
 use crate::render::{quote, render_f64};
-use crate::value::{canonical_float_bits, Leaf, Node};
+use crate::value::{CanonicalF64, Leaf, Node};
 use crate::warning::Warning;
 
 /// Apple plist codec.
@@ -24,54 +24,16 @@ pub struct Plist;
 
 /// A plist leaf value. Plist has no null, but carries the exotic `Date`/`Data`/
 /// `Uid` scalars that ride through the engine as opaque leaves.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum PlistLeaf {
     Bool(bool),
     Int(i64),
     Uint(u64),
-    Float(f64),
+    Float(CanonicalF64),
     String(String),
     Date(plist::Date),
     Data(Vec<u8>),
     Uid(u64),
-}
-
-// `PartialEq`/`Eq`/`Hash` are hand-written because `f64` is neither `Eq` nor
-// `Hash`. `Float` compares and hashes via `canonical_float_bits`.
-impl PartialEq for PlistLeaf {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (PlistLeaf::Bool(a), PlistLeaf::Bool(b)) => a == b,
-            (PlistLeaf::Int(a), PlistLeaf::Int(b)) => a == b,
-            (PlistLeaf::Uint(a), PlistLeaf::Uint(b)) => a == b,
-            (PlistLeaf::Float(a), PlistLeaf::Float(b)) => {
-                canonical_float_bits(*a) == canonical_float_bits(*b)
-            }
-            (PlistLeaf::String(a), PlistLeaf::String(b)) => a == b,
-            (PlistLeaf::Date(a), PlistLeaf::Date(b)) => a == b,
-            (PlistLeaf::Data(a), PlistLeaf::Data(b)) => a == b,
-            (PlistLeaf::Uid(a), PlistLeaf::Uid(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for PlistLeaf {}
-
-impl Hash for PlistLeaf {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            PlistLeaf::Bool(b) => b.hash(state),
-            PlistLeaf::Int(i) => i.hash(state),
-            PlistLeaf::Uint(u) => u.hash(state),
-            PlistLeaf::Float(f) => canonical_float_bits(*f).hash(state),
-            PlistLeaf::String(s) => s.hash(state),
-            PlistLeaf::Date(d) => d.hash(state),
-            PlistLeaf::Data(bytes) => bytes.hash(state),
-            PlistLeaf::Uid(u) => u.hash(state),
-        }
-    }
 }
 
 // Not derived: `plist::Date`'s own `Debug` goes through `to_xml_format`, which
@@ -97,7 +59,7 @@ impl fmt::Display for PlistLeaf {
             PlistLeaf::Bool(b) => write!(f, "{b}"),
             PlistLeaf::Int(i) => write!(f, "{i}"),
             PlistLeaf::Uint(u) => write!(f, "{u}"),
-            PlistLeaf::Float(v) => f.write_str(&render_f64(*v)),
+            PlistLeaf::Float(v) => f.write_str(&render_f64(v.0)),
             PlistLeaf::String(s) => f.write_str(&quote(s)),
             PlistLeaf::Date(d) => write!(f, "<date {}>", render_date(*d)),
             PlistLeaf::Data(bytes) => write!(f, "<data {} bytes>", bytes.len()),
@@ -130,7 +92,7 @@ impl ValueCodec for Plist {
                 (None, Some(u)) => PlistLeaf::Uint(u),
                 (None, None) => unreachable!("plist integer is neither i64 nor u64"),
             }),
-            plist::Value::Real(f) => Node::Leaf(PlistLeaf::Float(*f)),
+            plist::Value::Real(f) => Node::Leaf(PlistLeaf::Float(CanonicalF64(*f))),
             plist::Value::String(s) => Node::Leaf(PlistLeaf::String(s.clone())),
             plist::Value::Date(d) => Node::Leaf(PlistLeaf::Date(*d)),
             plist::Value::Data(bytes) => Node::Leaf(PlistLeaf::Data(bytes.clone())),
@@ -661,7 +623,7 @@ impl From<&PlistLeaf> for plist::Value {
             PlistLeaf::Bool(b) => plist::Value::Boolean(*b),
             PlistLeaf::Int(i) => plist::Value::Integer((*i).into()),
             PlistLeaf::Uint(u) => plist::Value::Integer((*u).into()),
-            PlistLeaf::Float(f) => plist::Value::Real(*f),
+            PlistLeaf::Float(f) => plist::Value::Real(f.0),
             PlistLeaf::String(s) => plist::Value::String(s.clone()),
             PlistLeaf::Date(d) => plist::Value::Date(*d),
             PlistLeaf::Data(bytes) => plist::Value::Data(bytes.clone()),
@@ -1021,20 +983,23 @@ mod tests {
     fn every_nan_is_one_value() {
         // A sound `Eq` needs NaN to equal itself, and set-union's `HashSet` needs
         // equal values to hash alike, whatever the NaN's sign or payload bits.
-        use std::hash::DefaultHasher;
+        use std::hash::{DefaultHasher, Hasher};
         let hash = |leaf: &PlistLeaf| {
             let mut hasher = DefaultHasher::new();
             leaf.hash(&mut hasher);
             hasher.finish()
         };
-        let nan = PlistLeaf::Float(f64::NAN);
+        let nan = PlistLeaf::Float(CanonicalF64(f64::NAN));
         for other in [-f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)] {
-            let other = PlistLeaf::Float(other);
+            let other = PlistLeaf::Float(CanonicalF64(other));
             assert_eq!(nan, other);
             assert_eq!(hash(&nan), hash(&other));
         }
         // ... without making anything else equal.
-        assert_ne!(nan, PlistLeaf::Float(0.0));
-        assert_ne!(PlistLeaf::Float(1.0), PlistLeaf::Float(2.0));
+        assert_ne!(nan, PlistLeaf::Float(CanonicalF64(0.0)));
+        assert_ne!(
+            PlistLeaf::Float(CanonicalF64(1.0)),
+            PlistLeaf::Float(CanonicalF64(2.0))
+        );
     }
 }
