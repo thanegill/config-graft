@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **A scoped `--merge-key` whose PATH names no array is reported on stderr**, such as a key copied in the quoted form a warning prints (`x."[b]"`), which used to merge by value with nothing said.
 - **Man pages:** the Nix package installs config-graft(1) and one page per subcommand, generated from the `--help` text by `cargo xtask man`.
 - **Warnings on stderr whenever a run changes a value beyond the managed edits**, naming the key path: an input array holding the same value (or `--merge-key` key) twice where a copy is dropped ([#49](https://github.com/thanegill/config-graft/issues/49)), and a plist `Date` floored to a whole second for XML output. They never change the exit code.
 - **plist:** a date-floor collapse is judged over an array's elements, so one inside an array of dicts, under a `--merge-key` (a key the floor made equal, in one input or across both), or in an array inside a keyed record (`servers[name="web"]:tags`) is reported ([#37](https://github.com/thanegill/config-graft/issues/37)). A value inside an array is named by its element (`k[0]:d`, not `k:d`), and a repeat counts the most times one original occurs.

@@ -151,7 +151,9 @@ pub(crate) struct ByteArgs {
     /// (and merges their fields) instead of whole values. FIELD (or f1,f2) applies to
     /// any array of objects; PATH=FIELD applies only to the array at PATH, its full
     /// path from the document root with segments joined by a dot (a colon for
-    /// plist). Repeatable, e.g. --merge-key name --merge-key spec.containers=name.
+    /// plist), each key written unquoted. A PATH that names no array in TARGET,
+    /// DESIRED or BASE is reported on stderr. Repeatable, e.g. --merge-key name
+    /// --merge-key spec.containers=name.
     #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
 }
@@ -260,9 +262,13 @@ pub(crate) fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
             .collect();
         if path.is_empty() {
             mk.global.extend(fields);
-        } else {
-            mk.scoped.entry(path).or_default().extend(fields);
+            continue;
         }
+        if !mk.scoped.contains_key(&path) {
+            let given = scope.unwrap_or_default().to_string();
+            mk.scopes_as_given.push((path.clone(), given));
+        }
+        mk.scoped.entry(path).or_default().extend(fields);
     }
     mk
 }

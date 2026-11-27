@@ -2597,3 +2597,27 @@ fn a_keyed_collapse_escapes_what_a_terminal_would_act_on() {
         "a raw override reached the terminal: {err:?}"
     );
 }
+
+#[test]
+fn an_unused_merge_key_scope_is_named_with_the_plist_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("t.plist");
+    let desired = dir.path().join("d.plist");
+    pdict(vec![("a", pint(1))]).to_file_xml(&target).unwrap();
+    pdict(vec![("a", pint(2))]).to_file_xml(&desired).unwrap();
+    let out = run(&[
+        "plist",
+        "--merge-key",
+        "x:y=id",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "config-graft: warning: --merge-key scope `x:y` names no array in TARGET, \
+         DESIRED or BASE, so it applies to nothing; a key a warning shows quoted \
+         (`x:\"[b]\"`) is written unquoted in a scope (`x:[b]`), and inside a keyed \
+         record a scope starts at the record\n"
+    );
+}

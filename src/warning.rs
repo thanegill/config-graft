@@ -148,6 +148,9 @@ pub enum WarningKind<L: Leaf> {
         kept: usize,
         because: &'static str,
     },
+    /// A scoped `--merge-key` whose path named no array in any input, so it applied
+    /// to nothing. `scope` is the `PATH` as the user wrote it.
+    UnusedMergeKeyScope { scope: String },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -205,6 +208,21 @@ impl<L: Leaf> Warning<L> {
                 "array `{at}` held {distinct} keys that normalizing made {key}, and \
                  records sharing a key are merged, so only {kept} survived; \
                  {because}"
+            ),
+            WarningKind::UnusedMergeKeyScope { scope } => format!(
+                "--merge-key scope `{}` names no array in TARGET, DESIRED or BASE, so \
+                 it applies to nothing; a key a warning shows quoted \
+                 (`x{sep}\"[b]\"`) is written unquoted in a scope (`x{sep}[b]`), and \
+                 inside a keyed record a scope starts at the record",
+                // As typed, so a quote or backslash the user wrote shows as is;
+                // anything else `escape_debug` escapes cannot reach the terminal.
+                scope
+                    .chars()
+                    .map(|c| match c {
+                        '"' | '\'' | '\\' => c.to_string(),
+                        _ => c.escape_debug().to_string(),
+                    })
+                    .collect::<String>()
             ),
             WarningKind::MoreValuesNormalized {
                 source,

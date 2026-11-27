@@ -93,6 +93,9 @@ pub struct MergeKeys {
     /// addresses within one array-free subtree; a matched keyed record is its own
     /// subtree, so a scope anchors at the document root or the nearest such record.
     pub scoped: HashMap<ManagedPath, Vec<String>>,
+    /// Each scope's path beside its `PATH` as the user wrote it, in the order given,
+    /// so a scope that names no array can be reported in the user's own words.
+    pub scopes_as_given: Vec<(ManagedPath, String)>,
 }
 
 impl MergeKeys {
@@ -351,6 +354,7 @@ mod tests {
             merge_keys: MergeKeys {
                 global: global_keys.iter().map(ToString::to_string).collect(),
                 scoped: HashMap::new(),
+                ..MergeKeys::default()
             },
             ..Options::default()
         }
@@ -482,6 +486,7 @@ mod tests {
             merge_keys: MergeKeys {
                 global: Vec::new(),
                 scoped: HashMap::from([(keys(&["servers"]), vec!["name".to_string()])]),
+                ..MergeKeys::default()
             },
             ..Options::default()
         };
@@ -506,6 +511,7 @@ mod tests {
             merge_keys: MergeKeys {
                 global: Vec::new(),
                 scoped: HashMap::from([(keys(&["a", "items"]), vec!["id".to_string()])]),
+                ..MergeKeys::default()
             },
             ..Options::default()
         };
@@ -1397,6 +1403,7 @@ mod tests {
         let mk = MergeKeys {
             global: vec!["gid".to_string()],
             scoped: HashMap::from([(keys(&["a", "items"]), vec!["id".to_string()])]),
+            ..MergeKeys::default()
         };
         // Exact path -> the scope's fields.
         assert_eq!(mk.candidates(&keys(&["a", "items"])), ["id".to_string()]);
