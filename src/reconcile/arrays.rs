@@ -510,14 +510,7 @@ fn gts_order(
         }
     }
 
-    // A vertex's tie-break key: earliest in TARGET, then DESIRED, then index.
-    let key = |v: usize| {
-        (
-            target_pos[v].unwrap_or(usize::MAX),
-            desired_pos[v].unwrap_or(usize::MAX),
-            v,
-        )
-    };
+    let key = |v: usize| tie_break_key(&target_pos, &desired_pos, v);
     let ckey: Vec<(usize, usize, usize)> = (0..ncomp)
         .map(|c| members[c].iter().map(|&v| key(v)).min().unwrap())
         .collect();
@@ -604,12 +597,25 @@ fn membership_merge<L: Leaf>(
     out
 }
 
+/// The fixed tie-break between vertices that are otherwise free to go in either
+/// order: earliest in TARGET, then in DESIRED, then by index.
+fn tie_break_key(
+    target_pos: &[Option<usize>],
+    desired_pos: &[Option<usize>],
+    v: usize,
+) -> (usize, usize, usize) {
+    (
+        target_pos[v].unwrap_or(usize::MAX),
+        desired_pos[v].unwrap_or(usize::MAX),
+        v,
+    )
+}
+
 /// Serialize the vertices of one strongly connected component. A trivial (size-1)
 /// component is the vertex itself; a cycle is emitted by a marking rule -- start
 /// from the vertices first in TARGET or DESIRED, follow successor edges, and mark
 /// each emitted vertex's successors as eligible -- so the intra-cycle order follows
-/// an actual input rather than inventing one. Ties break by `key(v)` (earliest in
-/// TARGET, then DESIRED, then index).
+/// an actual input rather than inventing one. Ties break by [`tie_break_key`].
 fn order_scc(
     members: &[usize],
     adj: &[Vec<usize>],
@@ -619,13 +625,7 @@ fn order_scc(
     if members.len() == 1 {
         return vec![members[0]];
     }
-    let key = |v: usize| {
-        (
-            target_pos[v].unwrap_or(usize::MAX),
-            desired_pos[v].unwrap_or(usize::MAX),
-            v,
-        )
-    };
+    let key = |v: usize| tie_break_key(target_pos, desired_pos, v);
     let inset: HashSet<usize> = members.iter().copied().collect();
     let mut marked: HashSet<usize> = HashSet::new();
     // Mark the vertex first in TARGET and the vertex first in DESIRED.
