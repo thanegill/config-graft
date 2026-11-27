@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Marker, Scalar, Yaml, YamlData};
 
 use super::yaml::{emit_without_marker, yaml_string, YamlLeaf};
-use super::{mostly_crlf, Format, ValueCodec, Yaml as YamlCodec};
+use super::{mostly_crlf, Format, Yaml as YamlCodec};
 use crate::error::Error;
 use crate::value::Node;
 

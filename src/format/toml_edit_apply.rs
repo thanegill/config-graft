@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use toml_edit::{DocumentMut, Item, Table};
 
 use super::toml::{node_to_value, Toml, TomlLeaf};
-use super::{mostly_crlf, Format, ValueCodec};
+use super::{mostly_crlf, Format};
 use crate::error::Error;
 use crate::value::Node;
 

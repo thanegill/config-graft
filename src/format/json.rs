@@ -6,7 +6,7 @@ use json_syntax::{Parse, Print};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use super::{Format, FormatKind, Indent, ParseFailure, ValueCodec, WriteOpts, MAX_DEPTH};
+use super::{Format, FormatKind, Indent, ParseFailure, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::number::NumberValue;
 use crate::render::quote;
@@ -125,31 +125,28 @@ fn nests_within_limit(text: &str) -> bool {
     true
 }
 
-impl ValueCodec for Json {
-    type Leaf = JsonLeaf;
-    type Value<'a> = json_syntax::Value;
-
-    fn decode(value: &json_syntax::Value) -> Result<Node<JsonLeaf>, ParseFailure> {
+impl Json {
+    pub(crate) fn decode(value: &json_syntax::Value) -> Node<JsonLeaf> {
         use json_syntax::Value;
-        Ok(match value {
+        match value {
             Value::Object(o) => {
                 let mut map = IndexMap::with_capacity(o.len());
                 for entry in o.iter() {
                     // A duplicate key keeps the last occurrence, as every JSON
                     // reader config-graft can be pointed at does.
-                    map.insert(entry.key.to_string(), Json::decode(&entry.value)?);
+                    map.insert(entry.key.to_string(), Json::decode(&entry.value));
                 }
                 Node::Map(map)
             }
-            Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect::<Result<_, _>>()?),
+            Value::Array(a) => Node::Array(a.iter().map(Json::decode).collect()),
             Value::Null => Node::Leaf(JsonLeaf::Null),
             Value::Boolean(b) => Node::Leaf(JsonLeaf::Bool(*b)),
             Value::String(s) => Node::Leaf(JsonLeaf::String(s.to_string())),
             Value::Number(n) => Node::Leaf(number_leaf(n.as_str())),
-        })
+        }
     }
 
-    fn encode(node: &Node<JsonLeaf>) -> json_syntax::Value {
+    pub(crate) fn encode(node: &Node<JsonLeaf>) -> json_syntax::Value {
         use json_syntax::Value;
         match node {
             Node::Map(m) => {
@@ -184,6 +181,7 @@ fn number_leaf(literal: &str) -> JsonLeaf {
 }
 
 impl Format for Json {
+    type Leaf = JsonLeaf;
     const KIND: FormatKind = FormatKind::Json;
     const PATH_SEP: &'static str = ".";
 
@@ -195,7 +193,7 @@ impl Format for Json {
         }
         let (value, _) = json_syntax::Value::parse_str(text)
             .map_err(|error| ParseFailure::syntax_at(text, error.position(), error))?;
-        Json::decode(&value)
+        Ok(Json::decode(&value))
     }
 
     fn serialize(
@@ -251,7 +249,7 @@ mod tests {
     #[test]
     fn round_trips_scalars_and_structure() {
         let text = r#"{"n":-3,"big":18446744073709551615,"f":1.5,"s":"hi","b":true,"nil":null,"arr":[1,"x",false],"nested":{"k":{"deep":2}}}"#;
-        let node = Json::decode(&value(text)).unwrap();
+        let node = Json::decode(&value(text));
         assert_eq!(Json::encode(&node).compact_print().to_string(), text);
     }
 
@@ -292,13 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_is_total() {
-        assert!(Json::decode(&value("null")).is_ok());
-        assert!(Json::decode(&value("[1, 2, 3]")).is_ok());
-        assert!(Json::decode(&value(r#""scalar""#)).is_ok());
-    }
-
-    #[test]
     fn distinguishes_signed_unsigned_and_non_integer() {
         // Matched on the variant, not compared with `assert_eq!`: `JsonLeaf`'s own
         // `PartialEq` holds every spelling of a number equal, so an equality
@@ -322,7 +313,7 @@ mod tests {
         // The reason this codec exists: every one of these is a distinct spelling
         // that must reach the writer untouched.
         for literal in ["1e1", "1E2", "1e+400", "2.50", "0.10", "-0.0"] {
-            let node = Json::decode(&value(literal)).unwrap();
+            let node = Json::decode(&value(literal));
             assert_eq!(
                 Json::encode(&node).compact_print().to_string(),
                 literal,
@@ -334,7 +325,7 @@ mod tests {
     /// `n` as config-graft reads it out of a JSON document.
     fn leaf(literal: &str) -> JsonLeaf {
         match Json::decode(&value(literal)) {
-            Ok(Node::Leaf(l)) => l,
+            Node::Leaf(l) => l,
             other => panic!("expected a leaf, got {other:?}"),
         }
     }

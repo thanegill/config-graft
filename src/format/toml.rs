@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use indexmap::IndexMap;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
-use super::{Format, FormatKind, ParseFailure, ValueCodec, WriteOpts};
+use super::{Format, FormatKind, ParseFailure, WriteOpts};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{CanonicalF64, Leaf, Node};
@@ -58,14 +58,12 @@ impl fmt::Display for TomlLeaf {
 
 impl Leaf for TomlLeaf {}
 
-impl ValueCodec for Toml {
-    type Leaf = TomlLeaf;
-    type Value<'a> = Item;
-
-    fn decode(value: &Item) -> Result<Node<TomlLeaf>, ParseFailure> {
+impl Toml {
+    /// Refuses only `Item::None`, which no parsed document holds.
+    pub(super) fn decode(value: &Item) -> Result<Node<TomlLeaf>, ParseFailure> {
         match value {
             Item::Table(t) => decode_table(t),
-            Item::Value(v) => decode_value(v),
+            Item::Value(v) => Ok(decode_value(v)),
             Item::ArrayOfTables(aot) => {
                 let mut out = Vec::with_capacity(aot.len());
                 for t in aot.iter() {
@@ -77,7 +75,7 @@ impl ValueCodec for Toml {
         }
     }
 
-    fn encode(node: &Node<TomlLeaf>) -> Item {
+    pub(super) fn encode(node: &Node<TomlLeaf>) -> Item {
         match node {
             // Maps become real `[section]` tables so canonical output is idiomatic.
             Node::Map(m) => Item::Table(encode_table(m)),
@@ -88,6 +86,7 @@ impl ValueCodec for Toml {
 }
 
 impl Format for Toml {
+    type Leaf = TomlLeaf;
     const KIND: FormatKind = FormatKind::Toml;
     const PATH_SEP: &'static str = ".";
 
@@ -167,28 +166,22 @@ fn decode_table(t: &Table) -> Result<Node<TomlLeaf>, ParseFailure> {
 }
 
 /// Decode a TOML value (scalar, array, or inline table) into a node.
-fn decode_value(v: &Value) -> Result<Node<TomlLeaf>, ParseFailure> {
-    Ok(match v {
+fn decode_value(v: &Value) -> Node<TomlLeaf> {
+    match v {
         Value::String(f) => Node::Leaf(TomlLeaf::String(f.value().clone())),
         Value::Integer(f) => Node::Leaf(TomlLeaf::Int(*f.value())),
         Value::Float(f) => Node::Leaf(TomlLeaf::Float(CanonicalF64(*f.value()))),
         Value::Boolean(f) => Node::Leaf(TomlLeaf::Bool(*f.value())),
         Value::Datetime(f) => Node::Leaf(TomlLeaf::Datetime(*f.value())),
-        Value::Array(a) => {
-            let mut out = Vec::with_capacity(a.len());
-            for e in a.iter() {
-                out.push(decode_value(e)?);
-            }
-            Node::Array(out)
-        }
+        Value::Array(a) => Node::Array(a.iter().map(decode_value).collect()),
         Value::InlineTable(it) => {
             let mut map = IndexMap::with_capacity(it.len());
             for (k, val) in it.iter() {
-                map.insert(k.to_string(), decode_value(val)?);
+                map.insert(k.to_string(), decode_value(val));
             }
             Node::Map(map)
         }
-    })
+    }
 }
 
 /// Build a TOML table from a map node (children become `[section]` tables).

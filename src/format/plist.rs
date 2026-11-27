@@ -10,8 +10,7 @@ use std::time::{Duration, SystemTime};
 use indexmap::IndexMap;
 
 use super::{
-    Format, FormatKind, Normalization, Normalized, ParseFailure, PlistFormat, ValueCodec,
-    WriteOpts, MAX_DEPTH,
+    Format, FormatKind, Normalization, Normalized, ParseFailure, PlistFormat, WriteOpts, MAX_DEPTH,
 };
 use crate::error::Error;
 use crate::reconcile::ManagedPath;
@@ -70,10 +69,8 @@ impl fmt::Display for PlistLeaf {
 
 impl Leaf for PlistLeaf {}
 
-impl ValueCodec for Plist {
-    type Leaf = PlistLeaf;
-    type Value<'a> = plist::Value;
-
+impl Plist {
+    /// Refuses only a `plist::Value` variant added after plist 1.10.1.
     fn decode(value: &plist::Value) -> Result<Node<PlistLeaf>, ParseFailure> {
         Ok(match value {
             plist::Value::Dictionary(d) => {
@@ -97,9 +94,10 @@ impl ValueCodec for Plist {
             plist::Value::Date(d) => Node::Leaf(PlistLeaf::Date(*d)),
             plist::Value::Data(bytes) => Node::Leaf(PlistLeaf::Data(bytes.clone())),
             plist::Value::Uid(u) => Node::Leaf(PlistLeaf::Uid(u.get())),
-            // `plist::Value` is `#[non_exhaustive]`; treat any future variant as
-            // an opaque empty string rather than panicking.
-            _ => Node::Leaf(PlistLeaf::String(String::new())),
+            // `plist::Value` is `#[non_exhaustive]`. A variant a future crate adds
+            // has no leaf to carry it; writing it back as any other type would
+            // replace the app's value.
+            _ => return Err(ParseFailure::Unsupported("a value of an unknown type")),
         })
     }
 
@@ -159,6 +157,7 @@ fn dismantle(value: plist::Value) {
 }
 
 impl Format for Plist {
+    type Leaf = PlistLeaf;
     const KIND: FormatKind = FormatKind::Plist;
     const PATH_SEP: &'static str = ":";
 

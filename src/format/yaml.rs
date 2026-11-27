@@ -10,7 +10,7 @@ use std::hash::Hash;
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 
-use super::{Format, FormatKind, ParseFailure, ValueCodec, WriteOpts, MAX_DEPTH};
+use super::{Format, FormatKind, ParseFailure, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{CanonicalF64, Leaf, Node};
@@ -43,10 +43,8 @@ impl fmt::Display for YamlLeaf {
 
 impl Leaf for YamlLeaf {}
 
-impl ValueCodec for Yaml {
-    type Leaf = YamlLeaf;
-    type Value<'a> = saphyr::Yaml<'a>;
-
+impl Yaml {
+    /// Refuses what `Node` cannot hold, such as a non-string key, a tag or an alias.
     fn decode(value: &saphyr::Yaml<'_>) -> Result<Node<YamlLeaf>, ParseFailure> {
         match value {
             saphyr::Yaml::Mapping(m) => {
@@ -85,7 +83,7 @@ impl ValueCodec for Yaml {
         }
     }
 
-    fn encode(node: &Node<YamlLeaf>) -> saphyr::Yaml<'static> {
+    pub(super) fn encode(node: &Node<YamlLeaf>) -> saphyr::Yaml<'static> {
         match node {
             Node::Map(m) => {
                 let mut map = saphyr::Mapping::new();
@@ -101,6 +99,7 @@ impl ValueCodec for Yaml {
 }
 
 impl Format for Yaml {
+    type Leaf = YamlLeaf;
     const KIND: FormatKind = FormatKind::Yaml;
     const PATH_SEP: &'static str = ".";
 
