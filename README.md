@@ -177,22 +177,7 @@ A home-manager `flake.nix` sketch:
 
 ## Directory mode
 
-The `directory` subcommand reconciles a whole **directory tree** instead of a single file — TARGET, DESIRED, and BASE are directories. A directory is a map and a file or symlink is an atomic leaf, so the same three-way merge manages *which files exist and what they contain* one filesystem level up: app-created files are preserved, and files you stop declaring are pruned (BASE-driven, keeping user edits). It is opt-in — you request it with the `directory` subcommand.
-
-- **Minimal, in-place writes.** Only changed files are created/updated/deleted, so app-owned files keep their inode and mtime. Each file is written atomically, its bytes stream straight from source to destination (never buffered), and its content identity is a SHA-256 digest — so large trees stay cheap.
-- **Full metadata.** A file's — and a directory's — **mode, owner (uid/gid), and extended attributes** are part of its identity: a metadata-only change is a change (it shows up in `--diff`), and all of it is applied on write. An attribute that can't be set (e.g. no privilege to `chown`, or an xattr the filesystem rejects) **refuses the run** (nothing lands) rather than leaving a half-applied entry. Manage-everything by default, with opt-outs: `--no-owner` leaves uid/gid alone, and `--xattrs <all|safe|none>` narrows which extended attributes are reconciled (`safe` skips privileged/system namespaces).
-- **Symlinks** are managed by target and never followed; **FIFOs/sockets/devices** and non-UTF-8 filenames are refused (exit 1), and so are two names TARGET's filesystem would store as one file (`Foo` and `foo` on a case-insensitive one; when both names are new, only once the first is written). Replacing an app-populated directory with a file is refused rather than deleting content it never managed.
-- The **root** directory (the one you point at) is left untouched by default; `--manage-root` reconciles its own attributes too.
-- The `directory` subcommand exposes only `--manage-root` / `--no-owner` / `--xattrs` (plus the shared `--diff` / `--check`); the byte-format flags (`--stdout`, `--follow-symlinks`, `--indent`, `--plist-format`, `--array-strategy`, `--merge-key`) don't exist on it, so passing one is a usage error.
-
-```sh
-config-graft directory dest/ desired/                  # reconcile a tree
-config-graft directory --diff --check dest/ desired/   # preview drift
-config-graft directory --manage-root dest/ desired/    # also the root's own attrs
-config-graft directory --no-owner --xattrs safe dest/ desired/  # narrow metadata scope
-```
-
-The multi-file apply is best-effort, not one transaction: a crash mid-apply leaves a partial (per-file consistent) tree that a re-run completes. Hardlinks aren't preserved, the read→apply window is subject to TOCTOU, and an unreadable directory aborts the whole run — see [SPEC.md](SPEC.md) §10 for the full list.
+`config-graft directory dest/ desired/` reconciles a whole tree, file by file, including mode, owner and extended attributes. See [`docs/directory.md`](docs/directory.md).
 
 ## Develop
 
