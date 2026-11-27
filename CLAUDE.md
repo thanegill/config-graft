@@ -6,11 +6,12 @@ Three-way reconcile (kubectl-apply-style) for app-owned **JSON / plist / YAML / 
 
 ```bash
 nix develop --command cargo test     # unit (src) + per-format integration (tests/)
-nix develop --command cargo clippy --all-targets -- -D warnings
-nix develop --command cargo fmt -- --check
+nix develop --command cargo clippy --workspace --all-targets -- -D warnings   # --workspace: include xtask/
+nix develop --command cargo fmt --all -- --check
 nix develop --command cargo mutants --in-diff <(git diff origin/master)   # mutation-test only the code the diff touches
 nix build                            # hermetic; runs the test suite in checkPhase
 nix flake check                      # the module layer (modules/tests.nix) -- cargo covers none of it
+nix develop --command cargo xtask man <dir>   # render the section 1 man pages into <dir>
 ```
 
 Refactors are expected to be behavior-preserving; `cargo test` plus `nix flake check` is the gate. Neither alone is enough: `cargo test` cannot see the Nix module's decisions, and the module's flag-mapping tests cannot see what the binary does with them -- that gap is how #43 stayed green on both sides.
@@ -24,7 +25,8 @@ The rationale for most of these lives in the doc comment at the code it governs;
 - Every leaf keeps `Hash` consistent with `Eq` (array set-union dedups through `HashSet`). `Node`'s `Hash` is hand-written so a `Map` hashes order-independently, matching `IndexMap`'s `PartialEq`.
 - **All output rendering lives in `src/render.rs`**: the primitives plus `Node`'s `Display`, `Node::diff` and `KeyPath::render`. `--diff` output is asserted byte-for-byte, and one file deciding all of it is what makes a change to it visible. Each format's leaf `Display` stays with its codec; `canonical_float_bits` stays in `value.rs` (it serves the `Eq`/`Hash` contract, not output).
 - **`read_file` returns `Result<Option<Node>, Error>`** -- `Ok(None)` is absent/empty (a first apply), `Err` is present-but-unreadable -- and `Backend::run` refuses a TARGET that parses to a non-mapping. Don't collapse these into one `Option`: an unreadable TARGET treated as `{}` makes the write replace every app-owned key with exit 0, which is what turned the `1e400` JSON parse failure into whole-file loss.
-- **Dispatch is static.** `main` matches the clap subcommand and calls `ByteBackend::<F>::run` or `Directory::run`; each subcommand exposes only its own flags, so an unsupported flag/format pairing is a clap usage error (exit 2). No runtime flag checks, no extension inference.
+- **Dispatch is static.** `main` (in `src/lib.rs`) matches the clap subcommand and calls `ByteBackend::<F>::run` or `Directory::run`; each subcommand exposes only its own flags, so an unsupported flag/format pairing is a clap usage error (exit 2). No runtime flag checks, no extension inference.
+- **The man pages are generated from the clap definitions, not written by hand.** `xtask/` renders them with `clap_mangen`, and `flake.nix` runs it in `postBuild` and installs the pages in `postInstall`; the crate is a library plus a thin `src/bin/config-graft.rs` only so the xtask can call `config_graft::command()`. Keep `clap_mangen` a dependency of `xtask` alone, out of the shipped binary, and since the help text is the man page, write it for both.
 - **`serde_json` is a dev-dependency only** (the `json!` fixtures in the reconcile tests). Don't bring it back into the shipped binary, not for the JSON codec (see JSON below) and not for rendering.
 - **Never compare JSON numbers through json-syntax's number type**: it compares lexically (by its `Ord`, `1` > `0.1e+80`; by its `Eq`, `1` != `1.0`). Value comparison is `src/number.rs`, whose `Hash` must stay consistent with `Eq` or array set-union keeps both spellings. Its differential tests against `bigdecimal` assert how many pairs they compared -- keep that, or a regression that merely declines more literals passes vacuously.
 - **Don't hand-roll a float renderer.** `render_f64` goes through `ryu`; Rust's `{:?}` disagreed with serde_json on 3.6% of `[1e13, 1e16)`. The two tests in `render.rs` cross-check it against serde_json, which formats through `zmij`, so the binary must not depend on `zmij` itself, or the cross-check compares zmij with zmij and passes vacuously. `quote` goes through json-syntax and was checked by hand to escape byte-for-byte like serde_json (control bytes, NUL, DEL, astral-plane characters); no test locks that, so re-check it if you touch `quote`.

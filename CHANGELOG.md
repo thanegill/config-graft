@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Man pages:** the Nix package installs config-graft(1) and one page per subcommand, generated from the `--help` text by `cargo xtask man`.
 - **Warnings on stderr whenever a run changes a value beyond the managed edits**, naming the key path: an input array holding the same value (or `--merge-key` key) twice where a copy is dropped ([#49](https://github.com/thanegill/config-graft/issues/49)), and a plist `Date` floored to a whole second for XML output. They never change the exit code.
 - **plist:** an XML write refuses (exit 1) to introduce a string or key holding a character XML can't carry, such as the ESC `0x1B` in `NSUserKeyEquivalents`. A value an XML target already holds is written through with a warning.
 - **JSON is parsed and printed by `json-syntax`** instead of `serde_json`, which removes the `$serde_json::private::Number` magic key that silently turned an app's object into a number. `--diff` output is unchanged.
@@ -15,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`--help` reads as a manual:** the root help explains TARGET, DESIRED and BASE and lists the exit codes, and each subcommand describes how its format is written.
 - **Building from source requires Rust 1.93 or later**, now declared as `rust-version` in Cargo.toml.
 - **directory:** `--diff` shows each xattr as `name=` plus the first 8 hex digits of its value's SHA-256, which is stable across Rust releases. Every xattr digest in existing output changes once.
 - **Breaking:** `--base PATH` together with a positional BASE is a usage error (exit 2), even if one is empty; the flag used to win silently.

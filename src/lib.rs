@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::builder::{OsStringValueParser, TypedValueParser};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod backend;
 mod error;
@@ -20,13 +20,19 @@ use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
 
-/// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
-/// directory tree): deep-merge DESIRED into TARGET while preserving keys the app
-/// wrote and pruning keys dropped from DESIRED (using BASE, the previously-applied
-/// snapshot, as the merge ancestor). The format is chosen by the subcommand; each
-/// subcommand exposes only the flags that apply to it.
+/// Three-way reconcile for app-owned JSON, plist, YAML, and TOML files, or a
+/// directory tree.
+///
+/// config-graft merges DESIRED, the keys you manage, into TARGET, a file the
+/// application also writes, and leaves the app's own keys alone. A key dropped from
+/// DESIRED is pruned only if TARGET still holds its value from BASE, the DESIRED
+/// applied last time, so an edit the user made survives. The subcommand names the
+/// format (directory for a whole tree) and takes only the flags that apply to it.
+///
+/// Exit status: 0 on success, 1 on an error, 2 on a usage error, and 3 under --check
+/// when a change is pending.
 #[derive(Parser)]
-#[command(name = "config-graft", version, about)]
+#[command(name = "config-graft", version)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -38,14 +44,35 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Reconcile a JSON file.
+    ///
+    /// TARGET, DESIRED and BASE are JSON files with an object at the root. The output
+    /// is pretty-printed, and numbers keep their source spelling while comparing by
+    /// value.
     Json(JsonArgs),
-    /// Reconcile a YAML file (comments preserved).
+    /// Reconcile a YAML file, keeping its comments.
+    ///
+    /// The file is edited in place, so comments and formatting survive wherever
+    /// nothing changes. Custom tags, non-string keys and multi-document files are
+    /// refused, and so is an edit that would break an anchor or alias.
     Yaml(ByteArgs),
-    /// Reconcile a TOML file (comments preserved).
+    /// Reconcile a TOML file, keeping its comments.
+    ///
+    /// The file is edited in place, so comments and formatting survive wherever
+    /// nothing changes. An edit that can't be made safely is refused.
     Toml(ByteArgs),
     /// Reconcile a plist file.
+    ///
+    /// Reads XML and binary plists, and by default writes the encoding the target
+    /// already has. An XML write floors dates to whole seconds and refuses to
+    /// introduce a character XML cannot carry.
     Plist(PlistArgs),
-    /// Reconcile a directory *tree* rather than a single file.
+    /// Reconcile a directory tree rather than a single file.
+    ///
+    /// TARGET, DESIRED and BASE are directories. Files the app created are kept, and
+    /// files dropped from DESIRED are pruned unless they changed. Each file's and
+    /// subdirectory's mode, owner and extended attributes are reconciled with it,
+    /// narrowed by --no-owner and --xattrs, and the TARGET directory's own attributes
+    /// only with --manage-root. Symlinks are never followed.
     Directory(DirArgs),
 }
 
@@ -55,17 +82,11 @@ fn path_allowing_empty() -> impl TypedValueParser<Value = PathBuf> {
     OsStringValueParser::new().map(PathBuf::from)
 }
 
-/// Positionals and flags common to every format (byte formats and the directory
-/// tree alike).
+/// BASE and the flags common to every format (byte formats and the directory tree
+/// alike). TARGET and DESIRED are declared by each subcommand's own args, ahead of
+/// this flatten, so their help can say file or directory.
 #[derive(Args)]
 pub(crate) struct CommonArgs {
-    /// File to reconcile, in place (created with parents if missing).
-    pub(crate) target: PathBuf,
-
-    /// Managed data to apply (must be a mapping: JSON object / plist dictionary /
-    /// YAML mapping / TOML table).
-    pub(crate) desired: PathBuf,
-
     /// Previous snapshot (last applied); enables pruning. Optional. An empty
     /// value is treated the same as omitting it (no pruning).
     #[arg(value_parser = path_allowing_empty())]
@@ -97,6 +118,13 @@ pub(crate) struct CommonArgs {
 /// shaping that has no meaning for a directory tree.
 #[derive(Args)]
 pub(crate) struct ByteArgs {
+    /// File to reconcile, in place; created with its parents if missing.
+    target: PathBuf,
+
+    /// Managed data to apply: a JSON object, plist dictionary, YAML mapping or TOML
+    /// table.
+    desired: PathBuf,
+
     #[command(flatten)]
     common: CommonArgs,
 
@@ -118,12 +146,11 @@ pub(crate) struct ByteArgs {
     )]
     array_strategy: ArrayStrategy,
 
-    /// Identify object-array elements by a field so `merge` matches keyed records
-    /// (and merges their fields) instead of by whole value. `FIELD` (or
-    /// `f1,f2`) applies to any object-array; `PATH=FIELD` scopes it to the array at
-    /// `PATH` -- its full path from the document root, segments joined by the format
-    /// separator (`.`, or `:` for plist). Repeatable. Example: `--merge-key name
-    /// --merge-key spec.containers=name`.
+    /// Identify object-array elements by a field, so merge matches keyed records
+    /// (and merges their fields) instead of whole values. FIELD (or f1,f2) applies to
+    /// any array of objects; PATH=FIELD applies only to the array at PATH, its full
+    /// path from the document root with segments joined by a dot (a colon for
+    /// plist). Repeatable, e.g. --merge-key name --merge-key spec.containers=name.
     #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
 }
@@ -134,7 +161,7 @@ pub(crate) struct JsonArgs {
     #[command(flatten)]
     byte: ByteArgs,
 
-    /// Output indentation: a number of spaces, or `tab` (default: 2 spaces).
+    /// Output indentation: a number of spaces, or tab (default: 2 spaces).
     #[arg(long, value_name = "N|tab")]
     indent: Option<Indent>,
 }
@@ -145,8 +172,7 @@ pub(crate) struct PlistArgs {
     #[command(flatten)]
     byte: ByteArgs,
 
-    /// Which encoding to write: `follow` the target's own (default), `xml`, or
-    /// `binary`.
+    /// Which encoding to write: follow the target's own (default), xml, or binary.
     #[arg(
         long = "plist-format",
         value_name = "ENCODING",
@@ -158,11 +184,17 @@ pub(crate) struct PlistArgs {
 /// directory: the common flags plus the tree-only attribute controls.
 #[derive(Args)]
 pub(crate) struct DirArgs {
+    /// Directory to reconcile, in place; created with its parents if missing.
+    target: PathBuf,
+
+    /// Directory tree to apply.
+    desired: PathBuf,
+
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs),
-    /// not just its contents.
+    /// Also reconcile the TARGET directory's own attributes (mode, owner and
+    /// xattrs), not just its contents.
     #[arg(long = "manage-root")]
     manage_root: bool,
 
@@ -170,8 +202,8 @@ pub(crate) struct DirArgs {
     #[arg(long = "no-owner")]
     no_owner: bool,
 
-    /// Which extended attributes to reconcile: `all` (default), `safe` (a
-    /// conservative allowlist that skips privileged/system namespaces), or `none`.
+    /// Which extended attributes to reconcile: all (default), safe (a conservative
+    /// allowlist that skips privileged and system namespaces), or none.
     #[arg(long = "xattrs", value_name = "SCOPE")]
     xattrs: Option<XattrScope>,
 }
@@ -242,8 +274,6 @@ impl RunArgs {
     /// take their inert defaults.
     fn from_byte(byte: ByteArgs, indent: Option<Indent>, plist_format: PlistFormat) -> RunArgs {
         let CommonArgs {
-            target,
-            desired,
             base,
             base_flag,
             no_prune,
@@ -251,8 +281,8 @@ impl RunArgs {
             check,
         } = byte.common;
         RunArgs {
-            target,
-            desired,
+            target: byte.target,
+            desired: byte.desired,
             base,
             base_flag,
             no_prune,
@@ -275,8 +305,6 @@ impl RunArgs {
     /// their inert defaults -- a tree exposes none of them.
     fn from_dir(args: DirArgs) -> RunArgs {
         let CommonArgs {
-            target,
-            desired,
             base,
             base_flag,
             no_prune,
@@ -284,8 +312,8 @@ impl RunArgs {
             check,
         } = args.common;
         RunArgs {
-            target,
-            desired,
+            target: args.target,
+            desired: args.desired,
             base,
             base_flag,
             no_prune,
@@ -306,7 +334,13 @@ impl RunArgs {
     }
 }
 
-fn main() {
+/// The clap command tree, for tooling that renders it (the `xtask` man pages).
+pub fn command() -> clap::Command {
+    Cli::command()
+}
+
+/// Parse the command line, run the chosen subcommand, and exit with its code.
+pub fn main() {
     let cli = Cli::parse();
     // The subcommand picks the format; dispatch statically -- the node type carries
     // the format's leaf type, so each format is its own monomorphization of `run`.
@@ -426,7 +460,7 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{owner_to_keep, parse_merge_keys, Owner};
+    use super::{command, owner_to_keep, parse_merge_keys, Owner};
     use crate::reconcile::Segment;
 
     /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
@@ -527,5 +561,14 @@ mod tests {
         assert_eq!(owner_to_keep(ROOT, ROOT), None);
         assert_eq!(owner_to_keep(Owner { uid: 502, gid: 20 }, ALICE), None);
         assert_eq!(owner_to_keep(Owner { uid: 501, gid: 80 }, ALICE), None);
+    }
+
+    /// `command()` is what the xtask renders, one man page per subcommand.
+    #[test]
+    fn command_exposes_one_subcommand_per_format() {
+        let cmd = command();
+        cmd.clone().debug_assert();
+        let names: Vec<&str> = cmd.get_subcommands().map(|sub| sub.get_name()).collect();
+        assert_eq!(names, ["json", "yaml", "toml", "plist", "directory"]);
     }
 }
