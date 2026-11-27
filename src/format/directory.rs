@@ -522,18 +522,20 @@ impl FsAttrs {
             attrs.insert("uid".to_string(), meta.uid().to_string().into_bytes());
             attrs.insert("gid".to_string(), meta.gid().to_string().into_bytes());
         }
-        if policy.xattrs != XattrScope::None {
-            if let Ok(names) = xattr::list(path) {
-                for name in names {
-                    // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
-                    if let Some(name) = name.to_str() {
-                        if policy.xattrs.in_scope(name) {
-                            if let Ok(Some(value)) = xattr::get(path, name) {
-                                attrs.insert(format!("xattr:{name}"), value);
-                            }
-                        }
-                    }
-                }
+        if policy.xattrs == XattrScope::None {
+            return attrs;
+        }
+        let Ok(names) = xattr::list(path) else {
+            return attrs;
+        };
+        for name in names {
+            // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
+            let Some(name) = name.to_str() else { continue };
+            if !policy.xattrs.in_scope(name) {
+                continue;
+            }
+            if let Ok(Some(value)) = xattr::get(path, name) {
+                attrs.insert(format!("xattr:{name}"), value);
             }
         }
         attrs
@@ -1018,20 +1020,18 @@ impl FsAttrs {
                 .collect();
             // Remove in-scope xattrs on disk that DESIRED doesn't declare (out-of-scope
             // ones are left untouched). No-op for a fresh temp file (no xattrs yet).
-            if let Ok(names) = xattr::list(path) {
-                for name in names {
-                    if let Some(name) = name.to_str() {
-                        if policy.xattrs.in_scope(name) && !desired.contains(name) {
-                            xattr::remove(path, name).map_err(|e| Error::write(path, e))?;
-                        }
-                    }
+            for name in xattr::list(path).unwrap_or_default() {
+                let Some(name) = name.to_str() else { continue };
+                if policy.xattrs.in_scope(name) && !desired.contains(name) {
+                    xattr::remove(path, name).map_err(|e| Error::write(path, e))?;
                 }
             }
             for (key, value) in self.iter() {
-                if let Some(name) = key.strip_prefix("xattr:") {
-                    if policy.xattrs.in_scope(name) {
-                        xattr::set(path, name, value).map_err(|e| Error::write(path, e))?;
-                    }
+                let Some(name) = key.strip_prefix("xattr:") else {
+                    continue;
+                };
+                if policy.xattrs.in_scope(name) {
+                    xattr::set(path, name, value).map_err(|e| Error::write(path, e))?;
                 }
             }
         }
