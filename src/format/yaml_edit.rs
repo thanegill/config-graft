@@ -197,11 +197,15 @@ fn entry_content_end(
 /// outside the text. A block collection's own span runs on to the next token,
 /// past any comments and blank lines in between, so its end is taken from its
 /// deepest last child instead. A flow collection's span stops just before its
-/// closing bracket, which is taken in.
+/// closing bracket, which is taken in. An alias to a collection ends with its
+/// own `*name`, not at its children.
 fn content_end(node: &MarkedYaml, src: &str, offsets: &ByteOffsets) -> Option<usize> {
     let mut node = node;
     loop {
         let span_end = offsets.of(node.span.end)?;
+        if is_collection_alias(node) {
+            return Some(span_end);
+        }
         if src[span_end..].starts_with(['}', ']']) {
             return Some(span_end + 1);
         }
@@ -252,10 +256,24 @@ fn is_empty_leaf(node: &MarkedYaml) -> bool {
         && node.span.start == node.span.end
 }
 
-/// Whether `node` is a block mapping or sequence, or `None` if a marker lies
-/// outside the text.
+/// Whether `node` is an alias (`*name`) to a non-empty mapping or sequence.
+/// saphyr gives such an alias its own span but copies the anchored node's
+/// children with theirs, so its first child starts before it does.
+fn is_collection_alias(node: &MarkedYaml) -> bool {
+    let first_child = match &node.data {
+        YamlData::Mapping(m) => m.iter().next().map(|(key, _)| key),
+        YamlData::Sequence(items) => items.first(),
+        _ => None,
+    };
+    first_child.is_some_and(|child| child.span.start.index() < node.span.start.index())
+}
+
+/// Whether `node` is a block mapping or sequence written out in place (not an
+/// alias to one), or `None` if a marker lies outside the text.
 fn is_block_collection(node: &MarkedYaml, src: &str, offsets: &ByteOffsets) -> Option<bool> {
-    if !matches!(node.data, YamlData::Mapping(_) | YamlData::Sequence(_)) {
+    if !matches!(node.data, YamlData::Mapping(_) | YamlData::Sequence(_))
+        || is_collection_alias(node)
+    {
         return Some(false);
     }
     let span_end = offsets.of(node.span.end)?;
@@ -342,10 +360,13 @@ fn diff_map(
         let Some(tv) = tmap.get(k) else { continue };
         let entry = find(k).ok_or(Error::YamlUnsafe)?;
         match (tv, rv) {
+            _ if tv == rv => {}
             (Node::Map(tc), Node::Map(rc)) if !tc.is_empty() && !rc.is_empty() => {
+                if is_collection_alias(entry.value) {
+                    return Err(Error::YamlUnsafe);
+                }
                 diff_map(tc, rc, entry.value, src, offsets, edits)?
             }
-            _ if tv == rv => {}
             (Node::Leaf(_), Node::Leaf(_)) => {
                 // Scalar → scalar: replace just the value span (keeps any inline
                 // comment, which sits past the value's end).
@@ -622,6 +643,88 @@ mod tests {
         assert_eq!(out, "# hdr\na: 1\r\nb: 2\r\nc: 3\r\n");
         let out = apply("a: 1\r\nb: 2\n", &result("a: 1\nb: 2\nc: 3\n")).unwrap();
         assert_eq!(out, "a: 1\r\nb: 2\nc: 3\n");
+    }
+
+    #[test]
+    fn adds_key_after_an_alias_to_a_collection() {
+        let out = apply(
+            "a: &x\n  p: 1\nz: 2\nb: *x\n",
+            &result("a:\n  p: 1\nz: 2\nb:\n  p: 1\nc: 3\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "a: &x\n  p: 1\nz: 2\nb: *x\nc: 3\n");
+        let out = apply(
+            "s: &a\n  x: 1\nu: *a\n",
+            &result("s:\n  x: 1\nu:\n  x: 1\nn: 1\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "s: &a\n  x: 1\nu: *a\nn: 1\n");
+        let out = apply(
+            "a: &x\n  - 1\nm:\n  k: *x\nz: 1\n",
+            &result("a: [1]\nm:\n  k: [1]\n  n: 2\nz: 1\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "a: &x\n  - 1\nm:\n  k: *x\n  n: 2\nz: 1\n");
+    }
+
+    #[test]
+    fn prunes_or_replaces_an_alias_to_a_collection() {
+        let text = "a: &x\n  p: 1\nb: *x\nc: 1\n";
+        let out = apply(text, &result("a:\n  p: 1\nc: 1\n")).unwrap();
+        assert_eq!(out, "a: &x\n  p: 1\nc: 1\n");
+        let out = apply(text, &result("a:\n  p: 1\nb: 3\nc: 1\n")).unwrap();
+        assert_eq!(out, "a: &x\n  p: 1\nb: 3\nc: 1\n");
+    }
+
+    #[test]
+    fn refuses_an_edit_inside_an_alias_to_a_collection() {
+        let text = "a: &x\n  p: 1\nb: *x\n";
+        for edited in [
+            "a:\n  p: 1\nb:\n  p: 2\n",
+            "a:\n  p: 1\nb:\n  p: 1\n  q: 2\n",
+            "a:\n  p: 1\n  q: 2\nb:\n  p: 1\n  q: 2\n",
+        ] {
+            let out = apply(text, &result(edited));
+            assert!(matches!(out, Err(Error::YamlUnsafe)), "got: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_added_after_an_alias_lands_above_a_comment_indented_under_it() {
+        let out = apply(
+            "a: &x\n  p: 1\nb: *x\n  # c\n",
+            &result("a:\n  p: 1\nb:\n  p: 1\nn: 1\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "a: &x\n  p: 1\nb: *x\nn: 1\n  # c\n");
+        let out = apply(
+            "base: &b\n  p: 1\nsvc:\n  <<: *b\n  # trailing\nother: 1\n",
+            &result("base:\n  p: 1\nsvc:\n  \"<<\":\n    p: 1\n  q: 2\nother: 1\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "base: &b\n  p: 1\nsvc:\n  <<: *b\n  q: 2\n  # trailing\nother: 1\n"
+        );
+    }
+
+    #[test]
+    fn a_mapping_whose_first_key_is_an_alias_is_not_an_alias() {
+        let out = apply(
+            "k: &k foo\nm:\n  *k : 1\n# about z\nz: 1\n",
+            &result("k: foo\nz: 1\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "k: &k foo\n# about z\nz: 1\n");
+        let out = apply(
+            "k: &k foo\na:\n  m:\n    *k : 1\n# about z\nz: 1\n",
+            &result("k: foo\na:\n  m:\n    foo: 1\n  n: 2\nz: 1\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "k: &k foo\na:\n  m:\n    *k : 1\n  n: 2\n# about z\nz: 1\n"
+        );
     }
 
     #[test]

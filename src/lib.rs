@@ -51,10 +51,11 @@ enum Command {
     Json(JsonArgs),
     /// Reconcile a YAML file, keeping its comments.
     ///
-    /// The file is edited in place, so comments and formatting survive wherever
-    /// nothing changes. Custom tags, non-string keys and multi-document files are
-    /// refused, as is an edit that would change what an alias resolves to. Aliases to
-    /// non-empty mappings and sequences can't be replaced, pruned or edited inside.
+    /// The file is edited in place, so comments and formatting survive
+    /// wherever nothing changes. Custom tags, non-string keys and
+    /// multi-document files are refused, as is an edit that would change what
+    /// an alias resolves to. Aliases to non-empty mappings and sequences can't
+    /// be edited inside.
     Yaml(ByteArgs),
     /// Reconcile a TOML file, keeping its comments.
     ///
