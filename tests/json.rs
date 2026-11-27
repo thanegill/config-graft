@@ -683,16 +683,15 @@ fn a_non_utf8_base_path_is_accepted_like_target() {
 }
 
 #[test]
-fn sort_keys_orders_output() {
+fn keeps_target_key_order_and_appends_new_keys() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
-    fs::write(&target, r#"{"b":1}"#).unwrap();
-    fs::write(&desired, r#"{"a":2}"#).unwrap();
+    fs::write(&target, r#"{"c":1,"b":{"z":1,"y":2}}"#).unwrap();
+    fs::write(&desired, r#"{"b":{"x":3,"w":4},"q":5,"a":2}"#).unwrap();
 
     let out = run(&[
         "json",
-        "--sort-keys",
         "--stdout",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
@@ -700,7 +699,7 @@ fn sort_keys_orders_output() {
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "{\n  \"a\": 2,\n  \"b\": 1\n}\n"
+        "{\n  \"c\": 1,\n  \"b\": {\n    \"z\": 1,\n    \"y\": 2,\n    \"x\": 3,\n    \"w\": 4\n  },\n  \"q\": 5,\n  \"a\": 2\n}\n"
     );
 }
 
@@ -1375,8 +1374,8 @@ fn a_deeply_nested_target_is_refused_not_aborted() {
 fn a_document_at_the_depth_cap_reconciles_end_to_end() {
     // The cap is only worth its number if a document sitting on it survives the
     // deepest path a run has: three nested-array inputs through the array merge,
-    // diffed, sorted and written. Arrays nest one level under a key, so 511 of
-    // them is the cap; the codec's own unit tests pin the exact boundary.
+    // diffed and written. Arrays nest one level under a key, so 511 of them
+    // is the cap; the codec's own unit tests pin the exact boundary.
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.json");
     let desired = dir.path().join("desired.json");
@@ -1389,7 +1388,6 @@ fn a_document_at_the_depth_cap_reconciles_end_to_end() {
     let out = run(&[
         "json",
         "--diff",
-        "--sort-keys",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
         base.to_str().unwrap(),

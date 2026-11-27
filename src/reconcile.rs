@@ -7,7 +7,6 @@
 use crate::value::{Leaf, Node};
 use crate::warning::{Step, Warning};
 use clap::ValueEnum;
-use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 mod arrays;
@@ -232,23 +231,6 @@ impl<L: Leaf> Node<L> {
             obj.shift_remove(first); // preserve the order of the surviving keys
         } else if let Some(child) = obj.get_mut(first) {
             child.del_path(rest);
-        }
-    }
-
-    /// Recursively sort every object's keys (for `--sort-keys`).
-    pub(crate) fn sort_keys(&self) -> Node<L> {
-        match self {
-            Node::Map(map) => {
-                let mut entries: Vec<(&String, &Node<L>)> = map.iter().collect();
-                entries.sort_by(|a, b| a.0.cmp(b.0));
-                let mut sorted = IndexMap::with_capacity(entries.len());
-                for (k, val) in entries {
-                    sorted.insert(k.clone(), val.sort_keys());
-                }
-                Node::Map(sorted)
-            }
-            Node::Array(arr) => Node::Array(arr.iter().map(|v| v.sort_keys()).collect()),
-            other => other.clone(),
         }
     }
 }
@@ -1440,24 +1422,6 @@ mod tests {
         assert_eq!(v.get_path(&keys(&["a", "b"])), Some(&n(json!(7))));
         assert_eq!(v.get_path(&keys(&["a", "x"])), None);
         assert_eq!(v.get_path(&keys(&["nope"])), None);
-    }
-
-    #[test]
-    fn sort_keys_sorts_recursively() {
-        let sorted = n(json!({"b":1,"a":{"d":1,"c":2}})).sort_keys();
-        assert_eq!(
-            serde_json::to_string(&j(&sorted)).unwrap(),
-            r#"{"a":{"c":2,"d":1},"b":1}"#
-        );
-    }
-
-    #[test]
-    fn sort_keys_recurses_through_arrays() {
-        let sorted = n(json!({"list":[{"b":1,"a":2}],"n":5})).sort_keys();
-        assert_eq!(
-            serde_json::to_string(&j(&sorted)).unwrap(),
-            r#"{"list":[{"a":2,"b":1}],"n":5}"#
-        );
     }
 
     #[test]

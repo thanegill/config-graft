@@ -96,6 +96,16 @@ fn yaml_null_is_a_value_not_a_delete() {
 }
 
 #[test]
+fn keeps_target_key_order_and_appends_new_keys() {
+    yaml_golden(
+        "c: 1\nb:\n  z: 1\n  y: 2\n",
+        "b:\n  x: 3\n  w: 4\nq: 5\na: 2\n",
+        None,
+        "c: 1\nb:\n  z: 1\n  y: 2\n  x: 3\n  w: 4\nq: 5\na: 2\n",
+    );
+}
+
+#[test]
 fn creates_missing_yaml_target_canonically() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("nested/dir/config.yaml");

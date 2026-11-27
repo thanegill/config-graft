@@ -841,23 +841,6 @@ mod tests {
     }
 
     #[test]
-    fn sort_keys_orders_plist_map() {
-        let mut d = plist::Dictionary::new();
-        d.insert("b".to_string(), pint(1));
-        d.insert("a".to_string(), pint(2));
-        let sorted = Plist::decode(&plist::Value::Dictionary(d))
-            .unwrap()
-            .sort_keys();
-        let keys: Vec<&str> = sorted
-            .as_map()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(keys, vec!["a", "b"]);
-    }
-
-    #[test]
     fn a_binary_plist_is_classified_by_its_magic() {
         assert_eq!(
             CurrentBytes::classify(b"bplist00\x00\x01"),
