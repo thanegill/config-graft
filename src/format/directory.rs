@@ -17,7 +17,7 @@
 //! completed by a re-run, which is idempotent).
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -330,16 +330,103 @@ pub fn read_tree(
     }
 }
 
-/// Two sibling names that fold to the same key (case-insensitively), if any -- such
-/// a pair would map to a single file on a case-insensitive filesystem.
-fn find_name_collision<'a>(names: impl Iterator<Item = &'a str>) -> Option<(String, String)> {
-    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for name in names {
-        if let Some(prev) = seen.insert(name.to_lowercase(), name.to_string()) {
-            return Some((prev, name.to_string()));
+/// Refuse a wanted name that resolves to a TARGET entry under another name.
+///
+/// Engine keys are exact strings, but a filesystem may store `Foo` and `foo` (or
+/// two Unicode normalizations of one name) as one file. A run holding such a pair
+/// never converges: it rewrites the file every time, `--check` never comes back
+/// clean, and a case-only rename writes the new spelling then prunes the old one,
+/// deleting the file it just wrote. So a wanted name TARGET doesn't list is looked
+/// up on disk, and if it resolves to an entry listed under another name (same
+/// device and inode), the pair is refused. The lookup only reads, and it is exact
+/// for whatever the filesystem folds. Two wanted names that are both new can't be
+/// looked up before either exists; [`apply_tree`] catches that pair while writing.
+pub fn refuse_aliased_names(
+    dir: &Path,
+    on_disk: &Node<FsLeaf>,
+    result: &Node<FsLeaf>,
+) -> Result<(), Error> {
+    let (Node::Map(wanted), Node::Map(existing)) = (result, on_disk) else {
+        return Ok(());
+    };
+    for (name, child) in wanted.iter().filter(|(name, _)| *name != DIR_ATTRS_KEY) {
+        match existing.get(name) {
+            Some(child_on_disk) => refuse_aliased_names(&dir.join(name), child_on_disk, child)?,
+            None => {
+                if let Some(alias) = on_disk_alias(dir, name)? {
+                    return Err(name_collision(dir, alias, name.clone()));
+                }
+            }
         }
     }
-    None
+    Ok(())
+}
+
+fn name_collision(dir: &Path, a: String, b: String) -> Error {
+    Error::NameCollision {
+        dir: dir.to_path_buf(),
+        a,
+        b,
+    }
+}
+
+/// The entry already in `dir` that `name` resolves to on disk under another
+/// name, if any: same device and inode, found without writing anything.
+fn on_disk_alias(dir: &Path, name: &str) -> Result<Option<String>, Error> {
+    let path = dir.join(name);
+    let wanted = match fs::symlink_metadata(&path) {
+        Ok(meta) => (meta.dev(), meta.ino()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::read(&path, e)),
+    };
+    for entry in fs::read_dir(dir).map_err(|e| Error::read(dir, e))? {
+        let entry = entry.map_err(|e| Error::read(dir, e))?;
+        let meta = entry
+            .metadata()
+            .map_err(|e| Error::read(&entry.path(), e))?;
+        if (meta.dev(), meta.ino()) == wanted {
+            return Ok(Some(entry.file_name().to_string_lossy().into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// The entries one apply has created, by device and inode, so a second new name
+/// the filesystem resolves to one of them is refused instead of overwriting it.
+#[derive(Default)]
+struct Created(HashMap<(u64, u64), String>);
+
+impl Created {
+    /// Refuse creating `path` if the filesystem already resolves it to an entry
+    /// this run created under another name.
+    fn refuse_alias(&self, path: &Path) -> Result<(), Error> {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(Error::read(path, e)),
+        };
+        let Some(first) = self.0.get(&(meta.dev(), meta.ino())) else {
+            return Ok(());
+        };
+        Err(name_collision(
+            &crate::dest_dir(path),
+            first.clone(),
+            entry_name(path),
+        ))
+    }
+
+    fn record(&mut self, path: &Path) -> Result<(), Error> {
+        let meta = fs::symlink_metadata(path).map_err(|e| Error::read(path, e))?;
+        self.0.insert((meta.dev(), meta.ino()), entry_name(path));
+        Ok(())
+    }
+}
+
+/// The last component of a path the walk built from an entry name.
+fn entry_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Read a directory's entries (sorted) into a `Map` node carrying `meta` (the
@@ -359,8 +446,7 @@ fn read_dir(
         .collect::<Result<_, _>>()?;
     paths.sort();
 
-    // Resolve names first (refusing non-UTF-8, skipping our own temp files), then
-    // refuse a case-fold collision before doing any expensive per-entry reads.
+    // Resolve names first, refusing non-UTF-8 and skipping our own temp files.
     let mut children: Vec<(String, PathBuf)> = Vec::with_capacity(paths.len());
     for path in paths {
         match path.file_name().and_then(|n| n.to_str()) {
@@ -370,13 +456,6 @@ fn read_dir(
             Some(n) if n.starts_with(TEMP_PREFIX) => continue,
             Some(n) => children.push((n.to_owned(), path)),
         }
-    }
-    if let Some((a, b)) = find_name_collision(children.iter().map(|(n, _)| n.as_str())) {
-        return Err(Error::NameCollision {
-            dir: dir.to_path_buf(),
-            a,
-            b,
-        });
     }
 
     let mut map = IndexMap::with_capacity(children.len() + 1);
@@ -549,7 +628,14 @@ pub fn apply_tree(
     // to build a write path), for the app-content refuse check.
     let want = parse(want)?;
     let cur = cur.map(parse).transpose()?;
-    apply_dir(root, cur.as_ref(), &want, base, policy)
+    apply_dir(
+        root,
+        cur.as_ref(),
+        &want,
+        base,
+        policy,
+        &mut Created::default(),
+    )
 }
 
 /// Whether `cur` (a directory subtree read from disk) holds any leaf that is not
@@ -689,6 +775,7 @@ fn apply_dir(
     want: &FsTree,
     base: Option<&Node<FsLeaf>>,
     policy: AttrPolicy,
+    created: &mut Created,
 ) -> Result<bool, Error> {
     let (want_attrs, want_entries) = match want {
         FsTree::Dir { attrs, entries } => (*attrs, entries),
@@ -717,6 +804,7 @@ fn apply_dir(
             base_child,
             policy,
             &mut access,
+            created,
         )?;
     }
     if let Some((_, cur_entries)) = cur_dir {
@@ -761,6 +849,25 @@ fn apply_node(
     base: Option<&Node<FsLeaf>>,
     policy: AttrPolicy,
     parent: &mut EntryAccess<'_>,
+    created: &mut Created,
+) -> Result<bool, Error> {
+    if cur.is_some() {
+        return write_node(path, cur, want, base, policy, parent, created);
+    }
+    created.refuse_alias(path)?;
+    let changed = write_node(path, cur, want, base, policy, parent, created)?;
+    created.record(path)?;
+    Ok(changed)
+}
+
+fn write_node(
+    path: &Path,
+    cur: Option<&FsTree>,
+    want: &FsTree,
+    base: Option<&Node<FsLeaf>>,
+    policy: AttrPolicy,
+    parent: &mut EntryAccess<'_>,
+    created: &mut Created,
 ) -> Result<bool, Error> {
     match want {
         FsTree::Dir { .. } => {
@@ -784,7 +891,7 @@ fn apply_node(
                     None
                 }
             };
-            changed |= apply_dir(path, cur_dir, want, base, policy)?;
+            changed |= apply_dir(path, cur_dir, want, base, policy, created)?;
             Ok(changed)
         }
         FsTree::File {
@@ -1254,11 +1361,151 @@ mod tests {
         assert!(!XattrScope::None.in_scope("user.foo"));
     }
 
+    /// Whether `dir`'s filesystem keeps `lower` and `LOWER` apart, found
+    /// independently of the code under test.
+    fn keeps_case_apart_here(dir: &Path) -> bool {
+        fs::write(dir.join("lower"), "").unwrap();
+        let apart = !dir.join("LOWER").exists();
+        fs::remove_file(dir.join("lower")).unwrap();
+        apart
+    }
+
+    fn named_files(names: &[&str]) -> Node<FsLeaf> {
+        Node::Map(
+            names
+                .iter()
+                .map(|name| (name.to_string(), Node::Leaf(leaf("/x", "x", attrs(&[])))))
+                .collect(),
+        )
+    }
+
     #[test]
-    fn find_name_collision_detects_case_fold_pairs() {
-        assert_eq!(find_name_collision(["a", "b", "c"].into_iter()), None);
-        assert!(find_name_collision(["Foo", "foo"].into_iter()).is_some());
-        assert!(find_name_collision(["a", "A"].into_iter()).is_some());
+    fn refuse_aliased_names_finds_an_existing_entry_by_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foo"), "A").unwrap();
+        let on_disk = read_tree(dir.path(), false, POLICY).unwrap().unwrap();
+
+        match refuse_aliased_names(dir.path(), &on_disk, &named_files(&["Foo"])) {
+            Ok(()) => assert!(keeps_case_apart_here(dir.path())),
+            Err(Error::NameCollision { dir: at, a, b }) => {
+                assert!(!keeps_case_apart_here(dir.path()));
+                assert_eq!(at, dir.path());
+                assert_eq!((a.as_str(), b.as_str()), ("foo", "Foo"));
+            }
+            Err(other) => panic!("expected NameCollision, got {other:?}"),
+        }
+        // Names that are only in the result, or listed as themselves, are not
+        // looked up against each other here.
+        let new_pair = named_files(&["foo", "Bar", "bar"]);
+        assert!(refuse_aliased_names(dir.path(), &on_disk, &new_pair).is_ok());
+    }
+
+    /// `tree`'s node for `rel`, read from its own directory under `src` (named
+    /// after `contents`), so two spellings of one name can both be sources.
+    fn leaf_for(src: &Path, rel: &str, contents: &str) -> Node<FsLeaf> {
+        let read = tree(&src.join(contents), &[(rel, contents, 0o644)]);
+        rel.split('/')
+            .fold(&read, |node, part| &node.as_map().unwrap()[part])
+            .clone()
+    }
+
+    fn map(entries: Vec<(&str, Node<FsLeaf>)>) -> Node<FsLeaf> {
+        Node::Map(
+            entries
+                .into_iter()
+                .map(|(name, node)| (name.to_string(), node))
+                .collect(),
+        )
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn new_names_stored_as_one_file_are_refused_while_writing() {
+        let (src, dst) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let root = dst.path().join("out");
+        let sub = map(vec![
+            ("Foo", leaf_for(src.path(), "Foo", "upper")),
+            ("foo", leaf_for(src.path(), "foo", "lower")),
+        ]);
+        let want = map(vec![("sub", sub)]);
+
+        let result = apply_tree(&root, None, &want, None, POLICY);
+        let written = names_in(&root.join("sub"));
+        if keeps_case_apart_here(dst.path()) {
+            assert!(result.unwrap());
+            assert_eq!(written, ["Foo", "foo"]);
+            return;
+        }
+        match result {
+            Err(Error::NameCollision { dir: at, a, b }) => {
+                assert_eq!(at, root.join("sub"));
+                assert_eq!((a.as_str(), b.as_str()), ("Foo", "foo"));
+            }
+            other => panic!("expected NameCollision, got {other:?}"),
+        }
+        assert_eq!(written, ["Foo"]);
+        assert_eq!(fs::read_to_string(root.join("sub/Foo")).unwrap(), "upper");
+    }
+
+    #[test]
+    fn new_directory_and_file_stored_as_one_entry_are_refused_while_writing() {
+        let (src, dst) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let root = dst.path().join("out");
+        let dir_node = map(vec![("x", leaf_for(src.path(), "x", "x"))]);
+        let want = map(vec![
+            ("Sub", dir_node),
+            ("sub", leaf_for(src.path(), "sub", "file")),
+        ]);
+
+        let result = apply_tree(&root, None, &want, None, POLICY);
+        if keeps_case_apart_here(dst.path()) {
+            assert!(result.unwrap());
+            assert_eq!(names_in(&root), ["Sub", "sub"]);
+            return;
+        }
+        assert!(
+            matches!(&result, Err(Error::NameCollision { a, b, .. }) if a == "Sub" && b == "sub"),
+            "{result:?}"
+        );
+        assert_eq!(names_in(&root), ["Sub"]);
+        assert!(root.join("Sub/x").is_file());
+    }
+
+    #[test]
+    fn on_disk_alias_finds_the_entry_the_filesystem_resolves_to() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("foo"), "A").unwrap();
+        let alias = on_disk_alias(dir.path(), "FOO").unwrap();
+        if keeps_case_apart_here(dir.path()) {
+            assert_eq!(alias, None);
+        } else {
+            assert_eq!(alias.as_deref(), Some("foo"));
+        }
+        assert_eq!(on_disk_alias(dir.path(), "absent").unwrap(), None);
+    }
+
+    #[test]
+    fn on_disk_alias_reports_a_failed_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let enforced = fs::read_dir(&locked).is_err();
+        let alias = on_disk_alias(&locked, "x");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if !enforced {
+            eprintln!("skipping on_disk_alias_reports_a_failed_lookup: perms not enforced");
+            return;
+        }
+        assert!(matches!(alias, Err(Error::Read { .. })), "{alias:?}");
     }
 
     #[test]

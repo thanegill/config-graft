@@ -98,8 +98,7 @@ pub enum Error {
     /// Internal invariant: a directory tree contained a node it never can (an array
     /// node, or a non-map root). Kept as a typed error rather than a panic.
     DirectoryTreeInvariant,
-    /// Two sibling names collide when case-folded, so they would map to one file on
-    /// a case-insensitive filesystem -- refused rather than silently landing one.
+    /// Two sibling names would be one file; refused rather than landing one.
     NameCollision { dir: PathBuf, a: String, b: String },
     /// A `directory` tree is nested deeper than the supported limit
     /// (refused rather than risk a stack overflow).
@@ -263,8 +262,8 @@ impl fmt::Display for Error {
             }
             Error::NameCollision { dir, a, b } => write!(
                 f,
-                "entries {a:?} and {b:?} in {} collide when case-folded (they would \
-                 map to one file on a case-insensitive filesystem); refusing",
+                "entries {a:?} and {b:?} in {} would be one file on this filesystem; \
+                 refusing",
                 dir.display()
             ),
             Error::TreeTooDeep(p) => {
