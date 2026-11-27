@@ -17,7 +17,7 @@
 //! completed by a re-run, which is idempotent).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -1008,7 +1008,7 @@ impl FsAttrs {
     /// a half-attributed entry.
     fn apply(&self, path: &Path, policy: AttrPolicy) -> Result<(), Error> {
         if policy.xattrs != XattrScope::None {
-            let desired: std::collections::HashSet<&str> = self
+            let desired: HashSet<&str> = self
                 .keys()
                 .filter_map(|k| k.strip_prefix("xattr:"))
                 .collect();
