@@ -366,8 +366,8 @@ fn gts_order(
     //   Em = (E1 \ (Eb+ \ E2+)) ∪ (E2 \ (Eb+ \ E1+))
     // `edge_set` makes the "already have this edge?" test O(1) instead of an
     // O(E) `edges.contains` scan; `edges` keeps insertion order (immaterial
-    // downstream -- adjacency is re-sorted, reachability is a matrix -- but cheap
-    // to preserve).
+    // downstream -- adjacency is re-sorted and the condensation's edges are only
+    // counted -- but cheap to preserve).
     let mut edges: Vec<(usize, usize)> = Vec::new();
     let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
     for w in target_seq.windows(2) {
@@ -506,45 +506,78 @@ fn gts_order(
 /// Label every vertex of the graph `adj` with its strongly connected component,
 /// numbering the components in order of their smallest vertex. Returns the labels
 /// and the number of components.
+///
+/// Tarjan's algorithm, linear in vertices plus edges, with an explicit stack so an
+/// array of thousands of elements cannot overflow the call stack.
 fn strongly_connected_components(adj: &[Vec<usize>]) -> (Vec<usize>, usize) {
-    // n is small (config arrays), so use a Warshall reachability closure and group
-    // by mutual reachability.
+    const UNVISITED: usize = usize::MAX;
     let n = adj.len();
-    let mut reach = vec![vec![false; n]; n];
-    for (v, row) in reach.iter_mut().enumerate() {
-        row[v] = true;
-    }
-    for (a, successors) in adj.iter().enumerate() {
-        for &b in successors {
-            reach[a][b] = true;
-        }
-    }
-    for k in 0..n {
-        let row_k = reach[k].clone();
-        for row_i in reach.iter_mut() {
-            if row_i[k] {
-                for (j, &reachable) in row_k.iter().enumerate() {
-                    if reachable {
-                        row_i[j] = true;
-                    }
-                }
-            }
-        }
-    }
-    let mut comp = vec![usize::MAX; n];
+    let mut index = vec![UNVISITED; n];
+    let mut lowlink = vec![0; n];
+    let mut on_stack = vec![false; n];
+    let mut open: Vec<usize> = Vec::new();
+    let mut found = vec![UNVISITED; n];
+    let mut next_index = 0;
     let mut ncomp = 0;
-    for v in 0..n {
-        if comp[v] != usize::MAX {
+    // Each frame is a vertex being visited and how many of its successors it has
+    // already followed.
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    for root in 0..n {
+        if index[root] != UNVISITED {
             continue;
         }
-        comp[v] = ncomp;
-        for u in (v + 1)..n {
-            if comp[u] == usize::MAX && reach[v][u] && reach[u][v] {
-                comp[u] = ncomp;
+        index[root] = next_index;
+        lowlink[root] = next_index;
+        next_index += 1;
+        open.push(root);
+        on_stack[root] = true;
+        frames.push((root, 0));
+        while let Some(frame) = frames.last_mut() {
+            let (v, followed) = *frame;
+            if let Some(&w) = adj[v].get(followed) {
+                frame.1 += 1;
+                if index[w] == UNVISITED {
+                    index[w] = next_index;
+                    lowlink[w] = next_index;
+                    next_index += 1;
+                    open.push(w);
+                    on_stack[w] = true;
+                    frames.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                lowlink[parent] = lowlink[parent].min(lowlink[v]);
+            }
+            if lowlink[v] == index[v] {
+                loop {
+                    let w = open.pop().expect("v is still on the stack");
+                    on_stack[w] = false;
+                    found[w] = ncomp;
+                    if w == v {
+                        break;
+                    }
+                }
+                ncomp += 1;
             }
         }
-        ncomp += 1;
     }
+    // Tarjan finds components sinks-first; renumber them by smallest vertex.
+    let mut renumbered = vec![UNVISITED; ncomp];
+    let mut next_label = 0;
+    let comp = found
+        .iter()
+        .map(|&c| {
+            if renumbered[c] == UNVISITED {
+                renumbered[c] = next_label;
+                next_label += 1;
+            }
+            renumbered[c]
+        })
+        .collect();
     (comp, ncomp)
 }
 
@@ -692,7 +725,100 @@ fn order_scc(
 
 #[cfg(test)]
 mod tests {
-    use super::gts_order;
+    use super::{gts_order, strongly_connected_components};
+
+    /// The components by brute force, numbered the same way: a Warshall
+    /// reachability closure, grouping vertices that reach each other.
+    fn components_by_closure(adj: &[Vec<usize>]) -> (Vec<usize>, usize) {
+        let n = adj.len();
+        let mut reach = vec![vec![false; n]; n];
+        for (v, row) in reach.iter_mut().enumerate() {
+            row[v] = true;
+        }
+        for (a, successors) in adj.iter().enumerate() {
+            for &b in successors {
+                reach[a][b] = true;
+            }
+        }
+        for k in 0..n {
+            let row_k = reach[k].clone();
+            for row_i in reach.iter_mut() {
+                if row_i[k] {
+                    for (j, &reachable) in row_k.iter().enumerate() {
+                        if reachable {
+                            row_i[j] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let mut comp = vec![usize::MAX; n];
+        let mut ncomp = 0;
+        for v in 0..n {
+            if comp[v] != usize::MAX {
+                continue;
+            }
+            comp[v] = ncomp;
+            for u in (v + 1)..n {
+                if comp[u] == usize::MAX && reach[v][u] && reach[u][v] {
+                    comp[u] = ncomp;
+                }
+            }
+            ncomp += 1;
+        }
+        (comp, ncomp)
+    }
+
+    /// A small deterministic generator, so the comparison needs no dependency and
+    /// fails the same way every run.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) % bound as u64) as usize
+        }
+    }
+
+    #[test]
+    fn components_match_a_reachability_closure() {
+        let mut rng = Lcg(1);
+        let mut compared = 0;
+        for _ in 0..2000 {
+            let n = rng.below(24);
+            let edge_count = if n == 0 { 0 } else { rng.below(3 * n + 1) };
+            let mut adj = vec![Vec::new(); n];
+            for _ in 0..edge_count {
+                let from = rng.below(n);
+                adj[from].push(rng.below(n));
+            }
+            for row in adj.iter_mut() {
+                row.sort_unstable();
+                row.dedup();
+            }
+            assert_eq!(
+                strongly_connected_components(&adj),
+                components_by_closure(&adj),
+                "graph: {adj:?}"
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, 2000);
+    }
+
+    #[test]
+    fn components_of_a_long_cycle_and_chain_do_not_overflow_the_stack() {
+        let n = 100_000;
+        let cycle: Vec<Vec<usize>> = (0..n).map(|v| vec![(v + 1) % n]).collect();
+        assert_eq!(strongly_connected_components(&cycle), (vec![0; n], 1));
+        let chain: Vec<Vec<usize>> = (0..n)
+            .map(|v| if v + 1 < n { vec![v + 1] } else { Vec::new() })
+            .collect();
+        assert_eq!(strongly_connected_components(&chain), ((0..n).collect(), n));
+    }
 
     /// Run `gts_order` over space-separated element names and render its result
     /// the same way, as `(order, conflict)`. A name's vertex index is its
