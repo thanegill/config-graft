@@ -281,15 +281,15 @@ fn line_after(src: &str, content_end: usize) -> usize {
 }
 
 /// `end`, moved past the comment lines that directly follow it and are indented
-/// deeper than the key starting at `key_start`.
+/// deeper than the entry whose key starts at `key_start`.
 fn past_indented_comments(src: &str, key_start: usize, end: usize) -> usize {
-    let key_indent = indent_of(src, key_start);
+    let indent = entry_indent(src, key_start);
     let mut end = end;
     loop {
         let next = line_end(src, end);
         let line = &src[end..next];
         let body = line.trim_start_matches(' ');
-        if !body.starts_with('#') || line.len() - body.len() <= key_indent {
+        if !body.starts_with('#') || line.len() - body.len() <= indent {
             return end;
         }
         end = next;
@@ -359,7 +359,7 @@ fn diff_map(
     if !added.is_empty() {
         // Need an existing sibling to anchor indentation and insertion point.
         let last = entries.last().ok_or(Error::YamlUnsafe)?;
-        let ind = indent_of(src, entries[0].key_start);
+        let ind = entry_indent(src, entries[0].key_start);
         let at = last.end_with_comments;
         let mut text = String::new();
         for k in added {
@@ -419,9 +419,24 @@ fn line_end(src: &str, idx: usize) -> usize {
     src[idx..].find('\n').map_or(src.len(), |p| idx + p + 1)
 }
 
-/// Byte column of `idx` within its line.
-fn indent_of(src: &str, idx: usize) -> usize {
-    idx - line_start(src, idx)
+/// Byte column where the entry whose key starts at `key_start` begins: the
+/// key's own column, moved left over an explicit `?` and any anchor or tag in
+/// front of the key. It stops at any other token, such as the `:` of an
+/// explicit key whose value mapping starts on that line (`: x: 1`). Tokens split
+/// only on spaces and tabs, YAML's separators: an anchor name may hold other
+/// whitespace, such as a no-break space.
+fn entry_indent(src: &str, key_start: usize) -> usize {
+    let prefix = &src[line_start(src, key_start)..key_start];
+    let mut column = prefix.len();
+    loop {
+        let before = prefix[..column].trim_end_matches([' ', '\t']);
+        let token_start = before.rfind([' ', '\t']).map_or(0, |i| i + 1);
+        let token = &before[token_start..];
+        if !(token == "?" || token.starts_with(['&', '!'])) {
+            return column;
+        }
+        column = token_start;
+    }
 }
 
 /// Leading-space width of the line containing `idx`: an entry's block indent,
@@ -485,6 +500,67 @@ mod tests {
     fn adds_key_at_end_of_mapping() {
         let out = apply("a: 1  # c\n", &result("a: 1\nb: 2\n")).unwrap();
         assert_eq!(out, "a: 1  # c\nb: 2\n");
+    }
+
+    #[test]
+    fn adds_key_after_an_explicit_first_key_at_the_block_indent() {
+        let out = apply("m:\n  ? a\n  : 1\n", &result("m:\n  a: 1\n  b: 2\n")).unwrap();
+        assert_eq!(out, "m:\n  ? a\n  : 1\n  b: 2\n");
+    }
+
+    #[test]
+    fn adds_key_after_an_anchored_or_tagged_first_key_at_the_block_indent() {
+        let out = apply("&k a: 1\nc: 3\n", &result("a: 1\nc: 3\nb: 2\n")).unwrap();
+        assert_eq!(out, "&k a: 1\nc: 3\nb: 2\n");
+        let out = apply("m:\n  !!str a: 1\n", &result("m:\n  a: 1\n  b: 2\n")).unwrap();
+        assert_eq!(out, "m:\n  !!str a: 1\n  b: 2\n");
+    }
+
+    #[test]
+    fn adds_key_to_a_mapping_on_an_explicit_keys_value_line() {
+        let out = apply(
+            "? a\n: x: 1\n  y: 2\n",
+            &result("a:\n  x: 1\n  y: 2\n  z: 3\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "? a\n: x: 1\n  y: 2\n  z: 3\n");
+        let out = apply("? a\n: &k x: 1\n", &result("a:\n  x: 1\n  y: 2\n")).unwrap();
+        assert_eq!(out, "? a\n: &k x: 1\n  y: 2\n");
+    }
+
+    #[test]
+    fn adds_key_below_a_comment_indented_under_an_anchored_or_explicit_key() {
+        let out = apply(
+            "&k a:\n  b: 1\n  # under a\n",
+            &result("a:\n  b: 1\nz: 9\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "&k a:\n  b: 1\n  # under a\nz: 9\n");
+        let out = apply(
+            "? a\n:\n  b: 1\n  # under a\n",
+            &result("a:\n  b: 1\nz: 9\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "? a\n:\n  b: 1\n  # under a\nz: 9\n");
+    }
+
+    #[test]
+    fn removes_a_comment_indented_under_a_removed_anchored_or_explicit_key() {
+        let out = apply("&k a:\n  b: 1\n  # under a\nc: 2\n", &result("c: 2\n")).unwrap();
+        assert_eq!(out, "c: 2\n");
+        let out = apply("? a\n:\n  b: 1\n  # under a\nc: 2\n", &result("c: 2\n")).unwrap();
+        assert_eq!(out, "c: 2\n");
+    }
+
+    #[test]
+    fn an_anchor_holding_non_ascii_whitespace_is_one_token() {
+        let text = "&a\u{a0}b a:\n  x: 1\nc: 1\n";
+        assert_eq!(
+            apply(text, &result("a:\n  x: 1\nc: 2\n")).unwrap(),
+            text.replace("c: 1", "c: 2")
+        );
+        let out = apply("m:\n  &a\u{3000}b k: 1\n", &result("m:\n  k: 1\n  y: 2\n")).unwrap();
+        assert_eq!(out, "m:\n  &a\u{3000}b k: 1\n  y: 2\n");
     }
 
     #[test]
