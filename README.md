@@ -32,35 +32,7 @@ config-graft directory dest/ desired/                       # reconcile a direct
 
 The format is a required **subcommand** (`json`, `yaml`, `toml`, `plist`, or `directory`); each subcommand exposes only the flags that apply to it, so an unsupported flag/format pairing is a usage error rather than a runtime one.
 
-By default (`--array-strategy merge`) two arrays are reconciled three-way against BASE, move-aware: keep what either side has, prune a BASE element DESIRED dropped, respect a BASE element the user deleted from TARGET, and preserve a reordering made on either side. If TARGET and DESIRED reorder the same elements *contradictorily*, that's a conflict: it's still resolved deterministically (TARGET order preferred), but config-graft prints a warning to stderr naming the array and the conflicting elements (the exit code is unchanged). For **arrays of keyed records** (a list of objects like `servers`), pass `--merge-key name` (or `--merge-key servers=name` to scope it to the array at that path) so `merge` matches elements by that field and reconciles their fields — bump a managed field while keeping an app-added one, instead of duplicating the record. The other strategies are `replace` (**atomic** — DESIRED's list wins wholesale; the right choice when you own the whole list, or for arrays of objects with no key field), `concat` (append, keeping order and duplicates), and `set` (two-way union, ignoring order and BASE). Scalars are always replaced. `null` is a real value, not a delete sentinel — deletion is driven entirely by the BASE↔DESIRED diff.
-
-### Keyed lists: `--merge-key`
-
-The app owns a `servers` list and has added a `status` field to `web`; you manage each server's `replicas` and want to bump `web` from 2 to 3. TARGET (live) and DESIRED (managed):
-
-```jsonc
-// TARGET
-{ "servers": [ { "name": "web", "replicas": 2, "status": "running" } ] }
-// DESIRED
-{ "servers": [ { "name": "web", "replicas": 3 } ] }
-```
-
-Without a key, `merge` compares whole objects, so the edited `web` reads as a delete + insert — you get **two** `web` entries:
-
-```json
-{ "servers": [
-  { "name": "web", "replicas": 2, "status": "running" },
-  { "name": "web", "replicas": 3 }
-] }
-```
-
-With `--merge-key name`, `web` is matched by its `name` and its fields reconcile three-way — the managed `replicas` updates, the app's `status` survives, **one** entry:
-
-```json
-{ "servers": [ { "name": "web", "replicas": 3, "status": "running" } ] }
-```
-
-Give several candidate fields (`--merge-key name,id`, first present wins), or scope a key to the array at a path (`--merge-key servers=name`, or a dotted path like `--merge-key spec.containers=name` — segments joined by the format separator, `:` for plist — so same-named arrays at different depths take different rules). Keying engages only when a key resolves and every element on both sides is an object carrying it; otherwise `merge` falls back to whole-value matching.
+Arrays merge three-way by default; `--array-strategy` and `--merge-key` change that. See [`docs/arrays.md`](docs/arrays.md).
 
 ## Formats
 
