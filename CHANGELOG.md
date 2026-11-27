@@ -56,6 +56,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **A non-UTF-8 BASE path is accepted**, like TARGET and DESIRED.
 - **YAML:** replacing a scalar with a collection, or back, under an explicit `? key` or a tagged or anchored key is written instead of refused, as a plain `key:` at the line's indent.
 - **YAML writes floats as floats** (`1.0`, `-0.0`, `.inf`, `.nan`); `1.0` used to become the integer `1` and infinity a string.
+- **directory:** a managed directory with a read-only mode, such as a Nix store `source`'s `0555`, can be updated, pruned or replaced after the first apply instead of failing with `EACCES`; owner-write is lifted only while it changes, then put back.
 - **An XML plist with comments before `<?xml` is recognized as XML** ([#44](https://github.com/thanegill/config-graft/issues/44)), so values the app wrote pass through.
 - **The plist refusal says whether the target was binary or not recognized as XML**, since only one is fixed by dropping `--plist-format xml`.
 - **A deeply nested JSON or plist file is refused instead of crashing**; the depth limit rises from 128 to 512 containers.
