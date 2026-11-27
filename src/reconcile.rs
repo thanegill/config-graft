@@ -271,7 +271,7 @@ fn collect<L: Leaf>(v: &Node<L>, prefix: &mut ManagedPath, out: &mut Vec<Managed
 /// `path` is this node's full object-key path from the reconcile root (the Map arm
 /// pushes each key as it descends, and pops after); the array engine uses it to
 /// resolve per-path merge keys.
-pub fn deep_merge<L: Leaf>(
+fn deep_merge<L: Leaf>(
     target: &mut Node<L>,
     desired: &Node<L>,
     base: Option<&Node<L>>,
