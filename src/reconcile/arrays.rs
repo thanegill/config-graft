@@ -140,30 +140,51 @@ fn value_merge<L: Leaf>(
 /// on only one branch). A conflict *inside* a merged record is surfaced too, with
 /// a `[field=value]` element selector prepended to its path so it locates down to
 /// the record (e.g. `[name="web"].tags`).
-fn keyed_merge<L: Leaf>(
-    target: &[Node<L>],
-    desired: &[Node<L>],
-    base: &[Node<L>],
+fn keyed_merge<'a, L: Leaf>(
+    target: &'a [Node<L>],
+    desired: &'a [Node<L>],
+    base: &'a [Node<L>],
     opts: &Options,
     keys: &[String],
 ) -> (Vec<Node<L>>, Vec<Warning<L>>) {
-    let key = |e: &Node<L>| identity(e, keys);
-    let has = |seq: &[Node<L>], k: &Ident<L>| seq.iter().any(|e| key(e).as_ref() == Some(k));
+    let key = |e| key_of(e, keys);
+    // Each key's first record in an input, which is the one a match uses.
+    let first_by_key = |seq: &'a [Node<L>]| {
+        let mut first: HashMap<Ident<'a, L>, &'a Node<L>> = HashMap::new();
+        for e in seq {
+            if let Some(k) = key(e) {
+                first.entry(k).or_insert(e);
+            }
+        }
+        first
+    };
+    let (in_target, in_desired, in_base) = (
+        first_by_key(target),
+        first_by_key(desired),
+        first_by_key(base),
+    );
 
     // Survivor keys, in membership order (the `membership_merge` rule, on keys).
-    let mut survivors: Vec<Ident<L>> = Vec::new();
+    let mut survivors: Vec<Ident<'a, L>> = Vec::new();
+    let mut survivor_index: HashMap<Ident<'a, L>, usize> = HashMap::new();
+    let mut survive = |k: Ident<'a, L>| {
+        survivor_index.entry(k).or_insert_with(|| {
+            survivors.push(k);
+            survivors.len() - 1
+        });
+    };
     for e in target {
         let k = key(e).expect("gated: every target element is keyed");
-        let dropped_from_desired = has(base, &k) && !has(desired, &k);
-        if !dropped_from_desired && !survivors.contains(&k) {
-            survivors.push(k);
+        let dropped_from_desired = in_base.contains_key(&k) && !in_desired.contains_key(&k);
+        if !dropped_from_desired {
+            survive(k);
         }
     }
     for e in desired {
         let k = key(e).expect("gated: every desired element is keyed");
-        let removed_from_target = has(base, &k) && !has(target, &k);
-        if !removed_from_target && !survivors.contains(&k) {
-            survivors.push(k);
+        let removed_from_target = in_base.contains_key(&k) && !in_target.contains_key(&k);
+        if !removed_from_target {
+            survive(k);
         }
     }
 
@@ -171,17 +192,15 @@ fn keyed_merge<L: Leaf>(
     // fields are reconciled recursively; any conflict from that merge is kept,
     // tagged with the record's `[field=value]` selector so it locates inside the
     // array.
-    let find =
-        |seq: &[Node<L>], k: &Ident<L>| seq.iter().find(|e| key(e).as_ref() == Some(k)).cloned();
     let mut merged: Vec<Node<L>> = Vec::with_capacity(survivors.len());
     let mut nested: Vec<Warning<L>> = Vec::new();
     for k in &survivors {
-        let value = match (find(target, k), find(desired, k)) {
+        let value = match (in_target.get(k), in_desired.get(k)) {
             (Some(t), Some(d)) => {
-                let (m, conflicts) = reconcile(&t, &d, find(base, k).as_ref(), opts);
+                let (m, conflicts) = reconcile(t, d, in_base.get(k).copied(), opts);
                 let (field, key_value) = k;
                 let selector = Step::Selector {
-                    field: field.clone(),
+                    field: field.to_string(),
                     value: key_value.to_string(),
                 };
                 for mut c in conflicts {
@@ -190,14 +209,14 @@ fn keyed_merge<L: Leaf>(
                 }
                 m
             }
-            (Some(t), None) => t,
-            (None, Some(d)) => d,
+            (Some(t), None) => (*t).clone(),
+            (None, Some(d)) => (*d).clone(),
             (None, None) => unreachable!("a survivor key comes from target or desired"),
         };
         merged.push(value);
     }
 
-    let id_of = |e: &Node<L>| key(e).and_then(|k| survivors.iter().position(|s| *s == k));
+    let id_of = |e: &Node<L>| key_of(e, keys).and_then(|k| survivor_index.get(&k).copied());
     let (out, mut conflicts) = assemble(id_of, &merged, target, desired, base);
     conflicts.append(&mut nested);
     conflicts.extend(key_duplicates(target, keys, &out, Source::Target));
@@ -254,12 +273,12 @@ fn key_duplicates<L: Leaf>(
     out: &[Node<L>],
     source: Source,
 ) -> Vec<Warning<L>> {
-    let idents: Vec<Ident<L>> = seq.iter().filter_map(|e| identity(e, keys)).collect();
-    let mut held: HashMap<&Ident<L>, usize> = HashMap::new();
+    let idents: Vec<Ident<'_, L>> = seq.iter().filter_map(|e| key_of(e, keys)).collect();
+    let mut held: HashMap<&Ident<'_, L>, usize> = HashMap::new();
     for ident in &idents {
         *held.entry(ident).or_default() += 1;
     }
-    let mut reported: HashSet<&Ident<L>> = HashSet::new();
+    let mut reported: HashSet<&Ident<'_, L>> = HashSet::new();
     let mut warnings = Vec::new();
     for ident in &idents {
         if held[ident] < 2 || !reported.insert(ident) {
@@ -272,11 +291,11 @@ fn key_duplicates<L: Leaf>(
                 source,
                 identity: render_selector(field, value),
                 matched: (*value).clone(),
-                key: Some(field.clone()),
+                key: Some(field.to_string()),
                 held: held[ident],
                 kept: out
                     .iter()
-                    .filter(|kept| identity(kept, keys).as_ref() == Some(ident))
+                    .filter(|kept| key_of(kept, keys).as_ref() == Some(ident))
                     .count(),
             },
         });
@@ -581,21 +600,15 @@ fn strongly_connected_components(adj: &[Vec<usize>]) -> (Vec<usize>, usize) {
     (comp, ncomp)
 }
 
-type Ident<L> = (String, Node<L>);
+/// A record's identity for keyed matching: the first `keys` field it carries and
+/// that field's value, borrowed from the record (the field disambiguates `name:"x"`
+/// from `id:"x"`).
+type Ident<'a, L> = (&'a str, &'a Node<L>);
 
-/// The identity of `e` for keyed matching: the first `keys` field it carries, as
-/// `(field, value)` (the field disambiguates `name:"x"` from `id:"x"`). `None` if
-/// `e` isn't an object with a candidate field.
-fn identity<L: Leaf>(e: &Node<L>, keys: &[String]) -> Option<Ident<L>> {
-    key_of(e, keys).map(|(field, value)| (field.to_owned(), value.clone()))
-}
-
-/// [`identity`], borrowed from `e`: the field and its value. The engine's matching
-/// and the collapse check's both go through it, so the two agree on what a key is.
-pub(crate) fn key_of<'a, L: Leaf>(
-    e: &'a Node<L>,
-    keys: &[String],
-) -> Option<(&'a str, &'a Node<L>)> {
+/// The [`Ident`] of `e`, or `None` if `e` isn't an object with a candidate field.
+/// The engine's matching and the collapse check's both go through it, so the two
+/// agree on what a key is.
+pub(crate) fn key_of<'a, L: Leaf>(e: &'a Node<L>, keys: &[String]) -> Option<Ident<'a, L>> {
     let map = e.as_map()?;
     keys.iter()
         .find_map(|f| map.get_key_value(f).map(|(f, v)| (f.as_str(), v)))
