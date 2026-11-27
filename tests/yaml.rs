@@ -898,9 +898,108 @@ fn refuses_non_string_key_target() {
 
 #[test]
 fn refuses_when_an_edit_would_desync_an_alias() {
-    // Changing a value inside an anchored mapping would change the aliased copy
-    // too; the round-trip backstop catches the mismatch and refuses.
-    yaml_refuses("base: &b\n  x: 1\nuse: *b\n", "base:\n  x: 2\n");
+    // Changing an anchored value would change the aliased copy too; the
+    // round-trip backstop catches the mismatch and refuses.
+    for (target, desired) in [
+        ("base: &b\n  x: 1\nuse: *b\n", "base:\n  x: 2\n"),
+        ("a: &x 1\nb: *x\n", "a: 5\n"),
+    ] {
+        let err = yaml_refuses(target, desired);
+        assert!(
+            err.contains("cannot safely edit this YAML"),
+            "{target:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn refuses_to_prune_an_anchored_node_an_alias_still_uses() {
+    for (target, desired) in [
+        ("a: &x 1\nb: *x\n", "b: 1\n"),
+        ("a: &x\n  p: 1\nb: *x\n", "b:\n  p: 1\n"),
+    ] {
+        let err = yaml_refuses_with_base(target, desired, Some(target));
+        assert!(
+            err.contains("cannot safely edit this YAML"),
+            "{target:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn an_alias_to_a_scalar_is_replaced_like_any_value() {
+    yaml_golden("a: &x 1\nb: *x\n", "b: 2\n", None, "a: &x 1\nb: 2\n");
+}
+
+#[test]
+fn an_alias_to_a_scalar_is_pruned_like_any_value() {
+    yaml_prune_golden("a: &x 1\nb: *x\nc: 3\n", "a: 1\nc: 3\n", "a: &x 1\nc: 3\n");
+    yaml_golden(
+        "a: &x 1\nb: *x\nc: 3\n",
+        "a: 1\n",
+        Some("b: 1\nc: 3\n"),
+        "a: &x 1\n",
+    );
+}
+
+#[test]
+fn an_anchored_node_no_alias_refers_to_is_edited_in_place() {
+    yaml_golden("a: &x 1\nb: 2\n", "a: 5\n", None, "a: &x 5\nb: 2\n");
+    yaml_golden(
+        "a: &x\n  p: 1\nb: 2\n",
+        "a:\n  p: 5\n",
+        None,
+        "a: &x\n  p: 5\nb: 2\n",
+    );
+}
+
+#[test]
+fn an_anchored_node_is_edited_once_its_last_alias_is_pruned() {
+    yaml_golden(
+        "a: &x 1\nb: *x\n",
+        "a: 5\n",
+        Some("a: 1\nb: 1\n"),
+        "a: &x 5\n",
+    );
+}
+
+#[test]
+fn a_re_rendered_entry_is_written_expanded() {
+    yaml_golden(
+        "s:\n  - &x 1\n  - 2\nc: 1\n",
+        "s: [1, 2, 3]\n",
+        None,
+        "s:\n  - 1\n  - 2\n  - 3\nc: 1\n",
+    );
+    yaml_golden(
+        "a: &x 1\nc: 1\n",
+        "a:\n  p: 1\n",
+        None,
+        "a:\n  p: 1\nc: 1\n",
+    );
+    yaml_golden(
+        "a: &x 1\ns:\n  - *x\n  - 2\n",
+        "a: 1\ns: [1, 2, 3]\n",
+        None,
+        "a: &x 1\ns:\n  - 1\n  - 2\n  - 3\n",
+    );
+}
+
+#[test]
+fn desired_anchors_and_aliases_are_written_expanded() {
+    yaml_golden(
+        "c: 1\n",
+        "c: 1\nd: &y {p: 1}\ne: *y\n",
+        None,
+        "c: 1\nd:\n  p: 1\ne:\n  p: 1\n",
+    );
+}
+
+#[test]
+fn anchors_and_aliases_are_kept_when_an_unrelated_key_changes() {
+    let target = "a: &x 1\nb: *x\nc: 1\n";
+    yaml_golden(target, "c: 2\n", None, "a: &x 1\nb: *x\nc: 2\n");
+    yaml_golden(target, "a: 1\nb: 1\nc: 2\n", None, "a: &x 1\nb: *x\nc: 2\n");
 }
 
 #[test]
