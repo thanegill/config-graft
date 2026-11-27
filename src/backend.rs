@@ -342,6 +342,61 @@ fn genuine_repeats<L: Leaf>(
     times.into_values().max()
 }
 
+/// A warning for each scoped `--merge-key` whose path names an array in none of
+/// `inputs`, so it applied to nothing -- most often a key copied from a warning in
+/// its quoted form. A scope anchors at the document root or at a record of a keyed
+/// array, so it counts as used if it names an array from the root or from a record
+/// of an array some merge key could match (one with candidate fields at its path);
+/// anything stricter would also need the merge's own choice of which arrays it
+/// keyed, and a scope whose array exists somewhere is not the mistake this catches.
+fn unused_scopes<'a, L: Leaf + 'a>(
+    merge_keys: &MergeKeys,
+    inputs: impl Iterator<Item = &'a Node<L>>,
+) -> Vec<Warning<L>> {
+    if merge_keys.scopes_as_given.is_empty() {
+        return Vec::new();
+    }
+    let mut anchors: Vec<&Node<L>> = Vec::new();
+    let mut pending: Vec<(&Node<L>, ManagedPath)> = Vec::new();
+    for input in inputs {
+        anchors.push(input);
+        pending.push((input, ManagedPath::new()));
+    }
+    while let Some((node, path)) = pending.pop() {
+        match node {
+            Node::Map(map) => {
+                for (key, value) in map {
+                    let mut child = path.clone();
+                    child.push(key.clone());
+                    pending.push((value, child));
+                }
+            }
+            Node::Array(elements) if !merge_keys.candidates(&path).is_empty() => {
+                for record in elements.iter().filter(|element| element.is_map()) {
+                    anchors.push(record);
+                    pending.push((record, ManagedPath::new()));
+                }
+            }
+            Node::Array(_) | Node::Leaf(_) => {}
+        }
+    }
+    merge_keys
+        .scopes_as_given
+        .iter()
+        .filter(|(path, _)| {
+            !anchors
+                .iter()
+                .any(|anchor| matches!(anchor.get_path(path), Some(Node::Array(_))))
+        })
+        .map(|(path, scope)| Warning {
+            path: path.iter().cloned().map(Step::Key).collect(),
+            kind: WarningKind::UnusedMergeKeyScope {
+                scope: scope.clone(),
+            },
+        })
+        .collect()
+}
+
 /// The diagnostics for values normalization rewrote in one input. Built here rather
 /// than in the codec, which has no idea which of the three inputs it is looking at
 /// -- and so that BASE's, which nobody needs, are never built at all.
@@ -551,6 +606,11 @@ pub(crate) trait Backend {
             merge_keys: Self::merge_keys(args),
         };
         let (result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
+        let inputs = [Some(&target), Some(&desired), base.as_ref()];
+        warnings.splice(
+            0..0,
+            unused_scopes(&opts.merge_keys, inputs.into_iter().flatten()),
+        );
         // Only normalization can make two elements one that an input distinguished,
         // so a run it left alone has nothing to judge.
         let combined = if target_as_read.is_some() || desired_as_read.is_some() {

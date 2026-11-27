@@ -1717,3 +1717,105 @@ fn a_merge_key_identity_escapes_what_a_terminal_would_act_on() {
         "a raw character reached the terminal: {err:?}"
     );
 }
+
+/// Stderr of a JSON run over `target` and `desired` (and `base`, if any) with
+/// `flags`, which must succeed.
+fn json_stderr(target: &str, desired: &str, base: Option<&str>, flags: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let target_path = dir.path().join("t.json");
+    let desired_path = dir.path().join("d.json");
+    let base_path = dir.path().join("b.json");
+    fs::write(&target_path, target).unwrap();
+    fs::write(&desired_path, desired).unwrap();
+    let mut args = vec!["json"];
+    args.extend(flags);
+    args.push(target_path.to_str().unwrap());
+    args.push(desired_path.to_str().unwrap());
+    if let Some(base) = base {
+        fs::write(&base_path, base).unwrap();
+        args.push(base_path.to_str().unwrap());
+    }
+    let out = run(&args);
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{err}");
+    err
+}
+
+/// The warning for an unmatched `--merge-key` scope written `scope`, in JSON.
+fn unused_scope_line(scope: &str) -> String {
+    format!(
+        "config-graft: warning: --merge-key scope `{scope}` names no array in TARGET, \
+         DESIRED or BASE, so it applies to nothing; a key a warning shows quoted \
+         (`x.\"[b]\"`) is written unquoted in a scope (`x.[b]`), and inside a keyed \
+         record a scope starts at the record\n"
+    )
+}
+
+#[test]
+fn a_merge_key_scope_naming_no_array_is_reported() {
+    // The quoted form a warning prints is not how a scope spells the key, so a path
+    // copied from a warning matches nothing; say so rather than merge by value.
+    let target = r#"{"x":{"[b]":[{"id":1,"v":1}]}}"#;
+    let desired = r#"{"x":{"[b]":[{"id":1,"v":2}]}}"#;
+    let err = json_stderr(target, desired, None, &["--merge-key", r#"x."[b]"=id"#]);
+    assert_eq!(err, unused_scope_line(r#"x."[b]""#));
+    // Written unquoted, the same scope names the array and says nothing.
+    let err = json_stderr(target, desired, None, &["--merge-key", "x.[b]=id"]);
+    assert_eq!(err, "");
+    // The same scope given twice is reported once.
+    let err = json_stderr(
+        target,
+        desired,
+        None,
+        &["--merge-key", "nope=id", "--merge-key", "nope=name"],
+    );
+    assert_eq!(err, unused_scope_line("nope"));
+    // Two spellings of one path are reported once too, in the words first given.
+    let err = json_stderr(
+        target,
+        desired,
+        None,
+        &["--merge-key", "q. r=id", "--merge-key", "q.r=name"],
+    );
+    assert_eq!(err, unused_scope_line("q. r"));
+    // A control character the scope holds is escaped, not written to the terminal.
+    let err = json_stderr(target, desired, None, &["--merge-key", "z\u{1b}[31m=id"]);
+    assert_eq!(err, unused_scope_line(r"z\u{1b}[31m"));
+    // A record of an array no merge key can match is not where a scope starts, so
+    // a scope that only names an array there is still reported.
+    let records = r#"{"s":[{"tags":[{"id":1}]}]}"#;
+    let err = json_stderr(records, records, None, &["--merge-key", "tags=id"]);
+    assert_eq!(err, unused_scope_line("tags"));
+}
+
+#[test]
+fn a_merge_key_scope_that_names_an_array_somewhere_is_quiet() {
+    // Inside a keyed record, where the merge starts scopes again.
+    let records = r#"{"s":[{"n":"a","tags":[{"id":1}]}]}"#;
+    let err = json_stderr(
+        records,
+        records,
+        None,
+        &["--merge-key", "s=n", "--merge-key", "tags=id"],
+    );
+    assert_eq!(err, "");
+    // An array only BASE still holds.
+    let err = json_stderr(
+        r#"{"a":1}"#,
+        r#"{"a":2}"#,
+        Some(r#"{"a":1,"gone":[{"id":1}]}"#),
+        &["--merge-key", "gone=id"],
+    );
+    assert_eq!(err, "");
+    // An array only DESIRED holds.
+    let err = json_stderr(
+        r#"{"a":1}"#,
+        r#"{"new":[{"id":1}]}"#,
+        None,
+        &["--merge-key", "new=id"],
+    );
+    assert_eq!(err, "");
+    // An unscoped field names no path, so it is never reported.
+    let err = json_stderr(r#"{"a":1}"#, r#"{"a":2}"#, None, &["--merge-key", "id"]);
+    assert_eq!(err, "");
+}
