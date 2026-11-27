@@ -28,10 +28,14 @@
               ./src
               ./tests
               ./xtask
+              ./docs
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = [ pkgs.installShellFiles ];
+          nativeBuildInputs = [
+            pkgs.installShellFiles
+            pkgs.pandoc
+          ];
           # postBuild, not postInstall: cargoInstallHook deletes target/release (the
           # host artifacts) first, so the xtask would rebuild every dependency.
           postBuild = ''
@@ -39,7 +43,7 @@
             rm target/${pkgs.stdenv.buildPlatform.rust.rustcTargetSpec}/release/xtask
           '';
           postInstall = ''
-            installManPage man/*.1
+            installManPage man/*.1 man/*.7
           '';
           meta.mainProgram = "config-graft";
         };
@@ -85,6 +89,7 @@
             pkgs.rust-analyzer
             pkgs.cargo-llvm-cov
             pkgs.cargo-mutants
+            pkgs.pandoc
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           # cargo-llvm-cov needs the LLVM tools matching rustc (both LLVM 21 here).

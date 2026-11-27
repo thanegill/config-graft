@@ -112,7 +112,7 @@ home.managedJson.".config/app/config.json".settings = {
 - [`docs/arrays.md`](docs/arrays.md): array strategies and `--merge-key` for lists of records.
 - [`docs/directory.md`](docs/directory.md): reconciling a directory tree, with metadata.
 - [`docs/nix-modules.md`](docs/nix-modules.md): every module option, including `cfprefsdDomain` for macOS preferences.
-- `man config-graft` and `man config-graft-<format>`: the command-line reference, installed by the Nix package.
+- `man config-graft` and `man config-graft-<format>`: the command-line reference, installed by the Nix package along with the formats, arrays and directory guides as `man 7 config-graft-formats`, `man 7 config-graft-arrays` and `man 7 config-graft-directory`.
 - [`SPEC.md`](SPEC.md): the specification, and the source of truth for merge semantics.
 - [`CHANGELOG.md`](CHANGELOG.md): what changed in each release.
 
