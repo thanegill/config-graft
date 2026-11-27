@@ -36,33 +36,7 @@ Arrays merge three-way by default; `--array-strategy` and `--merge-key` change t
 
 ## Formats
 
-The merge engine is format-agnostic; **JSON**, Apple **plist**, **YAML**, and **TOML** are supported (plus a **directory** mode, below). The format is chosen by the subcommand (`config-graft json|plist|yaml|toml|directory ...`) and governs every file in the run (TARGET, DESIRED, BASE, and output) — there is no cross-format conversion.
-
-JSON notes:
-
-- Numbers keep their **source spelling**, so a high-precision decimal, an integer larger than `u64`, or an exponent past `f64`'s range round-trips rather than being shortened, turned into `1.2345e29`, or (for the exponent) making the whole file unreadable. They compare by value across every spelling — `10`, `10.0` and `1e1` are one number — so a value the app rewrote in another form still prunes, and a DESIRED spelled differently from TARGET leaves the file alone. Every spelling survives, including an exponent's: `1e1`, `1E2` and `2.50` reach disk exactly as the file wrote them.
-- Output is pretty-printed per `--indent`, preserving key order.
-
-Plist notes:
-
-- Reads accept **both** XML and binary plist. Output **keeps the encoding the target already has** (`--plist-format follow`, the default): binary stays binary, XML stays XML, and a target that is absent, empty or neither is written as canonical XML. `--plist-format xml` and `--plist-format binary` force one.
-- `Date`/`Data`/`Uid` are atomic leaves and round-trip losslessly, with one exception: an XML run floors a `Date` to a whole second. CFPropertyList's XML parser rejects a fractional-second `<date>`, and a date read out of a binary plist — which is what `defaults export` hands over — almost always has one. The floor is applied as each input is read, so TARGET, DESIRED and BASE stay comparable and a managed date key still prunes; every floored date is reported on stderr. A binary target is written as binary, so a date the app owns is normally never floored at all — reaching this needs `--plist-format xml`, or a date that was in an XML file to begin with.
-- Flooring can make two instants under a second apart into one value. Where the merge then keeps only one, the run **says so and writes anyway** — the same normalization is what keeps TARGET comparable to BASE, so refusing would strand the run rather than protect it. An array config-graft does not manage is copied through untouched and never trips it.
-- An XML run **refuses** (exit 1, target untouched) when it would *introduce* a string or key holding a character an XML plist cannot carry at all: a C0 control other than tab, newline or carriage return — such as the ESC `0x1B` separators in `NSUserKeyEquivalents`. macOS tolerates those bytes, so writing them would produce a file that loads on macOS and is invalid everywhere else. A value the file already holds is passed through untouched rather than refused, so a run that changes nothing never fails on a file macOS itself wrote — but that leaves a file no conforming parser accepts, so each one is reported on stderr. This applies only when the target is already XML; rewriting a **binary** plist as XML writes every byte afresh, so an unrepresentable value there is refused — reachable only by forcing `--plist-format xml`, since a binary target is otherwise written as binary. A file counts as XML however its prologue opens: comments and processing instructions ahead of the `<?xml` declaration are read the same way every plist parser reads them. When a value is refused because nothing could carry over, the error says which it was — a binary target, or one not recognized as XML. A carriage return is written as `&#13;`, which XML's line-ending normalization leaves alone, so it survives.
-- A **binary** write sidesteps all of that: nothing is floored and no byte is out of reach, so values pass through as they stand. Since a binary target is written as binary by default, that is already what a macOS Preferences file gets.
-- plist has no `null`. `--indent` is exposed only by the `json` subcommand.
-
-YAML notes:
-
-- **Comments, blank lines, and formatting are preserved** on the parts of the file config-graft doesn't change — it edits the existing text in place rather than re-emitting it. Only an empty/first-apply target is written canonically.
-- For safety it edits only the well-behaved subset of YAML and **refuses (exit 1, leaving the file untouched) rather than risk corruption** on custom tags, multi-document streams, non-string keys, a non-mapping root, an edit that would change what an alias resolves to, or editing inside an alias to a non-empty mapping or sequence. Anchors and aliases are otherwise kept as written, except in an entry config-graft re-renders (a changed sequence, a scalar turned into a collection), which is written expanded. Every write is verified to round-trip back to the intended result before it lands.
-- `--indent` is JSON-only; passing it with YAML is an error.
-
-TOML notes:
-
-- Like YAML, **comments, blank lines, and formatting are preserved** on the parts config-graft doesn't change — it edits the existing document in place (via `toml_edit`) rather than re-emitting it. Only an empty/first-apply target is written canonically. Every write is verified to round-trip back to the intended result before it lands, and **refuses (exit 1, leaving the file untouched) rather than risk corruption** on an edit it can't make safely.
-- TOML date-times round-trip losslessly as atomic leaves; TOML has no `null`.
-- `--indent` is JSON-only; passing it with TOML is an error.
+JSON, plist, YAML and TOML each write differently: see [`docs/formats.md`](docs/formats.md).
 
 ## Nix modules
 
