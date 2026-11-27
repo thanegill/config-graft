@@ -22,7 +22,7 @@ use crate::reconcile::{
     key_of, merge_key_fields, reconcile, ArrayStrategy, ManagedPath, MergeKeys, Options,
 };
 use crate::value::{Leaf, Node};
-use crate::warning::{DiagnosticPath, Source, Step, Warning};
+use crate::warning::{DiagnosticPath, Source, Step, Warning, WarningKind};
 use crate::RunArgs;
 
 /// Output preferences as the flags asked for them, before any format settles what
@@ -307,15 +307,15 @@ fn lossy_collapses<L: Leaf>(arrays: &[CombinedArray<'_, L>]) -> Vec<Warning<L>> 
     reported.sort();
     reported
         .into_iter()
-        .map(
-            |(path, key, distinct, kept, because)| Warning::ArrayCollapsed {
-                path,
+        .map(|(path, key, distinct, kept, because)| Warning {
+            path,
+            kind: WarningKind::ArrayCollapsed {
                 key,
                 distinct,
                 kept,
                 because,
             },
-        )
+        })
         .collect()
 }
 
@@ -351,20 +351,24 @@ fn normalization_warnings<L: Leaf>(rewritten: &[Normalized<L>], source: Source) 
     let mut warnings: Vec<Warning<L>> = rewritten
         .iter()
         .take(SHOWN)
-        .map(|n| Warning::ValueNormalized {
+        .map(|n| Warning {
             path: n.path.clone(),
-            source,
-            from: n.original.to_string(),
-            to: n.value.to_string(),
-            because: n.because,
+            kind: WarningKind::ValueNormalized {
+                source,
+                from: n.original.to_string(),
+                to: n.value.to_string(),
+                because: n.because,
+            },
         })
         .collect();
     if let Some(rest) = rewritten.len().checked_sub(SHOWN).filter(|n| *n > 0) {
-        warnings.push(Warning::MoreValuesNormalized {
+        warnings.push(Warning {
             path: rewritten[SHOWN].path.clone(),
-            source,
-            more: rest,
-            because: rewritten[SHOWN].because,
+            kind: WarningKind::MoreValuesNormalized {
+                source,
+                more: rest,
+                because: rewritten[SHOWN].because,
+            },
         });
     }
     warnings
@@ -566,9 +570,8 @@ pub(crate) trait Backend {
         } else {
             Vec::new()
         };
-        warnings.retain_mut(|w| match w {
-            Warning::DuplicateCollapsed {
-                path,
+        warnings.retain_mut(|w| match &mut w.kind {
+            WarningKind::DuplicateCollapsed {
                 source,
                 matched,
                 key,
@@ -577,7 +580,7 @@ pub(crate) trait Backend {
                 ..
             } => {
                 let identity = (key.as_deref(), &*matched);
-                if let Some(repeats) = genuine_repeats(&combined, path, *source, identity) {
+                if let Some(repeats) = genuine_repeats(&combined, &w.path, *source, identity) {
                     *held = repeats;
                 }
                 // `value_duplicates` reports a loss, so there has to be one: the
@@ -780,5 +783,56 @@ impl RunArgs {
             owner: !self.no_owner,
             xattrs: self.xattrs.unwrap_or_default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::json::JsonLeaf;
+
+    fn rendered_normalization_warnings(count: i64) -> Vec<String> {
+        let rewritten: Vec<Normalized<JsonLeaf>> = (0..count)
+            .map(|i| {
+                let mut path = DiagnosticPath::new();
+                path.prepend(Step::Key(format!("k{i}")));
+                Normalized {
+                    path,
+                    original: Node::Leaf(JsonLeaf::Int(i)),
+                    value: Node::Leaf(JsonLeaf::Int(0)),
+                    because: if i == 5 {
+                        "the sixth"
+                    } else {
+                        "an earlier one"
+                    },
+                }
+            })
+            .collect();
+        normalization_warnings(&rewritten, Source::Target)
+            .iter()
+            .map(|warning| warning.render("."))
+            .collect()
+    }
+
+    #[test]
+    fn normalization_warnings_show_five_then_summarise_the_rest() {
+        let per_value_lines: Vec<String> = (0..5)
+            .map(|i| format!("`k{i}` in TARGET: {i} was read as 0 because an earlier one"))
+            .collect();
+        assert_eq!(rendered_normalization_warnings(5), per_value_lines);
+
+        let six = rendered_normalization_warnings(6);
+        assert_eq!(six[..5], per_value_lines);
+        assert_eq!(
+            six[5..],
+            ["1 further values in TARGET were read the same way because the sixth"]
+        );
+
+        let seven = rendered_normalization_warnings(7);
+        assert_eq!(seven[..5], per_value_lines);
+        assert_eq!(
+            seven[5..],
+            ["2 further values in TARGET were read the same way because the sixth"]
+        );
     }
 }

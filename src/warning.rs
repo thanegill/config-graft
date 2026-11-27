@@ -85,18 +85,21 @@ impl Source {
 }
 
 /// Something a run changed about a value beyond applying the managed edits.
-pub enum Warning<L: Leaf> {
+pub struct Warning<L: Leaf> {
+    /// Where the warning points.
+    pub path: DiagnosticPath,
+    pub kind: WarningKind<L>,
+}
+
+/// What a [`Warning`] reports.
+pub enum WarningKind<L: Leaf> {
     /// A `merge` array where TARGET and DESIRED reordered the same elements
     /// contradictorily (a cross-over move). The order is still resolved
     /// deterministically; this records that it was resolved, not agreed.
-    ContradictoryReorder {
-        path: DiagnosticPath,
-        elements: Vec<Node<L>>,
-    },
+    ContradictoryReorder { elements: Vec<Node<L>> },
     /// One input array held the same identity twice. Membership is a set, so the
     /// repeats cannot all survive -- and where the value was also pruned, none do.
     DuplicateCollapsed {
-        path: DiagnosticPath,
         source: Source,
         /// What repeated: an element's compact value, or a `[field=value]`
         /// selector when the array is matched by merge key.
@@ -112,11 +115,10 @@ pub enum Warning<L: Leaf> {
         held: usize,
         kept: usize,
     },
-    /// The tail of a run of `ValueNormalized`s at one path, summarised rather than
-    /// printed one by one -- a `defaults export` domain stores every date as an
-    /// `f64`, so listing each would bury every other diagnostic.
+    /// The tail of a run of `ValueNormalized`s, summarised rather than printed one
+    /// by one -- a `defaults export` domain stores every date as an `f64`, so
+    /// listing each would bury every other diagnostic.
     MoreValuesNormalized {
-        path: DiagnosticPath,
         source: Source,
         more: usize,
         because: &'static str,
@@ -125,7 +127,6 @@ pub enum Warning<L: Leaf> {
     /// read with one that it can -- so the reconcile, `--diff` and the write all
     /// agree. `because` completes the sentence `... because <because>`.
     ValueNormalized {
-        path: DiagnosticPath,
         source: Source,
         from: String,
         to: String,
@@ -134,14 +135,12 @@ pub enum Warning<L: Leaf> {
     /// A byte the output encoding cannot carry, kept because the file already had
     /// it -- so the result loads on macOS but in no conforming parser.
     NonConformingByteKept {
-        path: DiagnosticPath,
         character: char,
         because: &'static str,
     },
     /// Normalization made array elements (or, under a merge key, their keys) equal
     /// that an input distinguished, and membership is a set, so fewer survived.
     ArrayCollapsed {
-        path: DiagnosticPath,
         /// The `[field=value]` the collapsed records now share, when the array
         /// matches its records by merge key; `None` when it matches by value.
         key: Option<String>,
@@ -152,37 +151,12 @@ pub enum Warning<L: Leaf> {
 }
 
 impl<L: Leaf> Warning<L> {
-    /// The path this warning points at.
-    pub fn path(&self) -> &DiagnosticPath {
-        match self {
-            Warning::ContradictoryReorder { path, .. }
-            | Warning::DuplicateCollapsed { path, .. }
-            | Warning::ValueNormalized { path, .. }
-            | Warning::MoreValuesNormalized { path, .. }
-            | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
-        }
-    }
-
-    /// The same, mutably, so a caller can extend it as the warning bubbles up out
-    /// of a subtree and gains its parent key at each level.
-    pub fn path_mut(&mut self) -> &mut DiagnosticPath {
-        match self {
-            Warning::ContradictoryReorder { path, .. }
-            | Warning::DuplicateCollapsed { path, .. }
-            | Warning::ValueNormalized { path, .. }
-            | Warning::MoreValuesNormalized { path, .. }
-            | Warning::NonConformingByteKept { path, .. }
-            | Warning::ArrayCollapsed { path, .. } => path,
-        }
-    }
-
     /// The message body, without the `config-graft: warning: ` prefix. `sep` is
     /// the format's key-path separator (`.`, or `:` for plist, `/` for a tree).
     pub fn render(&self, sep: &str) -> String {
-        let at = self.path().render(sep);
-        match self {
-            Warning::ContradictoryReorder { elements, .. } => {
+        let at = self.path.render(sep);
+        match &self.kind {
+            WarningKind::ContradictoryReorder { elements } => {
                 let elements = fmt::from_fn(|f| write_separated(f, elements, ", ", |e| e));
                 format!(
                     "array `{at}` had a contradictory reorder of [{elements}] between \
@@ -190,7 +164,7 @@ impl<L: Leaf> Warning<L> {
                      preferred)"
                 )
             }
-            Warning::DuplicateCollapsed {
+            WarningKind::DuplicateCollapsed {
                 source,
                 identity,
                 held,
@@ -206,52 +180,46 @@ impl<L: Leaf> Warning<L> {
                     n => format!("{n} are"),
                 }
             ),
-            Warning::NonConformingByteKept {
-                character, because, ..
-            } => format!(
+            WarningKind::NonConformingByteKept { character, because } => format!(
                 "`{at}` holds U+{:04X}, which XML 1.0 cannot represent; the file \
                  already held it, so it is written through unchanged and the result \
                  will not load in a conforming XML parser -- {because}",
                 *character as u32
             ),
-            Warning::ArrayCollapsed {
+            WarningKind::ArrayCollapsed {
                 key: None,
                 distinct,
                 kept,
                 because,
-                ..
             } => format!(
                 "array `{at}` held {distinct} values that normalizing made \
                  identical, and membership is a set, so only {kept} survived; \
                  {because}"
             ),
-            Warning::ArrayCollapsed {
+            WarningKind::ArrayCollapsed {
                 key: Some(key),
                 distinct,
                 kept,
                 because,
-                ..
             } => format!(
                 "array `{at}` held {distinct} keys that normalizing made {key}, and \
                  records sharing a key are merged, so only {kept} survived; \
                  {because}"
             ),
-            Warning::MoreValuesNormalized {
+            WarningKind::MoreValuesNormalized {
                 source,
                 more,
                 because,
-                ..
             } => format!(
                 "{more} further values in {} were read the same way because \
                  {because}",
                 source.label()
             ),
-            Warning::ValueNormalized {
+            WarningKind::ValueNormalized {
                 source,
                 from,
                 to,
                 because,
-                ..
             } => format!(
                 "`{at}` in {}: {from} was read as {to} because {because}",
                 source.label()
