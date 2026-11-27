@@ -303,7 +303,7 @@ fn a_toml_syntax_error_reads_on_one_line() {
 
     fs::write(&desired, "\"a\\nb\" = 1\n\"a\\nb\" = 2\n").unwrap();
     let err = stderr_of(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);
-    assert!(err.contains("duplicate key `a\\u{a}b`"), "got: {err}");
+    assert!(err.contains("duplicate key `a\\nb`"), "got: {err}");
 
     fs::write(&desired, "a = ").unwrap();
     let err = stderr_of(&["toml", target.to_str().unwrap(), desired.to_str().unwrap()]);

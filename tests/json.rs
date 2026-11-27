@@ -971,7 +971,7 @@ fn a_newline_inside_a_string_is_named_in_a_parse_error() {
     fs::write(&desired, "{\"a\": \"x\n").unwrap();
     let err = stderr_of(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(
-        err.contains("(line 1, column 9: unexpected character `\\u{a}`)"),
+        err.contains("(line 1, column 9: unexpected character `\\n`)"),
         "got: {err:?}"
     );
 }
@@ -1680,5 +1680,40 @@ fn diff_leaves_an_unchanged_empty_object_out() {
         br#"{"b":{},"x":2}"#,
         &[],
         "~ x: 1 => 2\n",
+    );
+}
+
+#[test]
+fn a_merge_key_identity_escapes_what_a_terminal_would_act_on() {
+    // The duplicate warning names the record by its key, as a path names a keyed
+    // record, so a bidi override or a C1 control in the key value is escaped there
+    // too rather than reaching the terminal.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("t.json");
+    let desired = dir.path().join("d.json");
+    fs::write(
+        &target,
+        r#"{"s":[{"n":"a\u202eb\u0085","v":1},{"n":"a\u202eb\u0085","v":2}]}"#,
+    )
+    .unwrap();
+    fs::write(&desired, r#"{"s":[{"n":"z"}]}"#).unwrap();
+
+    let out = run(&[
+        "json",
+        "--merge-key",
+        "n",
+        "--stdout",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains(r#"holds [n="a\u202eb\u0085"] 2 times"#),
+        "stderr was: {err}"
+    );
+    assert!(
+        !err.contains(['\u{202e}', '\u{85}']),
+        "a raw character reached the terminal: {err:?}"
     );
 }

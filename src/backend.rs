@@ -21,6 +21,7 @@ use crate::format::{read_file, Format, FormatKind, Normalization, Normalized, Wr
 use crate::reconcile::{
     key_of, merge_key_fields, reconcile, ArrayStrategy, ManagedPath, MergeKeys, Options,
 };
+use crate::render::render_selector;
 use crate::value::{Leaf, Node};
 use crate::warning::{DiagnosticPath, Source, Step, Warning, WarningKind};
 use crate::RunArgs;
@@ -298,7 +299,7 @@ fn lossy_collapses<L: Leaf>(arrays: &[CombinedArray<'_, L>]) -> Vec<Warning<L>> 
                 continue;
             }
             let (field, value) = identity;
-            let key = field.map(|field| format!("[{field}={value}]"));
+            let key = field.map(|field| render_selector(field, value));
             reported.push((array.path.clone(), key, distinct.len(), kept, because));
         }
     }

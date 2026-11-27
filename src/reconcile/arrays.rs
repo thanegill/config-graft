@@ -8,6 +8,7 @@
 //! the matched records.
 
 use super::{reconcile, ArrayStrategy, ManagedPath, Options};
+use crate::render::render_selector;
 use crate::value::{Leaf, Node};
 use crate::warning::{DiagnosticPath, Source, Step, Warning, WarningKind};
 use std::collections::{HashMap, HashSet};
@@ -269,7 +270,7 @@ fn key_duplicates<L: Leaf>(
             path: DiagnosticPath::new(),
             kind: WarningKind::DuplicateCollapsed {
                 source,
-                identity: format!("[{field}={value}]"),
+                identity: render_selector(field, value),
                 matched: (*value).clone(),
                 key: Some(field.clone()),
                 held: held[ident],

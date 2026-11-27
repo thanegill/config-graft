@@ -12,11 +12,12 @@
 //! byte-oriented [`Format`] trait -- it provides its own tree reader/writer and
 //! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::error::Error;
+use crate::render::escape_debug;
 use crate::value::{Leaf, Node};
 use crate::warning::{DiagnosticPath, Warning};
 
@@ -298,37 +299,10 @@ impl ParseFailure {
     }
 }
 
-/// `message` with every control character, and every invisible formatting
-/// character a terminal may act on (bidi marks, overrides and isolates,
-/// zero-width and soft-hyphen characters, line and paragraph separators, the
-/// byte-order mark, tag characters), escaped as `\u{1b}`, so a file cannot
-/// write to the terminal through a refusal.
+/// `message` on one line with nothing in it that could write to the terminal
+/// through a refusal.
 fn printable(message: &str) -> String {
-    let mut out = String::with_capacity(message.len());
-    for c in message.trim().chars() {
-        if c.is_control() || is_invisible_format(c) {
-            write!(out, "\\u{{{:x}}}", c as u32).expect("writing to a String");
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn is_invisible_format(c: char) -> bool {
-    matches!(
-        c,
-        '\u{ad}'
-            | '\u{61c}'
-            | '\u{180e}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{feff}'
-            | '\u{fff9}'..='\u{fffb}'
-            | '\u{e0001}'
-            | '\u{e0020}'..='\u{e007f}'
-    )
+    escape_debug(message.trim())
 }
 
 /// The `serialize` YAML and TOML share: an existing target is edited in place so
@@ -410,7 +384,7 @@ mod tests {
     fn a_syntax_message_is_one_printable_line() {
         let at = |message: &str| detail(ParseFailure::syntax_at("", 0, message));
         assert_eq!(at(""), "line 1, column 1");
-        assert_eq!(at("first\nsecond\n"), "line 1, column 1: first\\u{a}second");
+        assert_eq!(at("first\nsecond\n"), "line 1, column 1: first\\nsecond");
         assert_eq!(at("a\u{202e}b"), "line 1, column 1: a\\u{202e}b");
         assert_eq!(
             at("\u{ad}\u{61c}\u{180e}\u{200b}\u{2028}\u{206f}\u{fff9}\u{fffb}\u{e0001}\u{e0020}\u{e007f}"),
@@ -418,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             at("\u{2027}\u{e0080}"),
-            "line 1, column 1: \u{2027}\u{e0080}"
+            "line 1, column 1: \u{2027}\\u{e0080}"
         );
         assert_eq!(at("key \u{1b}[31m"), "line 1, column 1: key \\u{1b}[31m");
         assert_eq!(at("\u{feff}"), "line 1, column 1: \\u{feff}");

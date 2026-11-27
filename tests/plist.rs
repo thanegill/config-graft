@@ -2557,3 +2557,43 @@ fn diff_shows_an_empty_dict_added() {
         "+ a:b = {}\n",
     );
 }
+
+#[test]
+fn a_keyed_collapse_escapes_what_a_terminal_would_act_on() {
+    // The collapse names the key the records now share as a selector, so a bidi
+    // override in the merge-key field is escaped there as it is in a path.
+    let override_ = char::from_u32(0x202e).unwrap();
+    let field = format!("i{override_}d");
+    let record = |nanos, other: &str| {
+        pdict(vec![
+            (field.as_str(), instant(1_000_000, nanos)),
+            (other, pint(1)),
+        ])
+    };
+    let err = xml_run(
+        "escaped-field",
+        pdict(vec![(
+            "l",
+            plist::Value::Array(vec![record(300_000_000, "a"), record(700_000_000, "b")]),
+        )]),
+        pdict(vec![(
+            "l",
+            plist::Value::Array(vec![pdict(vec![(field.as_str(), instant(5, 0))])]),
+        )]),
+        None,
+        &["--merge-key", &field],
+    );
+    assert_eq!(
+        collapses(&err),
+        [format!(
+            "config-graft: warning: array `l` held 2 keys that normalizing made \
+             [i\\u{{202e}}d={FLOORED}], and records sharing a key are merged, so only 1 \
+             survived; {FLOOR}"
+        )],
+        "stderr was: {err}"
+    );
+    assert!(
+        !err.contains(override_),
+        "a raw override reached the terminal: {err:?}"
+    );
+}
