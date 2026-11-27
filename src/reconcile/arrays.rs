@@ -447,41 +447,8 @@ fn gts_order(
         row.dedup();
     }
 
-    // Step 7: strongly connected components. n is small (config arrays), so use a
-    // Warshall reachability closure and group by mutual reachability.
-    let mut reach = vec![vec![false; n]; n];
-    for (v, row) in reach.iter_mut().enumerate() {
-        row[v] = true;
-    }
-    for &(a, b) in &edges {
-        reach[a][b] = true;
-    }
-    for k in 0..n {
-        let row_k = reach[k].clone();
-        for row_i in reach.iter_mut() {
-            if row_i[k] {
-                for (j, &reachable) in row_k.iter().enumerate() {
-                    if reachable {
-                        row_i[j] = true;
-                    }
-                }
-            }
-        }
-    }
-    let mut comp = vec![usize::MAX; n];
-    let mut ncomp = 0;
-    for v in 0..n {
-        if comp[v] != usize::MAX {
-            continue;
-        }
-        comp[v] = ncomp;
-        for u in (v + 1)..n {
-            if comp[u] == usize::MAX && reach[v][u] && reach[u][v] {
-                comp[u] = ncomp;
-            }
-        }
-        ncomp += 1;
-    }
+    // Step 7: strongly connected components.
+    let (comp, ncomp) = strongly_connected_components(&adj);
 
     // Condensation: members, cross-component edges, in-degrees.
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); ncomp];
@@ -534,6 +501,51 @@ fn gts_order(
         }
     }
     (out, conflict_ids)
+}
+
+/// Label every vertex of the graph `adj` with its strongly connected component,
+/// numbering the components in order of their smallest vertex. Returns the labels
+/// and the number of components.
+fn strongly_connected_components(adj: &[Vec<usize>]) -> (Vec<usize>, usize) {
+    // n is small (config arrays), so use a Warshall reachability closure and group
+    // by mutual reachability.
+    let n = adj.len();
+    let mut reach = vec![vec![false; n]; n];
+    for (v, row) in reach.iter_mut().enumerate() {
+        row[v] = true;
+    }
+    for (a, successors) in adj.iter().enumerate() {
+        for &b in successors {
+            reach[a][b] = true;
+        }
+    }
+    for k in 0..n {
+        let row_k = reach[k].clone();
+        for row_i in reach.iter_mut() {
+            if row_i[k] {
+                for (j, &reachable) in row_k.iter().enumerate() {
+                    if reachable {
+                        row_i[j] = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut comp = vec![usize::MAX; n];
+    let mut ncomp = 0;
+    for v in 0..n {
+        if comp[v] != usize::MAX {
+            continue;
+        }
+        comp[v] = ncomp;
+        for u in (v + 1)..n {
+            if comp[u] == usize::MAX && reach[v][u] && reach[u][v] {
+                comp[u] = ncomp;
+            }
+        }
+        ncomp += 1;
+    }
+    (comp, ncomp)
 }
 
 type Ident<L> = (String, Node<L>);
