@@ -65,12 +65,6 @@ impl FromIterator<(String, Vec<u8>)> for FsAttrs {
     }
 }
 
-impl FsAttrs {
-    fn new() -> Self {
-        FsAttrs(BTreeMap::new())
-    }
-}
-
 /// The `mode, uid:gid[, xattr[...]]` summary for `--diff`. Used for a file leaf
 /// and for a directory's own metadata.
 impl fmt::Display for FsAttrs {
@@ -320,7 +314,7 @@ pub fn read_tree(
             let meta = if manage_root {
                 FsAttrs::read(path, &m, policy)
             } else {
-                FsAttrs::new()
+                FsAttrs::default()
             };
             Ok(Some(read_dir(path, meta, policy, 0)?))
         }
@@ -513,7 +507,7 @@ impl FsAttrs {
     /// no `xattr:*` entries. (Applying them, by contrast, is strict -- see
     /// [`FsAttrs::apply`].)
     fn read(path: &Path, meta: &fs::Metadata, policy: AttrPolicy) -> FsAttrs {
-        let mut attrs = FsAttrs::new();
+        let mut attrs = FsAttrs::default();
         attrs.insert(
             "mode".to_string(),
             format!("{:o}", meta.permissions().mode() & 0o7777).into_bytes(),
@@ -1104,10 +1098,7 @@ impl PathExt for Path {
         let mut file = fs::File::open(self).map_err(|e| Error::read(self, e))?;
         let mut hasher = Sha256::new();
         io::copy(&mut file, &mut hasher).map_err(|e| Error::read(self, e))?;
-        let out = hasher.finalize();
-        let mut digest = [0u8; 32];
-        digest.copy_from_slice(&out);
-        Ok(digest)
+        Ok(hasher.finalize().into())
     }
 
     fn ensure_root(&self) -> Result<(), Error> {
@@ -1218,8 +1209,7 @@ mod tests {
     fn leaf(source: &str, contents: &str, attrs: FsAttrs) -> FsLeaf {
         let mut hasher = Sha256::new();
         hasher.update(contents.as_bytes());
-        let mut digest = [0u8; 32];
-        digest.copy_from_slice(&hasher.finalize());
+        let digest = hasher.finalize().into();
         FsLeaf::File {
             source: PathBuf::from(source),
             len: contents.len() as u64,
@@ -1325,7 +1315,7 @@ mod tests {
         let stray = Node::Map(
             [(
                 "f".to_string(),
-                Node::Leaf(FsLeaf::DirectoryAttributes(FsAttrs::new())),
+                Node::Leaf(FsLeaf::DirectoryAttributes(FsAttrs::default())),
             )]
             .into_iter()
             .collect(),
