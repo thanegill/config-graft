@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 config-graft = { path = ".." }
+clap = "4"
 clap_mangen = "0.2"
