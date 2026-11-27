@@ -21,10 +21,10 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Format
-        run: nix develop --command cargo fmt -- --check
+        run: nix develop --command cargo fmt --all -- --check
 
       - name: Clippy
-        run: nix develop --command cargo clippy --all-targets -- -D warnings
+        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: nix develop --command cargo test

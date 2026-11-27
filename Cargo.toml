@@ -6,6 +6,9 @@ rust-version = "1.93"
 description = "Three-way reconcile for app-owned JSON, plist, YAML, and TOML files"
 license = "MIT"
 
+[workspace]
+members = ["xtask"]
+
 [dependencies]
 json-syntax = "0.12"
 clap = { version = "4", features = ["derive"] }

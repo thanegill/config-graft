@@ -27,9 +27,20 @@
               ./Cargo.lock
               ./src
               ./tests
+              ./xtask
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [ pkgs.installShellFiles ];
+          # postBuild, not postInstall: cargoInstallHook deletes target/release (the
+          # host artifacts) first, so the xtask would rebuild every dependency.
+          postBuild = ''
+            cargo run --frozen --profile release --target ${pkgs.stdenv.buildPlatform.rust.rustcTargetSpec} --package xtask -- man man
+            rm target/${pkgs.stdenv.buildPlatform.rust.rustcTargetSpec}/release/xtask
+          '';
+          postInstall = ''
+            installManPage man/*.1
+          '';
           meta.mainProgram = "config-graft";
         };
       });
