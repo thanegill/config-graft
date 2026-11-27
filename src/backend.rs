@@ -786,3 +786,54 @@ impl RunArgs {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::format::json::JsonLeaf;
+
+    fn rendered_normalization_warnings(count: i64) -> Vec<String> {
+        let rewritten: Vec<Normalized<JsonLeaf>> = (0..count)
+            .map(|i| {
+                let mut path = DiagnosticPath::new();
+                path.prepend(Step::Key(format!("k{i}")));
+                Normalized {
+                    path,
+                    original: Node::Leaf(JsonLeaf::Int(i)),
+                    value: Node::Leaf(JsonLeaf::Int(0)),
+                    because: if i == 5 {
+                        "the sixth"
+                    } else {
+                        "an earlier one"
+                    },
+                }
+            })
+            .collect();
+        normalization_warnings(&rewritten, Source::Target)
+            .iter()
+            .map(|warning| warning.render("."))
+            .collect()
+    }
+
+    #[test]
+    fn normalization_warnings_show_five_then_summarise_the_rest() {
+        let per_value_lines: Vec<String> = (0..5)
+            .map(|i| format!("`k{i}` in TARGET: {i} was read as 0 because an earlier one"))
+            .collect();
+        assert_eq!(rendered_normalization_warnings(5), per_value_lines);
+
+        let six = rendered_normalization_warnings(6);
+        assert_eq!(six[..5], per_value_lines);
+        assert_eq!(
+            six[5..],
+            ["1 further values in TARGET were read the same way because the sixth"]
+        );
+
+        let seven = rendered_normalization_warnings(7);
+        assert_eq!(seven[..5], per_value_lines);
+        assert_eq!(
+            seven[5..],
+            ["2 further values in TARGET were read the same way because the sixth"]
+        );
+    }
+}
