@@ -289,7 +289,7 @@ fn deep_merge<L: Leaf>(
                         let sub = deep_merge(tv, dv, bv, opts, path);
                         path.pop();
                         for mut c in sub {
-                            c.path_mut().prepend(Step::Key(k.clone()));
+                            c.path.prepend(Step::Key(k.clone()));
                             warnings.push(c);
                         }
                     } else {
@@ -327,6 +327,7 @@ mod tests {
     use super::*;
     use crate::format::json::JsonLeaf;
     use crate::format::Json;
+    use crate::warning::WarningKind;
     use json_syntax::{Parse, Print};
     use serde_json::{json, Value};
 
@@ -1149,7 +1150,7 @@ mod tests {
 
     fn conflict_paths(t: Value, d: Value, b: Option<Value>, arrays: ArrayStrategy) -> Vec<String> {
         let (_result, conflicts) = reconciled_with(t, d, b, &options(arrays, &[]));
-        conflicts.iter().map(|c| c.path().render(".")).collect()
+        conflicts.iter().map(|c| c.path.render(".")).collect()
     }
 
     fn keyed_conflict_paths(
@@ -1160,7 +1161,7 @@ mod tests {
     ) -> Vec<String> {
         let opts = options(ArrayStrategy::Merge, global_keys);
         let (_result, conflicts) = reconciled_with(target, desired, base, &opts);
-        conflicts.iter().map(|c| c.path().render(".")).collect()
+        conflicts.iter().map(|c| c.path.render(".")).collect()
     }
 
     // ----- duplicate collapse -----
@@ -1278,7 +1279,7 @@ mod tests {
             &Options::default(),
         );
         assert_eq!(conflicts.len(), 1);
-        let Warning::ContradictoryReorder { elements, .. } = &conflicts[0] else {
+        let WarningKind::ContradictoryReorder { elements } = &conflicts[0].kind else {
             panic!(
                 "expected a contradictory-reorder warning, got: {}",
                 conflicts[0].render(".")

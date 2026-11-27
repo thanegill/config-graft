@@ -9,7 +9,7 @@
 
 use super::{reconcile, ArrayStrategy, ManagedPath, Options};
 use crate::value::{Leaf, Node};
-use crate::warning::{DiagnosticPath, Source, Step, Warning};
+use crate::warning::{DiagnosticPath, Source, Step, Warning, WarningKind};
 use std::collections::{HashMap, HashSet};
 
 /// Combine a TARGET array with a DESIRED array per `opts.arrays`, returning the
@@ -184,7 +184,7 @@ fn keyed_merge<L: Leaf>(
                     value: key_value.to_string(),
                 };
                 for mut c in conflicts {
-                    c.path_mut().prepend(selector.clone());
+                    c.path.prepend(selector.clone());
                     nested.push(c);
                 }
                 m
@@ -229,14 +229,16 @@ fn value_duplicates<L: Leaf>(seq: &[Node<L>], out: &[Node<L>], source: Source) -
         if kept >= held[element] {
             continue;
         }
-        warnings.push(Warning::DuplicateCollapsed {
+        warnings.push(Warning {
             path: DiagnosticPath::new(),
-            source,
-            identity: element.to_string(),
-            matched: element.clone(),
-            key: None,
-            held: held[element],
-            kept,
+            kind: WarningKind::DuplicateCollapsed {
+                source,
+                identity: element.to_string(),
+                matched: element.clone(),
+                key: None,
+                held: held[element],
+                kept,
+            },
         });
     }
     warnings
@@ -263,17 +265,19 @@ fn key_duplicates<L: Leaf>(
             continue;
         }
         let (field, value) = ident;
-        warnings.push(Warning::DuplicateCollapsed {
+        warnings.push(Warning {
             path: DiagnosticPath::new(),
-            source,
-            identity: format!("[{field}={value}]"),
-            matched: (*value).clone(),
-            key: Some(field.clone()),
-            held: held[ident],
-            kept: out
-                .iter()
-                .filter(|kept| identity(kept, keys).as_ref() == Some(ident))
-                .count(),
+            kind: WarningKind::DuplicateCollapsed {
+                source,
+                identity: format!("[{field}={value}]"),
+                matched: (*value).clone(),
+                key: Some(field.clone()),
+                held: held[ident],
+                kept: out
+                    .iter()
+                    .filter(|kept| identity(kept, keys).as_ref() == Some(ident))
+                    .count(),
+            },
         });
     }
     warnings
@@ -313,9 +317,11 @@ fn assemble<L: Leaf>(
     let conflicts = if conflict_ids.is_empty() {
         Vec::new()
     } else {
-        vec![Warning::ContradictoryReorder {
+        vec![Warning {
             path: DiagnosticPath::new(),
-            elements: conflict_ids.iter().map(|&i| merged[i].clone()).collect(),
+            kind: WarningKind::ContradictoryReorder {
+                elements: conflict_ids.iter().map(|&i| merged[i].clone()).collect(),
+            },
         }]
     };
     (out, conflicts)

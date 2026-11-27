@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::reconcile::ManagedPath;
 use crate::render::{quote, render_f64};
 use crate::value::{CanonicalF64, Leaf, Node};
-use crate::warning::{DiagnosticPath, Step, Warning};
+use crate::warning::{DiagnosticPath, Step, Warning, WarningKind};
 
 /// Apple plist codec.
 pub struct Plist;
@@ -493,10 +493,12 @@ fn check_xml_representable(
             &carried.values
         };
         if side.contains(text) {
-            kept.push(Warning::NonConformingByteKept {
+            kept.push(Warning {
                 path: path.clone(),
-                character,
-                because: XML_UNREPRESENTABLE_REMEDY,
+                kind: WarningKind::NonConformingByteKept {
+                    character,
+                    because: XML_UNREPRESENTABLE_REMEDY,
+                },
             });
             return Ok(());
         }
