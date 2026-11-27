@@ -206,9 +206,10 @@ pub struct WriteOpts {
 pub trait ValueCodec {
     type Leaf: Leaf;
     type Value<'a>;
-    /// Native → `Node`. An `Err` means "refuse" -- only YAML produces one (for
-    /// non-string keys, tags, etc.); JSON and plist are total, and TOML's one
-    /// `Err` (`Item::None`) cannot come from a parsed document.
+    /// Native → `Node`. An `Err` means "refuse" -- produced by YAML (for
+    /// non-string keys, tags, etc.) and plist (a value type newer than this
+    /// build); JSON is total, and TOML's one `Err` (`Item::None`) cannot come
+    /// from a parsed document.
     fn decode(value: &Self::Value<'_>) -> Result<Node<Self::Leaf>, ParseFailure>;
     /// `Node` → native.
     fn encode(node: &Node<Self::Leaf>) -> Self::Value<'static>;

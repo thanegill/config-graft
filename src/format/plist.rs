@@ -97,9 +97,10 @@ impl ValueCodec for Plist {
             plist::Value::Date(d) => Node::Leaf(PlistLeaf::Date(*d)),
             plist::Value::Data(bytes) => Node::Leaf(PlistLeaf::Data(bytes.clone())),
             plist::Value::Uid(u) => Node::Leaf(PlistLeaf::Uid(u.get())),
-            // `plist::Value` is `#[non_exhaustive]`; treat any future variant as
-            // an opaque empty string rather than panicking.
-            _ => Node::Leaf(PlistLeaf::String(String::new())),
+            // `plist::Value` is `#[non_exhaustive]`. A variant a future crate adds
+            // has no leaf to carry it; writing it back as any other type would
+            // replace the app's value.
+            _ => return Err(ParseFailure::Unsupported("a value of an unknown type")),
         })
     }
 
