@@ -20,13 +20,19 @@ use format::directory::XattrScope;
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use reconcile::{ArrayStrategy, KeyPath, MergeKeys};
 
-/// Three-way reconcile for app-owned JSON, plist, YAML, or TOML files (or a whole
-/// directory tree): deep-merge DESIRED into TARGET while preserving keys the app
-/// wrote and pruning keys dropped from DESIRED (using BASE, the previously-applied
-/// snapshot, as the merge ancestor). The format is chosen by the subcommand; each
-/// subcommand exposes only the flags that apply to it.
+/// Three-way reconcile for app-owned JSON, plist, YAML, and TOML files, or a
+/// directory tree.
+///
+/// config-graft merges DESIRED, the keys you manage, into TARGET, a file the
+/// application also writes, and leaves the app's own keys alone. A key dropped from
+/// DESIRED is pruned only if TARGET still holds its value from BASE, the DESIRED
+/// applied last time, so an edit the user made survives. The subcommand names the
+/// format (directory for a whole tree) and takes only the flags that apply to it.
+///
+/// Exit status: 0 on success, 1 on an error, 2 on a usage error, and 3 under --check
+/// when a change is pending.
 #[derive(Parser)]
-#[command(name = "config-graft", version, about)]
+#[command(name = "config-graft", version)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -38,14 +44,35 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Reconcile a JSON file.
+    ///
+    /// TARGET, DESIRED and BASE are JSON files with an object at the root. The output
+    /// is pretty-printed, and numbers keep their source spelling while comparing by
+    /// value.
     Json(JsonArgs),
-    /// Reconcile a YAML file (comments preserved).
+    /// Reconcile a YAML file, keeping its comments.
+    ///
+    /// The file is edited in place, so comments and formatting survive wherever
+    /// nothing changes. Custom tags, non-string keys and multi-document files are
+    /// refused, and so is an edit that would break an anchor or alias.
     Yaml(ByteArgs),
-    /// Reconcile a TOML file (comments preserved).
+    /// Reconcile a TOML file, keeping its comments.
+    ///
+    /// The file is edited in place, so comments and formatting survive wherever
+    /// nothing changes. An edit that can't be made safely is refused.
     Toml(ByteArgs),
     /// Reconcile a plist file.
+    ///
+    /// Reads XML and binary plists, and by default writes the encoding the target
+    /// already has. An XML write floors dates to whole seconds and refuses to
+    /// introduce a character XML cannot carry.
     Plist(PlistArgs),
-    /// Reconcile a directory *tree* rather than a single file.
+    /// Reconcile a directory tree rather than a single file.
+    ///
+    /// TARGET, DESIRED and BASE are directories. Files the app created are kept, and
+    /// files dropped from DESIRED are pruned unless they changed. Each file's and
+    /// subdirectory's mode, owner and extended attributes are reconciled with it,
+    /// narrowed by --no-owner and --xattrs, and the TARGET directory's own attributes
+    /// only with --manage-root. Symlinks are never followed.
     Directory(DirArgs),
 }
 
@@ -91,11 +118,11 @@ pub(crate) struct CommonArgs {
 /// shaping that has no meaning for a directory tree.
 #[derive(Args)]
 pub(crate) struct ByteArgs {
-    /// File to reconcile, in place (created with parents if missing).
+    /// File to reconcile, in place; created with its parents if missing.
     target: PathBuf,
 
-    /// Managed data to apply (must be a mapping: JSON object / plist dictionary /
-    /// YAML mapping / TOML table).
+    /// Managed data to apply: a JSON object, plist dictionary, YAML mapping or TOML
+    /// table.
     desired: PathBuf,
 
     #[command(flatten)]
@@ -119,12 +146,11 @@ pub(crate) struct ByteArgs {
     )]
     array_strategy: ArrayStrategy,
 
-    /// Identify object-array elements by a field so `merge` matches keyed records
-    /// (and merges their fields) instead of by whole value. `FIELD` (or
-    /// `f1,f2`) applies to any object-array; `PATH=FIELD` scopes it to the array at
-    /// `PATH` -- its full path from the document root, segments joined by the format
-    /// separator (`.`, or `:` for plist). Repeatable. Example: `--merge-key name
-    /// --merge-key spec.containers=name`.
+    /// Identify object-array elements by a field, so merge matches keyed records
+    /// (and merges their fields) instead of whole values. FIELD (or f1,f2) applies to
+    /// any array of objects; PATH=FIELD applies only to the array at PATH, its full
+    /// path from the document root with segments joined by a dot (a colon for
+    /// plist). Repeatable, e.g. --merge-key name --merge-key spec.containers=name.
     #[arg(long = "merge-key", value_name = "[PATH=]FIELD")]
     merge_key: Vec<String>,
 }
@@ -135,7 +161,7 @@ pub(crate) struct JsonArgs {
     #[command(flatten)]
     byte: ByteArgs,
 
-    /// Output indentation: a number of spaces, or `tab` (default: 2 spaces).
+    /// Output indentation: a number of spaces, or tab (default: 2 spaces).
     #[arg(long, value_name = "N|tab")]
     indent: Option<Indent>,
 }
@@ -146,8 +172,7 @@ pub(crate) struct PlistArgs {
     #[command(flatten)]
     byte: ByteArgs,
 
-    /// Which encoding to write: `follow` the target's own (default), `xml`, or
-    /// `binary`.
+    /// Which encoding to write: follow the target's own (default), xml, or binary.
     #[arg(
         long = "plist-format",
         value_name = "ENCODING",
@@ -159,18 +184,17 @@ pub(crate) struct PlistArgs {
 /// directory: the common flags plus the tree-only attribute controls.
 #[derive(Args)]
 pub(crate) struct DirArgs {
-    /// File to reconcile, in place (created with parents if missing).
+    /// Directory to reconcile, in place; created with its parents if missing.
     target: PathBuf,
 
-    /// Managed data to apply (must be a mapping: JSON object / plist dictionary /
-    /// YAML mapping / TOML table).
+    /// Directory tree to apply.
     desired: PathBuf,
 
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Also reconcile the TARGET directory's *own* attributes (mode/owner/xattrs),
-    /// not just its contents.
+    /// Also reconcile the TARGET directory's own attributes (mode, owner and
+    /// xattrs), not just its contents.
     #[arg(long = "manage-root")]
     manage_root: bool,
 
@@ -178,8 +202,8 @@ pub(crate) struct DirArgs {
     #[arg(long = "no-owner")]
     no_owner: bool,
 
-    /// Which extended attributes to reconcile: `all` (default), `safe` (a
-    /// conservative allowlist that skips privileged/system namespaces), or `none`.
+    /// Which extended attributes to reconcile: all (default), safe (a conservative
+    /// allowlist that skips privileged and system namespaces), or none.
     #[arg(long = "xattrs", value_name = "SCOPE")]
     xattrs: Option<XattrScope>,
 }

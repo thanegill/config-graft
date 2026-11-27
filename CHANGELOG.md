@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`--help` reads as a manual:** the root help explains TARGET, DESIRED and BASE and lists the exit codes, and each subcommand describes how its format is written.
 - **Building from source requires Rust 1.93 or later**, now declared as `rust-version` in Cargo.toml.
 - **directory:** `--diff` shows each xattr as `name=` plus the first 8 hex digits of its value's SHA-256, which is stable across Rust releases. Every xattr digest in existing output changes once.
 - **Breaking:** `--base PATH` together with a positional BASE is a usage error (exit 2), even if one is empty; the flag used to win silently.

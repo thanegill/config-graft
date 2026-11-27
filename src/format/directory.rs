@@ -141,8 +141,8 @@ pub enum XattrScope {
     #[default]
     All,
     /// A conservative allowlist that excludes privileged/system namespaces
-    /// (SELinux/SMACK `security.*`, POSIX ACLs `system.*`, `trusted.*`, and macOS
-    /// system attributes `com.apple.*`).
+    /// (SELinux/SMACK security.*, POSIX ACLs system.*, trusted.*, and macOS system
+    /// attributes com.apple.*).
     Safe,
     /// No extended attributes.
     None,
