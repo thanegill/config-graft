@@ -13,7 +13,7 @@
 use indexmap::IndexMap;
 use saphyr::{LoadableYamlNode, MarkedYaml, Marker, Scalar, Yaml, YamlData};
 
-use super::yaml::{yaml_string, YamlLeaf};
+use super::yaml::{emit_without_marker, yaml_string, YamlLeaf};
 use super::{Format, ValueCodec, Yaml as YamlCodec};
 use crate::error::Error;
 use crate::value::Node;
@@ -399,13 +399,7 @@ fn emit_entry(key: &str, value: &Node<YamlLeaf>, ind: usize) -> String {
 
 /// Emit a YAML node as a fragment: no leading `---` marker, no trailing newline.
 fn emit_fragment(y: &Yaml) -> String {
-    let mut buf = String::new();
-    let mut em = saphyr::YamlEmitter::new(&mut buf);
-    em.dump(y).expect("emitting YAML fragment");
-    buf.strip_prefix("---\n")
-        .unwrap_or(&buf)
-        .trim_end_matches('\n')
-        .to_string()
+    emit_without_marker(y).trim_end_matches('\n').to_string()
 }
 
 /// Prefix every non-empty line with `ind` spaces.

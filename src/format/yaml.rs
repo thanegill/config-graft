@@ -206,18 +206,24 @@ fn nests_within_limit(text: &str) -> bool {
 
 /// Canonical YAML emission, used only when there is no original text to preserve.
 fn write_canonical(node: &Node<YamlLeaf>) -> String {
-    let doc = Yaml::encode(node);
-    let mut buf = String::new();
-    let mut emitter = saphyr::YamlEmitter::new(&mut buf);
-    emitter.dump(&doc).expect("emitting YAML");
-    // saphyr writes a leading `---\n` document marker and no trailing newline;
-    // drop the marker for clean config output and end with a single newline.
-    let body = buf.strip_prefix("---\n").unwrap_or(&buf);
-    let mut out = body.to_string();
+    let mut out = emit_without_marker(&Yaml::encode(node));
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out
+}
+
+/// `yaml` as saphyr emits it, minus the leading `---\n` document marker it always
+/// writes, which config output does not want. saphyr writes no trailing newline.
+pub(super) fn emit_without_marker(yaml: &saphyr::Yaml) -> String {
+    let mut buf = String::new();
+    saphyr::YamlEmitter::new(&mut buf)
+        .dump(yaml)
+        .expect("emitting YAML");
+    match buf.strip_prefix("---\n") {
+        Some(body) => body.to_string(),
+        None => buf,
+    }
 }
 
 impl From<&YamlLeaf> for saphyr::Yaml<'static> {
@@ -276,14 +282,6 @@ mod tests {
         Yaml::parse(text.as_bytes()).ok()
     }
 
-    /// Emit a `Node` as canonical YAML.
-    fn node_to_yaml(node: &Node<YamlLeaf>) -> String {
-        let mut buf = String::new();
-        let mut em = saphyr::YamlEmitter::new(&mut buf);
-        em.dump(&Yaml::encode(node)).unwrap();
-        buf
-    }
-
     fn leaf(node: &Node<YamlLeaf>, key: &str) -> YamlLeaf {
         match &node.as_map().unwrap()[key] {
             Node::Leaf(l) => l.clone(),
@@ -320,7 +318,7 @@ mod tests {
             "s: hi\nb: false\ni: -7\nf: 1.5\nseq:\n  - 1\n  - x\nm:\n  deep:\n    k: v\n",
         )
         .unwrap();
-        let back = yaml_to_node(&node_to_yaml(&node)).unwrap();
+        let back = yaml_to_node(&write_canonical(&node)).unwrap();
         assert_eq!(back, node);
     }
 
