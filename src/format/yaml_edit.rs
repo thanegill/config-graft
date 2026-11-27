@@ -68,7 +68,7 @@ struct Edit {
 
 /// Parse YAML text into a `Node` by the same rules as reading a file.
 fn parse_node(text: &str) -> Option<Node<YamlLeaf>> {
-    YamlCodec::parse(text.as_bytes())
+    YamlCodec::parse(text.as_bytes()).ok()
 }
 
 /// The edit that appends every entry of `rmap` to `text`, a target holding no
