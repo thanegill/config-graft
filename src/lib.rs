@@ -53,7 +53,8 @@ enum Command {
     ///
     /// The file is edited in place, so comments and formatting survive wherever
     /// nothing changes. Custom tags, non-string keys and multi-document files are
-    /// refused, and so is an edit that would break an anchor or alias.
+    /// refused, as is an edit that would change what an alias resolves to. Aliases to
+    /// non-empty mappings and sequences can't be replaced, pruned or edited inside.
     Yaml(ByteArgs),
     /// Reconcile a TOML file, keeping its comments.
     ///
