@@ -127,7 +127,9 @@ fn value_merge<L: Leaf>(
     base: &[Node<L>],
 ) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     let verts = membership_merge(target, desired, base);
-    let id_of = |e: &Node<L>| verts.iter().position(|v| v == e);
+    let vertex_of: HashMap<&Node<L>, usize> =
+        verts.iter().enumerate().map(|(i, v)| (v, i)).collect();
+    let id_of = |e: &Node<L>| vertex_of.get(e).copied();
     let (out, mut warnings) = assemble(id_of, &verts, target, desired, base);
     warnings.extend(value_duplicates(target, &out, Source::Target));
     warnings.extend(value_duplicates(desired, &out, Source::Desired));
@@ -321,10 +323,11 @@ fn assemble<L: Leaf>(
     // Restrict each input to the survivors, in its own order (deduped), as an
     // index sequence.
     let restrict = |seq: &[Node<L>]| -> Vec<usize> {
+        let mut seen = vec![false; n];
         let mut out: Vec<usize> = Vec::new();
         for e in seq {
             if let Some(i) = id_of(e) {
-                if !out.contains(&i) {
+                if !std::mem::replace(&mut seen[i], true) {
                     out.push(i);
                 }
             }
@@ -631,24 +634,25 @@ fn membership_merge<L: Leaf>(
     desired: &[Node<L>],
     base: &[Node<L>],
 ) -> Vec<Node<L>> {
-    let in_base = |e: &Node<L>| base.contains(e);
-    let in_target = |e: &Node<L>| target.contains(e);
-    let in_desired = |e: &Node<L>| desired.contains(e);
+    let in_base: HashSet<&Node<L>> = base.iter().collect();
+    let in_target: HashSet<&Node<L>> = target.iter().collect();
+    let in_desired: HashSet<&Node<L>> = desired.iter().collect();
 
+    let mut kept: HashSet<&Node<L>> = HashSet::new();
     let mut out: Vec<Node<L>> = Vec::new();
     // TARGET order first: keep each element unless it is a BASE element that
     // DESIRED dropped (a managed deletion).
     for e in target {
-        let dropped_from_desired = in_base(e) && !in_desired(e);
-        if !dropped_from_desired && !out.contains(e) {
+        let dropped_from_desired = in_base.contains(e) && !in_desired.contains(e);
+        if !dropped_from_desired && kept.insert(e) {
             out.push(e.clone());
         }
     }
     // Then DESIRED-only insertions, in DESIRED order -- but a BASE element the user
     // already removed from TARGET stays removed (don't resurrect it).
     for e in desired {
-        let removed_from_target = in_base(e) && !in_target(e);
-        if !removed_from_target && !out.contains(e) {
+        let removed_from_target = in_base.contains(e) && !in_target.contains(e);
+        if !removed_from_target && kept.insert(e) {
             out.push(e.clone());
         }
     }
