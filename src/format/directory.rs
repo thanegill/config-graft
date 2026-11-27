@@ -114,7 +114,7 @@ impl fmt::Display for FsAttrs {
 /// input, yet it's low enough that the read/apply recursion can't exhaust the
 /// stack. It exists to turn a malicious/looping-symlink-free-but-absurd tree into
 /// a clean refusal rather than a crash.
-const MAX_DEPTH: usize = 100;
+const MAX_TREE_DEPTH: usize = 100;
 
 /// Filename prefix for the temp files/symlinks staged during an atomic write.
 /// Skipped on read so a leftover from a crashed run is never ingested as a managed
@@ -431,7 +431,7 @@ fn read_dir(
     policy: AttrPolicy,
     depth: usize,
 ) -> Result<Node<FsLeaf>, Error> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_TREE_DEPTH {
         return Err(Error::TreeTooDeep(dir.to_path_buf()));
     }
     let mut paths: Vec<PathBuf> = fs::read_dir(dir)

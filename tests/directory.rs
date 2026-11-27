@@ -996,7 +996,7 @@ fn refuses_excessively_deep_tree() {
     let desired = dir.path().join("desired");
     let mut p = desired.clone();
     for _ in 0..150 {
-        p = p.join("d"); // deeper than MAX_DEPTH
+        p = p.join("d"); // deeper than MAX_TREE_DEPTH
     }
     fs::create_dir_all(&p).unwrap();
     fs::write(p.join("f.txt"), "x").unwrap();
