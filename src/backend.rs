@@ -544,7 +544,7 @@ pub(crate) trait Backend {
             arrays: args.array_strategy,
             merge_keys: Self::merge_keys(args),
         };
-        let (mut result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
+        let (result, mut warnings) = reconcile(&target, &desired, base.as_ref(), &opts);
         // Only normalization can make two elements one that an input distinguished,
         // so a run it left alone has nothing to judge.
         let combined = if target_as_read.is_some() || desired_as_read.is_some() {
@@ -590,10 +590,6 @@ pub(crate) trait Backend {
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
         emit(&warnings, Self::COMPONENT_SEPARATOR);
         emit(&lossy_collapses(&combined), Self::COMPONENT_SEPARATOR);
-
-        if args.sort_keys {
-            result = result.sort_keys();
-        }
 
         // Before `prepare`, which serializes and can refuse: `--diff` is a preview,
         // so it should still show what the run would do to a target the writer then

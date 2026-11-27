@@ -22,6 +22,47 @@ fn read_plist(path: &std::path::Path) -> plist::Value {
     plist::Value::from_file(path).expect("parse plist")
 }
 
+/// The keys of `value`'s top-level dictionary and of its dictionary under `key`,
+/// in file order.
+fn key_orders(value: &plist::Value, key: &str) -> (Vec<String>, Vec<String>) {
+    let top = value.as_dictionary().expect("a dictionary");
+    let inner = top[key].as_dictionary().expect("a nested dictionary");
+    (
+        top.keys().cloned().collect(),
+        inner.keys().cloned().collect(),
+    )
+}
+
+#[test]
+fn keeps_target_key_order_and_appends_new_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("desired.plist");
+    pdict(vec![
+        ("c", pint(1)),
+        ("b", pdict(vec![("z", pint(1)), ("y", pint(2))])),
+    ])
+    .to_file_xml(&target)
+    .unwrap();
+    pdict(vec![
+        ("b", pdict(vec![("x", pint(3)), ("w", pint(4))])),
+        ("q", pint(5)),
+        ("a", pint(2)),
+    ])
+    .to_file_xml(&desired)
+    .unwrap();
+
+    let out = run(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_eq!(
+        key_orders(&read_plist(&target), "b"),
+        (
+            ["c", "b", "q", "a"].map(String::from).to_vec(),
+            ["z", "y", "x", "w"].map(String::from).to_vec()
+        )
+    );
+}
+
 #[test]
 fn reconciles_in_place_three_way_plist() {
     let dir = tempfile::tempdir().unwrap();

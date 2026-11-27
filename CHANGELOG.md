@@ -28,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **`managedPlist`:** a binary DESIRED is built with the entry's own `format` generator and `plistutil`, so a `format` override now applies on the binary path too.
 - **A managed value equal to TARGET's is left as TARGET spells it**, so a JSON `2.50` no longer rewrites `2.5` while `--diff` shows nothing.
 
+### Removed
+
+- **Breaking:** `--sort-keys` is gone (exit 2): output keeps TARGET's key order and appends new keys in DESIRED's order; the in-place YAML/TOML editors could never sort existing keys without moving comments.
+
 ### Fixed
 
 - **TOML:** a CRLF file keeps its line endings instead of being rewritten entirely to LF, even by a run that changed nothing (where `--check` also exited 3); a file that mixes endings takes the one most of its lines have.

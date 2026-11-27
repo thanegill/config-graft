@@ -29,6 +29,9 @@ use reconcile::{ArrayStrategy, ManagedPath, MergeKeys};
 /// applied last time, so an edit the user made survives. The subcommand names the
 /// format (directory for a whole tree) and takes only the flags that apply to it.
 ///
+/// In a file, keys keep TARGET's order, and keys new to it are appended in
+/// DESIRED's order; in TOML, table sections stay after the plain keys.
+///
 /// Exit status: 0 on success, 1 on an error, 2 on a usage error, and 3 under --check
 /// when a change is pending.
 #[derive(Parser)]
@@ -134,10 +137,6 @@ pub(crate) struct ByteArgs {
     #[arg(long)]
     stdout: bool,
 
-    /// Sort every object's keys in the output.
-    #[arg(long = "sort-keys")]
-    sort_keys: bool,
-
     /// How DESIRED arrays combine with TARGET arrays: merge (three-way,
     /// move-aware against BASE; the default), replace (atomic), concat (append),
     /// or set (two-way union, ignoring order and duplicates).
@@ -212,7 +211,7 @@ pub(crate) struct DirArgs {
 
 /// The resolved options a [`Backend`] run reads, built from whichever subcommand
 /// clap parsed. Flags a given format doesn't expose are filled with today's
-/// defaults (directory: no stdout/sort/array/merge_key/indent/plist_format; byte
+/// defaults (directory: no stdout/array/merge_key/indent/plist_format; byte
 /// formats: no manage_root/no_owner/xattrs), so the backend logic is unchanged.
 pub(crate) struct RunArgs {
     pub(crate) target: PathBuf,
@@ -225,7 +224,6 @@ pub(crate) struct RunArgs {
     pub(crate) check: bool,
     pub(crate) indent: Indent,
     pub(crate) plist_format: PlistFormat,
-    pub(crate) sort_keys: bool,
     pub(crate) array_strategy: ArrayStrategy,
     merge_key: Vec<String>,
     pub(crate) manage_root: bool,
@@ -293,7 +291,6 @@ impl RunArgs {
             check,
             indent,
             plist_format,
-            sort_keys: byte.sort_keys,
             array_strategy: byte.array_strategy,
             merge_key: byte.merge_key,
             manage_root: false,
@@ -303,8 +300,8 @@ impl RunArgs {
     }
 
     /// A [`RunArgs`] from the `directory` subcommand's flags. The byte-only shaping
-    /// fields (stdout/sort_keys/array_strategy/merge_key/indent/plist_format) take
-    /// their inert defaults -- a tree exposes none of them.
+    /// fields (stdout/array_strategy/merge_key/indent/plist_format) take their
+    /// inert defaults -- a tree exposes none of them.
     fn from_dir(args: DirArgs) -> RunArgs {
         let CommonArgs {
             base,
@@ -324,7 +321,6 @@ impl RunArgs {
             check,
             indent: Indent::default(),
             plist_format: PlistFormat::default(),
-            sort_keys: false,
             // Matches the byte formats' `--array-strategy` default (`merge`); a tree
             // has no arrays, so the value is inert either way.
             array_strategy: ArrayStrategy::Merge,

@@ -253,22 +253,24 @@ fn diff_reports_added_removed_changed() {
 }
 
 #[test]
-fn sort_keys_orders_output() {
+fn keeps_target_key_order_and_appends_new_keys() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.toml");
     let desired = dir.path().join("desired.toml");
-    fs::write(&target, "").unwrap();
-    fs::write(&desired, "b = 1\na = 2\n").unwrap();
+    fs::write(&target, "c = 1\n\n[b]\nz = 1\ny = 2\n").unwrap();
+    fs::write(&desired, "q = 5\na = 2\n\n[b]\nx = 3\nw = 4\n").unwrap();
 
     let out = run(&[
         "toml",
-        "--sort-keys",
         "--stdout",
         target.to_str().unwrap(),
         desired.to_str().unwrap(),
     ]);
     assert!(out.status.success());
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "a = 2\nb = 1\n");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "c = 1\nq = 5\na = 2\n\n[b]\nz = 1\ny = 2\nx = 3\nw = 4\n"
+    );
 }
 
 #[test]
