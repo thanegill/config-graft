@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use toml_edit::{DocumentMut, Item, Table};
 
 use super::toml::{node_to_value, Toml, TomlLeaf};
-use super::{Format, ValueCodec};
+use super::{mostly_crlf, Format, ValueCodec};
 use crate::error::Error;
 use crate::value::Node;
 
@@ -25,11 +25,21 @@ use crate::value::Node;
 /// when the document can't be edited so that it round-trips to `result`.
 pub fn apply(text: &str, result: &Node<TomlLeaf>) -> Result<String, Error> {
     let rmap = result.as_map().ok_or(Error::TomlUnsafe)?;
+    if Toml::parse(text.as_bytes()).ok().as_ref() == Some(result) {
+        return Ok(text.to_string());
+    }
     let mut doc = text.parse::<DocumentMut>().map_err(|_| Error::TomlUnsafe)?;
 
     merge_table(doc.as_table_mut(), rmap);
 
     let out = doc.to_string();
+    // `toml_edit` prints every line ending as LF but keeps a multi-line string's
+    // source text, which may hold a CRLF already.
+    let out = if mostly_crlf(text) {
+        out.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        out
+    };
     // Backstop: the edited text must parse back to exactly the reconciled result.
     match Toml::parse(out.as_bytes()) {
         Ok(ref got) if got == result => Ok(out),
@@ -151,6 +161,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "ports = [80, 443, 8080]  # http(s)\n");
+    }
+
+    #[test]
+    fn a_no_op_on_a_mixed_file_is_byte_identical() {
+        for text in ["# hdr\na = 1\r\nb = 2\r\n", "# hdr\r\na = 1\nb = 2\n"] {
+            assert_eq!(apply(text, &result("a = 1\nb = 2\n")).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn keeps_a_crlf_files_line_endings() {
+        let text = "# top\r\na = 1  # keep\r\n\r\n[t]\r\nx = 1\r\n";
+        assert_eq!(apply(text, &result(text)).unwrap(), text);
+        let out = apply(text, &result("a = 2\nb = 3\n[t]\nx = 1\ny = 2\n")).unwrap();
+        assert_eq!(
+            out,
+            "# top\r\na = 2  # keep\r\nb = 3\r\n\r\n[t]\r\nx = 1\r\ny = 2\r\n"
+        );
+        let out = apply("a = 1\r\n", &result("a = 1\n[t]\nx = 1\n")).unwrap();
+        assert_eq!(out, "a = 1\r\n\r\n[t]\r\nx = 1\r\n");
+    }
+
+    #[test]
+    fn a_mixed_file_takes_the_line_ending_most_lines_have() {
+        let out = apply("# hdr\r\na = 1\nb = 2\n", &result("a = 1\nb = 2\nc = 3\n")).unwrap();
+        assert_eq!(out, "# hdr\na = 1\nb = 2\nc = 3\n");
+        let out = apply(
+            "# hdr\na = 1\r\nb = 2\r\n",
+            &result("a = 1\nb = 2\nc = 3\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "# hdr\r\na = 1\r\nb = 2\r\nc = 3\r\n");
+    }
+
+    #[test]
+    fn a_crlf_inside_a_multi_line_string_is_not_doubled() {
+        let text = "s = \"\"\"a\r\nb\"\"\"\r\nn = 1\r\n";
+        let out = apply(text, &result("s = \"a\\nb\"\nn = 2\n")).unwrap();
+        assert_eq!(out, "s = \"\"\"a\r\nb\"\"\"\r\nn = 2\r\n");
     }
 
     #[test]

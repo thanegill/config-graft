@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **TOML:** a CRLF file keeps its line endings instead of being rewritten entirely to LF, even by a run that changed nothing (where `--check` also exited 3); a file that mixes endings takes the one most of its lines have.
 - **YAML:** the refusal for an unsafe edit no longer says anchors and aliases are unsupported; it names an edit that would change what an alias resolves to, and so does `yaml --help`.
 - **YAML:** a key added after an alias to a mapping or sequence (`b: *x`, `<<: *base`) is written after it instead of above earlier keys or refused, and such an alias can now be pruned or replaced.
 - **YAML:** a key added to a mapping whose first entry is an explicit `? key` or an anchored or tagged key is written instead of refused; a comment indented under such a key is kept above a key added after it, and removed with it when it is pruned.
