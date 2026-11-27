@@ -39,6 +39,11 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
         [] | [_] => edits.extend(append_to_empty(text, result_map)),
         _ => return Err(Error::YamlUnsafe),
     }
+    if mostly_crlf(text) {
+        for edit in &mut edits {
+            edit.text = edit.text.replace('\n', "\r\n");
+        }
+    }
 
     // Apply right-to-left so earlier byte offsets stay valid. Insertions at one
     // offset apply last-pushed first, so a nested mapping's addition, pushed
@@ -72,6 +77,12 @@ struct Edit {
 /// Parse YAML text into a `Node` by the same rules as reading a file.
 fn parse_node(text: &str) -> Option<Node<YamlLeaf>> {
     YamlCodec::parse(text.as_bytes()).ok()
+}
+
+/// Whether most of `text`'s lines end in CRLF, the line ending every new line is
+/// then written with.
+fn mostly_crlf(text: &str) -> bool {
+    text.matches("\r\n").count() * 2 > text.matches('\n').count()
 }
 
 /// The edit that appends every entry of `rmap` to `text`, a target holding no
@@ -585,6 +596,32 @@ mod tests {
             out,
             "a:\n  b:\n    x: 1\n    y: 2\n  c: 4\n  # under a\nd: 5\n"
         );
+    }
+
+    #[test]
+    fn writes_new_lines_with_a_crlf_files_line_ending() {
+        let out = apply("a: 1\r\nb: 2\r\n", &result("a:\n  x: 1\nb: 2\n")).unwrap();
+        assert_eq!(out, "a:\r\n  x: 1\r\nb: 2\r\n");
+        let out = apply("a:\r\n  x: 1\r\nb: 2\r\n", &result("a: 5\nb: 2\n")).unwrap();
+        assert_eq!(out, "a: 5\r\nb: 2\r\n");
+        let out = apply("a: 1\r\n", &result("a: 1\nb:\n  c: 2\n")).unwrap();
+        assert_eq!(out, "a: 1\r\nb:\r\n  c: 2\r\n");
+        let out = apply("# only\r\n", &result("a:\n  b: 1\n")).unwrap();
+        assert_eq!(out, "# only\r\na:\r\n  b: 1\r\n");
+        let out = apply("---\r\n# c", &result("a: 1\n")).unwrap();
+        assert_eq!(out, "---\r\n# c\r\na: 1\r\n");
+        let out = apply("a: 1\r\n", &result("a: \"x\\ny\"\n")).unwrap();
+        assert_eq!(out, "a: \"x\\ny\"\r\n");
+    }
+
+    #[test]
+    fn new_lines_take_the_line_ending_most_lines_have() {
+        let out = apply("# hdr\r\na: 1\nb: 2\n", &result("a: 1\nb: 2\nc: 3\n")).unwrap();
+        assert_eq!(out, "# hdr\r\na: 1\nb: 2\nc: 3\n");
+        let out = apply("# hdr\na: 1\r\nb: 2\r\n", &result("a: 1\nb: 2\nc: 3\n")).unwrap();
+        assert_eq!(out, "# hdr\na: 1\r\nb: 2\r\nc: 3\r\n");
+        let out = apply("a: 1\r\nb: 2\n", &result("a: 1\nb: 2\nc: 3\n")).unwrap();
+        assert_eq!(out, "a: 1\r\nb: 2\nc: 3\n");
     }
 
     #[test]
