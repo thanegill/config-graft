@@ -466,6 +466,21 @@ mod tests {
     }
 
     #[test]
+    fn keyed_does_not_resurrect_a_record_the_user_removed() {
+        // BASE and DESIRED both hold `db`; the user deleted it from TARGET. A
+        // managed record the user removed stays removed.
+        assert_eq!(
+            reconciled_keyed(
+                json!({"s": [{"name": "web"}]}),
+                json!({"s": [{"name": "web"}, {"name": "db"}]}),
+                Some(json!({"s": [{"name": "web"}, {"name": "db"}]})),
+                &["name"],
+            ),
+            json!({"s": [{"name": "web"}]})
+        );
+    }
+
+    #[test]
     fn keyed_falls_back_to_value_when_not_all_keyed() {
         // A DESIRED element lacks the key -> value-equality for the whole array.
         assert_eq!(

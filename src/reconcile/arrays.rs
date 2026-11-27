@@ -127,8 +127,10 @@ fn value_merge<L: Leaf>(
     base: &[Node<L>],
 ) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     let verts = membership_merge(target, desired, base);
-    let id_of = |e: &Node<L>| verts.iter().position(|v| v == e);
-    let (out, mut warnings) = assemble(verts.len(), id_of, &verts, target, desired, base);
+    let vertex_of: HashMap<&Node<L>, usize> =
+        verts.iter().enumerate().map(|(i, v)| (v, i)).collect();
+    let id_of = |e: &Node<L>| vertex_of.get(e).copied();
+    let (out, mut warnings) = assemble(id_of, &verts, target, desired, base);
     warnings.extend(value_duplicates(target, &out, Source::Target));
     warnings.extend(value_duplicates(desired, &out, Source::Desired));
     (out, warnings)
@@ -140,30 +142,51 @@ fn value_merge<L: Leaf>(
 /// on only one branch). A conflict *inside* a merged record is surfaced too, with
 /// a `[field=value]` element selector prepended to its path so it locates down to
 /// the record (e.g. `[name="web"].tags`).
-fn keyed_merge<L: Leaf>(
-    target: &[Node<L>],
-    desired: &[Node<L>],
-    base: &[Node<L>],
+fn keyed_merge<'a, L: Leaf>(
+    target: &'a [Node<L>],
+    desired: &'a [Node<L>],
+    base: &'a [Node<L>],
     opts: &Options,
     keys: &[String],
 ) -> (Vec<Node<L>>, Vec<Warning<L>>) {
-    let key = |e: &Node<L>| identity(e, keys);
-    let has = |seq: &[Node<L>], k: &Ident<L>| seq.iter().any(|e| key(e).as_ref() == Some(k));
+    let key = |e| key_of(e, keys);
+    // Each key's first record in an input, which is the one a match uses.
+    let first_by_key = |seq: &'a [Node<L>]| {
+        let mut first: HashMap<Ident<'a, L>, &'a Node<L>> = HashMap::new();
+        for e in seq {
+            if let Some(k) = key(e) {
+                first.entry(k).or_insert(e);
+            }
+        }
+        first
+    };
+    let (in_target, in_desired, in_base) = (
+        first_by_key(target),
+        first_by_key(desired),
+        first_by_key(base),
+    );
 
     // Survivor keys, in membership order (the `membership_merge` rule, on keys).
-    let mut survivors: Vec<Ident<L>> = Vec::new();
+    let mut survivors: Vec<Ident<'a, L>> = Vec::new();
+    let mut survivor_index: HashMap<Ident<'a, L>, usize> = HashMap::new();
+    let mut survive = |k: Ident<'a, L>| {
+        survivor_index.entry(k).or_insert_with(|| {
+            survivors.push(k);
+            survivors.len() - 1
+        });
+    };
     for e in target {
         let k = key(e).expect("gated: every target element is keyed");
-        let dropped_from_desired = has(base, &k) && !has(desired, &k);
-        if !dropped_from_desired && !survivors.contains(&k) {
-            survivors.push(k);
+        let dropped_from_desired = in_base.contains_key(&k) && !in_desired.contains_key(&k);
+        if !dropped_from_desired {
+            survive(k);
         }
     }
     for e in desired {
         let k = key(e).expect("gated: every desired element is keyed");
-        let removed_from_target = has(base, &k) && !has(target, &k);
-        if !removed_from_target && !survivors.contains(&k) {
-            survivors.push(k);
+        let removed_from_target = in_base.contains_key(&k) && !in_target.contains_key(&k);
+        if !removed_from_target {
+            survive(k);
         }
     }
 
@@ -171,17 +194,15 @@ fn keyed_merge<L: Leaf>(
     // fields are reconciled recursively; any conflict from that merge is kept,
     // tagged with the record's `[field=value]` selector so it locates inside the
     // array.
-    let find =
-        |seq: &[Node<L>], k: &Ident<L>| seq.iter().find(|e| key(e).as_ref() == Some(k)).cloned();
     let mut merged: Vec<Node<L>> = Vec::with_capacity(survivors.len());
     let mut nested: Vec<Warning<L>> = Vec::new();
     for k in &survivors {
-        let value = match (find(target, k), find(desired, k)) {
+        let value = match (in_target.get(k), in_desired.get(k)) {
             (Some(t), Some(d)) => {
-                let (m, conflicts) = reconcile(&t, &d, find(base, k).as_ref(), opts);
+                let (m, conflicts) = reconcile(t, d, in_base.get(k).copied(), opts);
                 let (field, key_value) = k;
                 let selector = Step::Selector {
-                    field: field.clone(),
+                    field: field.to_string(),
                     value: key_value.to_string(),
                 };
                 for mut c in conflicts {
@@ -190,15 +211,15 @@ fn keyed_merge<L: Leaf>(
                 }
                 m
             }
-            (Some(t), None) => t,
-            (None, Some(d)) => d,
+            (Some(t), None) => (*t).clone(),
+            (None, Some(d)) => (*d).clone(),
             (None, None) => unreachable!("a survivor key comes from target or desired"),
         };
         merged.push(value);
     }
 
-    let id_of = |e: &Node<L>| key(e).and_then(|k| survivors.iter().position(|s| *s == k));
-    let (out, mut conflicts) = assemble(survivors.len(), id_of, &merged, target, desired, base);
+    let id_of = |e: &Node<L>| key_of(e, keys).and_then(|k| survivor_index.get(&k).copied());
+    let (out, mut conflicts) = assemble(id_of, &merged, target, desired, base);
     conflicts.append(&mut nested);
     conflicts.extend(key_duplicates(target, keys, &out, Source::Target));
     conflicts.extend(key_duplicates(desired, keys, &out, Source::Desired));
@@ -254,12 +275,12 @@ fn key_duplicates<L: Leaf>(
     out: &[Node<L>],
     source: Source,
 ) -> Vec<Warning<L>> {
-    let idents: Vec<Ident<L>> = seq.iter().filter_map(|e| identity(e, keys)).collect();
-    let mut held: HashMap<&Ident<L>, usize> = HashMap::new();
+    let idents: Vec<Ident<'_, L>> = seq.iter().filter_map(|e| key_of(e, keys)).collect();
+    let mut held: HashMap<&Ident<'_, L>, usize> = HashMap::new();
     for ident in &idents {
         *held.entry(ident).or_default() += 1;
     }
-    let mut reported: HashSet<&Ident<L>> = HashSet::new();
+    let mut reported: HashSet<&Ident<'_, L>> = HashSet::new();
     let mut warnings = Vec::new();
     for ident in &idents {
         if held[ident] < 2 || !reported.insert(ident) {
@@ -272,11 +293,11 @@ fn key_duplicates<L: Leaf>(
                 source,
                 identity: render_selector(field, value),
                 matched: (*value).clone(),
-                key: Some(field.clone()),
+                key: Some(field.to_string()),
                 held: held[ident],
                 kept: out
                     .iter()
-                    .filter(|kept| identity(kept, keys).as_ref() == Some(ident))
+                    .filter(|kept| key_of(kept, keys).as_ref() == Some(ident))
                     .count(),
             },
         });
@@ -284,28 +305,29 @@ fn key_duplicates<L: Leaf>(
     warnings
 }
 
-/// Shared GTS assembly: given the survivor count `n`, a map from an input element
-/// to its survivor index (`id_of`), and the output value per survivor (`merged`),
-/// order the survivors move-aware and report any cross-over cycle as a single
+/// Shared GTS assembly: given a map from an input element to its survivor index
+/// (`id_of`) and the output value per survivor (`merged`), order the survivors
+/// move-aware and report any cross-over cycle as a single
 /// warning at this array (empty path -- callers prepend the array's own key).
 fn assemble<L: Leaf>(
-    n: usize,
     id_of: impl Fn(&Node<L>) -> Option<usize>,
     merged: &[Node<L>],
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
 ) -> (Vec<Node<L>>, Vec<Warning<L>>) {
+    let n = merged.len();
     if n <= 1 {
         return (merged.to_vec(), Vec::new());
     }
     // Restrict each input to the survivors, in its own order (deduped), as an
     // index sequence.
     let restrict = |seq: &[Node<L>]| -> Vec<usize> {
+        let mut seen = vec![false; n];
         let mut out: Vec<usize> = Vec::new();
         for e in seq {
             if let Some(i) = id_of(e) {
-                if !out.contains(&i) {
+                if !std::mem::replace(&mut seen[i], true) {
                     out.push(i);
                 }
             }
@@ -366,8 +388,8 @@ fn gts_order(
     //   Em = (E1 \ (Eb+ \ E2+)) ∪ (E2 \ (Eb+ \ E1+))
     // `edge_set` makes the "already have this edge?" test O(1) instead of an
     // O(E) `edges.contains` scan; `edges` keeps insertion order (immaterial
-    // downstream -- adjacency is re-sorted, reachability is a matrix -- but cheap
-    // to preserve).
+    // downstream -- adjacency is re-sorted and the condensation's edges are only
+    // counted -- but cheap to preserve).
     let mut edges: Vec<(usize, usize)> = Vec::new();
     let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
     for w in target_seq.windows(2) {
@@ -447,41 +469,8 @@ fn gts_order(
         row.dedup();
     }
 
-    // Step 7: strongly connected components. n is small (config arrays), so use a
-    // Warshall reachability closure and group by mutual reachability.
-    let mut reach = vec![vec![false; n]; n];
-    for (v, row) in reach.iter_mut().enumerate() {
-        row[v] = true;
-    }
-    for &(a, b) in &edges {
-        reach[a][b] = true;
-    }
-    for k in 0..n {
-        let row_k = reach[k].clone();
-        for row_i in reach.iter_mut() {
-            if row_i[k] {
-                for (j, &reachable) in row_k.iter().enumerate() {
-                    if reachable {
-                        row_i[j] = true;
-                    }
-                }
-            }
-        }
-    }
-    let mut comp = vec![usize::MAX; n];
-    let mut ncomp = 0;
-    for v in 0..n {
-        if comp[v] != usize::MAX {
-            continue;
-        }
-        comp[v] = ncomp;
-        for u in (v + 1)..n {
-            if comp[u] == usize::MAX && reach[v][u] && reach[u][v] {
-                comp[u] = ncomp;
-            }
-        }
-        ncomp += 1;
-    }
+    // Step 7: strongly connected components.
+    let (comp, ncomp) = strongly_connected_components(&adj);
 
     // Condensation: members, cross-component edges, in-degrees.
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); ncomp];
@@ -510,14 +499,7 @@ fn gts_order(
         }
     }
 
-    // A vertex's tie-break key: earliest in TARGET, then DESIRED, then index.
-    let key = |v: usize| {
-        (
-            target_pos[v].unwrap_or(usize::MAX),
-            desired_pos[v].unwrap_or(usize::MAX),
-            v,
-        )
-    };
+    let key = |v: usize| tie_break_key(&target_pos, &desired_pos, v);
     let ckey: Vec<(usize, usize, usize)> = (0..ncomp)
         .map(|c| members[c].iter().map(|&v| key(v)).min().unwrap())
         .collect();
@@ -543,21 +525,93 @@ fn gts_order(
     (out, conflict_ids)
 }
 
-type Ident<L> = (String, Node<L>);
-
-/// The identity of `e` for keyed matching: the first `keys` field it carries, as
-/// `(field, value)` (the field disambiguates `name:"x"` from `id:"x"`). `None` if
-/// `e` isn't an object with a candidate field.
-fn identity<L: Leaf>(e: &Node<L>, keys: &[String]) -> Option<Ident<L>> {
-    key_of(e, keys).map(|(field, value)| (field.to_owned(), value.clone()))
+/// Label every vertex of the graph `adj` with its strongly connected component,
+/// numbering the components in order of their smallest vertex. Returns the labels
+/// and the number of components.
+///
+/// Tarjan's algorithm, linear in vertices plus edges, with an explicit stack so an
+/// array of thousands of elements cannot overflow the call stack.
+fn strongly_connected_components(adj: &[Vec<usize>]) -> (Vec<usize>, usize) {
+    const UNVISITED: usize = usize::MAX;
+    let n = adj.len();
+    let mut index = vec![UNVISITED; n];
+    let mut lowlink = vec![0; n];
+    let mut on_stack = vec![false; n];
+    let mut open: Vec<usize> = Vec::new();
+    let mut found = vec![UNVISITED; n];
+    let mut next_index = 0;
+    let mut ncomp = 0;
+    // Each frame is a vertex being visited and how many of its successors it has
+    // already followed.
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    for root in 0..n {
+        if index[root] != UNVISITED {
+            continue;
+        }
+        index[root] = next_index;
+        lowlink[root] = next_index;
+        next_index += 1;
+        open.push(root);
+        on_stack[root] = true;
+        frames.push((root, 0));
+        while let Some(frame) = frames.last_mut() {
+            let (v, followed) = *frame;
+            if let Some(&w) = adj[v].get(followed) {
+                frame.1 += 1;
+                if index[w] == UNVISITED {
+                    index[w] = next_index;
+                    lowlink[w] = next_index;
+                    next_index += 1;
+                    open.push(w);
+                    on_stack[w] = true;
+                    frames.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                lowlink[parent] = lowlink[parent].min(lowlink[v]);
+            }
+            if lowlink[v] == index[v] {
+                loop {
+                    let w = open.pop().expect("v is still on the stack");
+                    on_stack[w] = false;
+                    found[w] = ncomp;
+                    if w == v {
+                        break;
+                    }
+                }
+                ncomp += 1;
+            }
+        }
+    }
+    // Tarjan finds components sinks-first; renumber them by smallest vertex.
+    let mut renumbered = vec![UNVISITED; ncomp];
+    let mut next_label = 0;
+    let comp = found
+        .iter()
+        .map(|&c| {
+            if renumbered[c] == UNVISITED {
+                renumbered[c] = next_label;
+                next_label += 1;
+            }
+            renumbered[c]
+        })
+        .collect();
+    (comp, ncomp)
 }
 
-/// [`identity`], borrowed from `e`: the field and its value. The engine's matching
-/// and the collapse check's both go through it, so the two agree on what a key is.
-pub(crate) fn key_of<'a, L: Leaf>(
-    e: &'a Node<L>,
-    keys: &[String],
-) -> Option<(&'a str, &'a Node<L>)> {
+/// A record's identity for keyed matching: the first `keys` field it carries and
+/// that field's value, borrowed from the record (the field disambiguates `name:"x"`
+/// from `id:"x"`).
+type Ident<'a, L> = (&'a str, &'a Node<L>);
+
+/// The [`Ident`] of `e`, or `None` if `e` isn't an object with a candidate field.
+/// The engine's matching and the collapse check's both go through it, so the two
+/// agree on what a key is.
+pub(crate) fn key_of<'a, L: Leaf>(e: &'a Node<L>, keys: &[String]) -> Option<Ident<'a, L>> {
     let map = e.as_map()?;
     keys.iter()
         .find_map(|f| map.get_key_value(f).map(|(f, v)| (f.as_str(), v)))
@@ -580,36 +634,50 @@ fn membership_merge<L: Leaf>(
     desired: &[Node<L>],
     base: &[Node<L>],
 ) -> Vec<Node<L>> {
-    let in_base = |e: &Node<L>| base.contains(e);
-    let in_target = |e: &Node<L>| target.contains(e);
-    let in_desired = |e: &Node<L>| desired.contains(e);
+    let in_base: HashSet<&Node<L>> = base.iter().collect();
+    let in_target: HashSet<&Node<L>> = target.iter().collect();
+    let in_desired: HashSet<&Node<L>> = desired.iter().collect();
 
+    let mut kept: HashSet<&Node<L>> = HashSet::new();
     let mut out: Vec<Node<L>> = Vec::new();
     // TARGET order first: keep each element unless it is a BASE element that
     // DESIRED dropped (a managed deletion).
     for e in target {
-        let dropped_from_desired = in_base(e) && !in_desired(e);
-        if !dropped_from_desired && !out.contains(e) {
+        let dropped_from_desired = in_base.contains(e) && !in_desired.contains(e);
+        if !dropped_from_desired && kept.insert(e) {
             out.push(e.clone());
         }
     }
     // Then DESIRED-only insertions, in DESIRED order -- but a BASE element the user
     // already removed from TARGET stays removed (don't resurrect it).
     for e in desired {
-        let removed_from_target = in_base(e) && !in_target(e);
-        if !removed_from_target && !out.contains(e) {
+        let removed_from_target = in_base.contains(e) && !in_target.contains(e);
+        if !removed_from_target && kept.insert(e) {
             out.push(e.clone());
         }
     }
     out
 }
 
+/// The fixed tie-break between vertices that are otherwise free to go in either
+/// order: earliest in TARGET, then in DESIRED, then by index.
+fn tie_break_key(
+    target_pos: &[Option<usize>],
+    desired_pos: &[Option<usize>],
+    v: usize,
+) -> (usize, usize, usize) {
+    (
+        target_pos[v].unwrap_or(usize::MAX),
+        desired_pos[v].unwrap_or(usize::MAX),
+        v,
+    )
+}
+
 /// Serialize the vertices of one strongly connected component. A trivial (size-1)
 /// component is the vertex itself; a cycle is emitted by a marking rule -- start
 /// from the vertices first in TARGET or DESIRED, follow successor edges, and mark
 /// each emitted vertex's successors as eligible -- so the intra-cycle order follows
-/// an actual input rather than inventing one. Ties break by `key(v)` (earliest in
-/// TARGET, then DESIRED, then index).
+/// an actual input rather than inventing one. Ties break by [`tie_break_key`].
 fn order_scc(
     members: &[usize],
     adj: &[Vec<usize>],
@@ -619,13 +687,7 @@ fn order_scc(
     if members.len() == 1 {
         return vec![members[0]];
     }
-    let key = |v: usize| {
-        (
-            target_pos[v].unwrap_or(usize::MAX),
-            desired_pos[v].unwrap_or(usize::MAX),
-            v,
-        )
-    };
+    let key = |v: usize| tie_break_key(target_pos, desired_pos, v);
     let inset: HashSet<usize> = members.iter().copied().collect();
     let mut marked: HashSet<usize> = HashSet::new();
     // Mark the vertex first in TARGET and the vertex first in DESIRED.
@@ -680,7 +742,100 @@ fn order_scc(
 
 #[cfg(test)]
 mod tests {
-    use super::gts_order;
+    use super::{gts_order, strongly_connected_components};
+
+    /// The components by brute force, numbered the same way: a Warshall
+    /// reachability closure, grouping vertices that reach each other.
+    fn components_by_closure(adj: &[Vec<usize>]) -> (Vec<usize>, usize) {
+        let n = adj.len();
+        let mut reach = vec![vec![false; n]; n];
+        for (v, row) in reach.iter_mut().enumerate() {
+            row[v] = true;
+        }
+        for (a, successors) in adj.iter().enumerate() {
+            for &b in successors {
+                reach[a][b] = true;
+            }
+        }
+        for k in 0..n {
+            let row_k = reach[k].clone();
+            for row_i in reach.iter_mut() {
+                if row_i[k] {
+                    for (j, &reachable) in row_k.iter().enumerate() {
+                        if reachable {
+                            row_i[j] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let mut comp = vec![usize::MAX; n];
+        let mut ncomp = 0;
+        for v in 0..n {
+            if comp[v] != usize::MAX {
+                continue;
+            }
+            comp[v] = ncomp;
+            for u in (v + 1)..n {
+                if comp[u] == usize::MAX && reach[v][u] && reach[u][v] {
+                    comp[u] = ncomp;
+                }
+            }
+            ncomp += 1;
+        }
+        (comp, ncomp)
+    }
+
+    /// A small deterministic generator, so the comparison needs no dependency and
+    /// fails the same way every run.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) % bound as u64) as usize
+        }
+    }
+
+    #[test]
+    fn components_match_a_reachability_closure() {
+        let mut rng = Lcg(1);
+        let mut compared = 0;
+        for _ in 0..2000 {
+            let n = rng.below(24);
+            let edge_count = if n == 0 { 0 } else { rng.below(3 * n + 1) };
+            let mut adj = vec![Vec::new(); n];
+            for _ in 0..edge_count {
+                let from = rng.below(n);
+                adj[from].push(rng.below(n));
+            }
+            for row in adj.iter_mut() {
+                row.sort_unstable();
+                row.dedup();
+            }
+            assert_eq!(
+                strongly_connected_components(&adj),
+                components_by_closure(&adj),
+                "graph: {adj:?}"
+            );
+            compared += 1;
+        }
+        assert_eq!(compared, 2000);
+    }
+
+    #[test]
+    fn components_of_a_long_cycle_and_chain_do_not_overflow_the_stack() {
+        let n = 100_000;
+        let cycle: Vec<Vec<usize>> = (0..n).map(|v| vec![(v + 1) % n]).collect();
+        assert_eq!(strongly_connected_components(&cycle), (vec![0; n], 1));
+        let chain: Vec<Vec<usize>> = (0..n)
+            .map(|v| if v + 1 < n { vec![v + 1] } else { Vec::new() })
+            .collect();
+        assert_eq!(strongly_connected_components(&chain), ((0..n).collect(), n));
+    }
 
     /// Run `gts_order` over space-separated element names and render its result
     /// the same way, as `(order, conflict)`. A name's vertex index is its
