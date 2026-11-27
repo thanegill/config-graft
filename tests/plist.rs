@@ -3,7 +3,7 @@
 use std::fs;
 
 mod common;
-use common::{run, stderr_of};
+use common::{applies_then_settles, run, stderr_of};
 
 fn pint(i: i64) -> plist::Value {
     plist::Value::Integer(i.into())
@@ -1923,4 +1923,78 @@ fn a_refusal_quotes_a_key_holding_a_bracket() {
 
     let err = stderr_of(&["plist", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(err.contains(r#"x:"[b]""#), "got: {err}");
+}
+
+/// `value` serialized as an XML plist.
+fn xml(value: plist::Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    value.to_writer_xml(&mut bytes).unwrap();
+    bytes
+}
+
+/// `value` serialized as a binary plist.
+fn binary(value: plist::Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    value.to_writer_binary(&mut bytes).unwrap();
+    bytes
+}
+
+/// The float at `key` in a written plist, or each float of the array there, as
+/// raw bits so the sign of a zero is compared rather than folded away by `==`.
+fn real_bits(written: &[u8], key: &str) -> Vec<u64> {
+    let value = plist::Value::from_reader(std::io::Cursor::new(written)).unwrap();
+    let reals = match value.as_dictionary().unwrap().get(key).unwrap() {
+        plist::Value::Array(items) => items.iter().map(|v| v.as_real().unwrap()).collect(),
+        other => vec![other.as_real().unwrap()],
+    };
+    reals.into_iter().map(f64::to_bits).collect()
+}
+
+#[test]
+fn a_declared_negative_zero_replaces_zero_plist() {
+    let written = applies_then_settles(
+        "plist",
+        &xml(pdict(vec![
+            ("z", plist::Value::Real(0.0)),
+            ("app", plist::Value::Boolean(true)),
+        ])),
+        &xml(pdict(vec![("z", plist::Value::Real(-0.0))])),
+        &[],
+        "~ z: 0.0 => -0.0\n",
+    );
+    assert_eq!(real_bits(&written, "z"), [(-0.0f64).to_bits()]);
+}
+
+#[test]
+fn a_declared_negative_zero_replaces_zero_in_a_binary_plist() {
+    let written = applies_then_settles(
+        "plist",
+        &binary(pdict(vec![("z", plist::Value::Real(0.0))])),
+        &binary(pdict(vec![("z", plist::Value::Real(-0.0))])),
+        &[],
+        "~ z: 0.0 => -0.0\n",
+    );
+    assert!(written.starts_with(b"bplist00"), "not written as binary");
+    assert_eq!(real_bits(&written, "z"), [(-0.0f64).to_bits()]);
+}
+
+#[test]
+fn zero_and_negative_zero_are_two_array_members_plist() {
+    let written = applies_then_settles(
+        "plist",
+        &xml(pdict(vec![(
+            "a",
+            plist::Value::Array(vec![plist::Value::Real(0.0)]),
+        )])),
+        &xml(pdict(vec![(
+            "a",
+            plist::Value::Array(vec![plist::Value::Real(-0.0)]),
+        )])),
+        &["--array-strategy", "set"],
+        "~ a: [0.0] => [0.0,-0.0]\n",
+    );
+    assert_eq!(
+        real_bits(&written, "a"),
+        [0.0f64.to_bits(), (-0.0f64).to_bits()]
+    );
 }

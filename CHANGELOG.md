@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **An object DESIRED declares empty survives the prune that emptied it**, instead of being deleted and re-added on the next run. YAML writes it as `key: {}`, and TOML turns an emptied dotted or implicit table into an explicit `[a]` header.
 - **YAML:** a DESIRED key under an existing `key: {}` is written instead of refused; a comment on its key line is dropped.
+- **A declared `-0.0` replaces an existing `0.0`** ([#40](https://github.com/thanegill/config-graft/issues/40)): the sign of a zero is part of its value in every format, so an array keeps both and a `-0.0` the app rewrote as `0.0` is no longer pruned.
 - **YAML:** a file nested past 512 containers is refused (exit 1) instead of crashing with a stack overflow; a deep BASE disables pruning.
 - **A key holding `[` or opening with `"` is quoted in warnings and refusals** (`x."[b]"`), so it can't be mistaken for a `--merge-key` selector; directory `--diff` keeps the `/` before a name starting with `[`.
 - **YAML:** a file of only comments, or a bare `---`, is an empty mapping instead of an error, and its text is kept.

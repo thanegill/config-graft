@@ -3,7 +3,7 @@
 use std::fs;
 
 mod common;
-use common::{run, stderr_of};
+use common::{applies_then_settles, run, stderr_of};
 
 fn assert_yaml_eq(actual: &str, expected: &str) {
     use saphyr::LoadableYamlNode;
@@ -1323,4 +1323,34 @@ fn a_document_at_the_depth_cap_reconciles_end_to_end() {
         );
         assert_eq!(fs::read_to_string(&target).unwrap(), "b: 1\n");
     }
+}
+
+#[test]
+fn a_declared_negative_zero_replaces_zero_yaml() {
+    let written = applies_then_settles(
+        "yaml",
+        b"z: 0.0  # keep\napp: true\n",
+        b"z: -0.0\n",
+        &[],
+        "~ z: 0.0 => -0.0\n",
+    );
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "z: -0.0  # keep\napp: true\n"
+    );
+}
+
+#[test]
+fn zero_and_negative_zero_are_two_array_members_yaml() {
+    let written = applies_then_settles(
+        "yaml",
+        b"a:\n  - 0.0\n",
+        b"a:\n  - -0.0\n",
+        &["--array-strategy", "set"],
+        "~ a: [0.0] => [0.0,-0.0]\n",
+    );
+    assert_yaml_eq(
+        &String::from_utf8(written).unwrap(),
+        "a:\n  - 0.0\n  - -0.0\n",
+    );
 }
