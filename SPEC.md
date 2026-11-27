@@ -105,7 +105,8 @@ Key paths in warnings and refusals:
 
 - a path can point past an array, where nothing is managed: a value in an input's element by its position (`checks[0]:when`, never `checks:when`, a key the file does not have), and a keyed record by its key (`servers[name="web"]`);
 - a key that holds a `[` or opens with `"` is shown JSON-quoted (`x."[b]"`), so it cannot read as an element selector and a quoted key cannot be forged;
-- a control byte inside a quoted key is escaped JSON-style (`\u001b`).
+- a selector field that holds a `[` or `]`, or opens with `"`, is JSON-quoted the same way (`["a]b"=1]`);
+- a plain key, a selector field and a `--diff` label are escaped as Rust's `escape_debug` does, so nothing in them can act on the terminal: a control, format, unassigned or private-use character, or a space other than U+0020, shows as `\u{1b}`, and `"`, `\`, `'`, tab, newline and carriage return as `\"`, `\\`, `\'`, `\t`, `\n` and `\r`. A parser's message in a refusal is escaped the same way. A quoted key or selector field, and a selector's value, are JSON tokens, so there JSON's own escaping stands and only what it leaves raw is escaped, JSON-style (`\u0085`).
 
 `--merge-key PATH`, by contrast, takes such a key as written (`x.[b]`), not quoted.
 

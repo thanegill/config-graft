@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - **`--diff` shows an empty object added or removed** (`+ a = {}`), where it printed nothing while `--check` reported the change.
+- **Key paths and parser messages are escaped as Rust's `escape_debug` does** in warnings, refusals and `--diff`, so C1 controls, bidi and other format characters, non-ASCII spaces and unassigned code points no longer reach the terminal raw; `"`, `\`, `'`, tab, newline and carriage return now print as `\"`, `\\`, `\'`, `\t`, `\n` and `\r`, and a selector field holding a bracket or opening with `"` is quoted.
 - **TOML, plist:** `--diff` shows a non-finite float as `inf`, `-inf`, `nan` or `-nan` instead of `null`, which read as a different value; what was written was already right.
 - **TOML:** a CRLF file keeps its line endings instead of being rewritten entirely to LF, even by a run that changed nothing (where `--check` also exited 3); a file that mixes endings takes the one most of its lines have.
 - **YAML:** the refusal for an unsafe edit no longer says anchors and aliases are unsupported; it names an edit that would change what an alias resolves to, and so does `yaml --help`.

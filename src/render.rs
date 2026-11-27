@@ -4,7 +4,7 @@
 //! Three format-agnostic primitives -- `quote` (a JSON-escaped string),
 //! `render_f64` (a float as JSON spells it, or as TOML spells NaN and the
 //! infinities) and `write_separated` (a `Display`-based join) -- then
-//! `escape_unprintable`, shared by every path label, and
+//! `escape_debug`, shared by every path label and parser message, and
 //! [`DiagnosticPath::render`], the paths that warnings and refusals name; and the
 //! two renderings of a whole [`Node`]: its `Display` (the compact single-line
 //! token) and [`Node::diff`], the leaf-level `+`/`-`/`~` listing behind `--diff`.
@@ -84,32 +84,83 @@ pub fn write_separated<T, D: std::fmt::Display>(
     items.try_for_each(|item| write!(f, "{sep}{}", display(item)))
 }
 
-/// Escape anything unprintable, so rendering a path cannot emit a control byte into
-/// the reader's terminal. Only *rendering* escapes: a segment stays the real key, or
-/// a path built for display could no longer be looked up.
-fn escape_unprintable(segment: &str) -> String {
-    let unprintable = |c: char| c < '\u{20}' || c == '\u{7f}';
-    if !segment.chars().any(unprintable) {
-        return segment.to_string();
+/// `text` as Rust's `str::escape_debug` writes it, so rendering a path or a parser's
+/// message cannot write to the reader's terminal: a control, format, unassigned or
+/// private-use character, and any space but U+0020, becomes `\u{1b}`, and `"`, `\`,
+/// `'`, tab, newline and carriage return become `\"`, `\\`, `\'`, `\t`, `\n` and
+/// `\r`. Only *rendering* escapes: a segment stays the real key, or a path built for
+/// display could no longer be looked up.
+pub(crate) fn escape_debug(text: &str) -> String {
+    text.escape_debug().to_string()
+}
+
+/// Whether `escape_debug` escapes `c` where it does not start the text. A combining
+/// mark is escaped only at the start, where nothing precedes it to combine with.
+fn escaped_by_debug(c: char) -> bool {
+    ['a', c].iter().collect::<String>().escape_debug().count() > 2
+}
+
+/// `token`, already JSON-quoted, with every character `escape_debug` would escape
+/// that JSON leaves raw escaped the JSON way too: `\u007f`, or a surrogate pair past
+/// the Basic Multilingual Plane. JSON quoting has already escaped `"`, `\` and the
+/// C0 controls, so those are left as they are rather than escaped twice, and so is
+/// `'`, which needs nothing inside a JSON string. The first character of each
+/// string is judged as `escape_debug` judges the start of a text, so a combining
+/// mark there is escaped as it would be in a plain key.
+fn escape_debug_json(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let (mut in_string, mut after_backslash, mut string_start) = (false, false, false);
+    for c in token.chars() {
+        let starts_string = std::mem::take(&mut string_start);
+        if in_string && !after_backslash && c == '"' {
+            in_string = false;
+        } else if !in_string && c == '"' {
+            in_string = true;
+            string_start = true;
+        }
+        after_backslash = in_string && !after_backslash && c == '\\';
+        let escaped = if starts_string {
+            c.escape_debug().len() > 1
+        } else {
+            escaped_by_debug(c)
+        };
+        if matches!(c, '"' | '\\' | '\'') || !escaped {
+            out.push(c);
+            continue;
+        }
+        for unit in c.encode_utf16(&mut [0; 2]) {
+            write!(out, "\\u{unit:04x}").expect("writing to a String");
+        }
     }
-    segment
-        .chars()
-        .map(|c| {
-            if unprintable(c) {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    out
+}
+
+/// A key or selector field JSON-quoted, with no [`escape_debug`] escape left raw.
+fn quote_key(key: &str) -> String {
+    escape_debug_json(&quote(key))
+}
+
+/// A keyed record's selector, `[field=value]`, wherever a diagnostic names one: in
+/// a path, or as the identity a merge key matched. A field holding a bracket would
+/// read as the selector's own end, so it is quoted, as a key is, and so is one
+/// opening with `"`. `value` is a `--diff` token, whose strings are already quoted.
+pub(crate) fn render_selector(field: &str, value: impl fmt::Display) -> String {
+    let field = if field.contains(['[', ']']) || field.starts_with('"') {
+        quote_key(field)
+    } else {
+        escape_debug(field)
+    };
+    let value = escape_debug_json(&value.to_string());
+    format!("[{field}={value}]")
 }
 
 impl DiagnosticPath {
     /// Render as a user-facing string: steps joined by `sep` (format-specific), or
     /// `<root>` for the empty path. An index or a selector attaches directly to the
     /// preceding key with no separator (`checks[0]:when`, `servers[name="web"]`),
-    /// so a key holding a `[` is quoted (`x."[b]"`) or it would read as one -- and
-    /// so is a key opening with `"`, or a quoted key could be forged.
+    /// so a key holding a `[` is quoted (`x."[b]"`) or it would read as one -- as is
+    /// a key opening with `"`, so a quote that opens a step always opens a quoted
+    /// key. A selector renders through [`render_selector`].
     pub fn render(&self, sep: &str) -> String {
         if self.is_empty() {
             return "<root>".to_string();
@@ -122,18 +173,13 @@ impl DiagnosticPath {
                         out.push_str(sep);
                     }
                     if key.contains('[') || key.starts_with('"') {
-                        // JSON leaves DEL unescaped; a terminal must not see it.
-                        out.push_str(&quote(key).replace('\u{7f}', "\\u007f"));
+                        out.push_str(&quote_key(key));
                     } else {
-                        out.push_str(&escape_unprintable(key));
+                        out.push_str(&escape_debug(key));
                     }
                 }
                 Step::Index(index) => write!(out, "[{index}]").expect("writing to a String"),
-                Step::Selector { field, value } => {
-                    let field = escape_unprintable(field);
-                    let value = escape_unprintable(value);
-                    write!(out, "[{field}={value}]").expect("writing to a String");
-                }
+                Step::Selector { field, value } => out.push_str(&render_selector(field, value)),
             }
         }
         out
@@ -220,7 +266,7 @@ impl<L: Leaf> Node<L> {
                 if key.is_empty() && !is_dir_attrs {
                     quote(key)
                 } else {
-                    escape_unprintable(key)
+                    escape_debug(key)
                 }
             })
         })
@@ -259,8 +305,15 @@ impl<L: Leaf> fmt::Display for Node<L> {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_unprintable, render_f64};
+    use super::{escape_debug, render_f64};
+    use crate::format::json::JsonLeaf;
+    use crate::format::{Format, Json};
+    use crate::value::Node;
     use crate::warning::{DiagnosticPath, Step};
+
+    fn json(text: &str) -> Node<JsonLeaf> {
+        Json::parse(text.as_bytes()).unwrap()
+    }
 
     /// A path of object keys.
     fn keys(segments: &[&str]) -> DiagnosticPath {
@@ -311,11 +364,13 @@ mod tests {
 
     #[test]
     fn path_render_leaves_other_punctuation_unquoted() {
-        assert_eq!(keys(&["a]", "b=c", r#"d"e"#]).render("."), r#"a].b=c.d"e"#);
+        assert_eq!(keys(&["a]", "b=c", "d'e"]).render("."), r"a].b=c.d\'e");
+        // A plain key escapes as `escape_debug` does, quotes and backslashes too.
+        assert_eq!(keys(&[r#"d"e\f"#]).render("."), r#"d\"e\\f"#);
     }
 
     /// A quoted key escapes a control byte the JSON way, not as the
-    /// `escape_unprintable` form an unquoted key gets.
+    /// `escape_debug` form an unquoted key gets.
     #[test]
     fn path_render_escapes_a_control_byte_in_a_quoted_key_as_json_does() {
         let escape = char::from(0x1b_u8);
@@ -334,12 +389,115 @@ mod tests {
     }
 
     #[test]
-    fn escape_unprintable_escapes_only_c0_controls_and_delete() {
-        let text: String = ['a', ' ', '~', '\u{1f}', '\u{7f}', '\u{80}']
+    fn escape_debug_escapes_as_rust_debug_formatting_does() {
+        let text: String = ['a', ' ', '~', '\u{1f}', '\u{7f}', '\u{85}', '\u{202e}', 'é']
             .iter()
             .collect();
-        assert_eq!(escape_unprintable(&text), "a ~\\u{1f}\\u{7f}\u{80}");
-        assert_eq!(escape_unprintable("plain key"), "plain key");
+        assert_eq!(escape_debug(&text), r"a ~\u{1f}\u{7f}\u{85}\u{202e}é");
+        assert_eq!(escape_debug("plain key"), "plain key");
+        // Format characters a hand-kept list missed, a non-ASCII space, and the
+        // characters `escape_debug` writes with a short escape.
+        let more: String = [
+            '\u{600}', '\u{8e2}', '\u{a0}', '\t', '\n', '\r', '"', '\\', '\'',
+        ]
+        .iter()
+        .collect();
+        assert_eq!(escape_debug(&more), r#"\u{600}\u{8e2}\u{a0}\t\n\r\"\\\'"#);
+    }
+
+    /// Inside a quoted token JSON's own escapes stand, so `\` and `"` are not escaped
+    /// twice and `'` is left alone; and a combining mark that starts a string is
+    /// escaped there as `escape_debug` escapes one at the start of a plain key.
+    #[test]
+    fn a_quoted_token_is_escaped_once_and_judges_a_string_start_as_escape_debug_does() {
+        assert_eq!(keys(&[r"[a\b'c"]).render("."), r#""[a\\b'c""#);
+        let acute = char::from_u32(0x301).unwrap();
+        let mark_first = format!("{acute}[x");
+        assert_eq!(keys(&[&mark_first]).render("."), r#""\u0301[x""#);
+        assert_eq!(
+            keys(&[&format!("a{acute}")]).render("."),
+            format!("a{acute}")
+        );
+        let mut selector = keys(&["t"]);
+        selector.prepend(Step::Selector {
+            field: "n".to_string(),
+            value: format!("\"{acute}\""),
+        });
+        selector.prepend(Step::Key("s".to_string()));
+        assert_eq!(selector.render("."), r#"s[n="\u0301"].t"#);
+        // Only a string's opening quote starts it: not an escaped quote inside it, and
+        // not the quote that closes the string before it.
+        let after_escaped_quote = format!("[a\"{acute}");
+        assert_eq!(
+            keys(&[&after_escaped_quote]).render("."),
+            format!(r#""[a\"{acute}""#)
+        );
+        let after_two_escaped_quotes = format!("[a\"\"{acute}");
+        assert_eq!(
+            keys(&[&after_two_escaped_quotes]).render("."),
+            format!(r#""[a\"\"{acute}""#)
+        );
+        let mut two_strings = keys(&["t"]);
+        two_strings.prepend(Step::Selector {
+            field: "n".to_string(),
+            value: format!("{{\"a{acute}\":\"{acute}\"}}"),
+        });
+        two_strings.prepend(Step::Key("s".to_string()));
+        assert_eq!(
+            two_strings.render("."),
+            format!(r#"s[n={{"a{acute}":"\u0301"}}].t"#)
+        );
+    }
+
+    /// A key a terminal would act on -- a C1 control, a bidi override -- is escaped
+    /// wherever a path shows it: plain, quoted, in a selector, and in `--diff`.
+    #[test]
+    fn path_render_escapes_c1_and_bidi_characters() {
+        let next_line = char::from_u32(0x85).unwrap();
+        let override_ = char::from_u32(0x202e).unwrap();
+        let tag = char::from_u32(0xe0041).unwrap();
+        let plain = format!("a{next_line}b{override_}");
+        assert_eq!(keys(&["x", &plain]).render("."), r"x.a\u{85}b\u{202e}");
+        let quoted = format!("[{next_line}{override_}{tag}");
+        assert_eq!(
+            keys(&["x", &quoted]).render("."),
+            r#"x."[\u0085\u202e\udb40\udc41""#
+        );
+
+        let mut selector = keys(&["tags"]);
+        selector.prepend(Step::Selector {
+            field: format!("n{override_}"),
+            value: format!("\"w{next_line}{}\"", char::from(0x7f_u8)),
+        });
+        selector.prepend(Step::Key("s".to_string()));
+        assert_eq!(selector.render(":"), r#"s[n\u{202e}="w\u0085\u007f"]:tags"#);
+
+        let diff = json(&format!(r#"{{"k{override_}":1}}"#)).diff(&json("{}"), ".");
+        assert_eq!(diff, "- k\\u{202e} = 1\n");
+    }
+
+    /// A selector field holding a bracket would read as the selector's own end, so
+    /// it is quoted like a key that would read as a selector.
+    #[test]
+    fn path_render_quotes_a_selector_field_holding_a_bracket() {
+        let selector = |field: &str| {
+            let mut p = keys(&["tags"]);
+            p.prepend(Step::Selector {
+                field: field.to_string(),
+                value: "1".to_string(),
+            });
+            p.prepend(Step::Key("s".to_string()));
+            p.render(".")
+        };
+        assert_eq!(selector("a]b"), r#"s["a]b"=1].tags"#);
+        assert_eq!(selector("[a"), r#"s["[a"=1].tags"#);
+        assert_eq!(selector(r#""a"#), r#"s["\"a"=1].tags"#);
+        assert_eq!(selector("a=b"), "s[a=b=1].tags");
+        let next_line = char::from_u32(0x85).unwrap();
+        assert_eq!(
+            selector(&format!("a]{next_line}")),
+            r#"s["a]\u0085"=1].tags"#
+        );
     }
 
     /// The boundaries where a writer switches between decimal and exponent
