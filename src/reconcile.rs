@@ -196,8 +196,17 @@ impl<L: Leaf> Node<L> {
     /// atomic leaves.
     pub(crate) fn leaf_paths(&self) -> Vec<ManagedPath> {
         let mut out = Vec::new();
-        let mut prefix = ManagedPath::new();
-        collect(self, &mut prefix, &mut out);
+        collect(self, &mut ManagedPath::new(), false, &mut out);
+        out
+    }
+
+    /// The paths `--diff` compares: the managed leaf paths, and every empty object
+    /// below the root. An empty object holds no leaf, so a `{}` added or removed
+    /// would otherwise show nothing while `--check` reports the change. Prune
+    /// keeps to [`Node::leaf_paths`], where a JSON `{}` is not a leaf.
+    pub(crate) fn diff_paths(&self) -> Vec<ManagedPath> {
+        let mut out = Vec::new();
+        collect(self, &mut ManagedPath::new(), true, &mut out);
         out
     }
 
@@ -244,13 +253,22 @@ impl<L: Leaf> Node<L> {
     }
 }
 
-/// Recurse into `v`, pushing the path of every leaf (non-map node) into `out`.
-fn collect<L: Leaf>(v: &Node<L>, prefix: &mut ManagedPath, out: &mut Vec<ManagedPath>) {
+/// Recurse into `v`, pushing the path of every leaf (non-map node) into `out`, and
+/// of every empty object below the root when `empty_objects_are_leaves`.
+fn collect<L: Leaf>(
+    v: &Node<L>,
+    prefix: &mut ManagedPath,
+    empty_objects_are_leaves: bool,
+    out: &mut Vec<ManagedPath>,
+) {
     match v {
+        Node::Map(map) if empty_objects_are_leaves && map.is_empty() && !prefix.is_empty() => {
+            out.push(prefix.clone());
+        }
         Node::Map(map) => {
             for (k, val) in map {
                 prefix.push(k.clone());
-                collect(val, prefix, out);
+                collect(val, prefix, empty_objects_are_leaves, out);
                 prefix.pop();
             }
         }

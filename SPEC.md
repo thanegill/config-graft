@@ -40,7 +40,7 @@ config-graft <FORMAT> [OPTIONS] --base <BASE> <TARGET> <DESIRED>
 - `--base <PATH>` — alternative to the positional BASE. Giving both is a usage error (exit 2), even when one of them is empty.
 - `--no-prune` — deep-merge only; never delete keys (ignore BASE for removals).
 - `--stdout` — write the result to stdout; do not modify TARGET. Byte-format subcommands only (a tree has no single byte stream, so the `directory` subcommand does not expose it).
-- `--diff` — print a human-readable, leaf-level diff of the changes. Key-paths use the format's separator: `.` for JSON/YAML/TOML, `:` for plist (PlistBuddy) — same as the `merge` conflict warning, except that `--diff` labels quote only an empty key (`""`); they never carry a selector, so a key holding `[` is shown as written.
+- `--diff` — print a human-readable, leaf-level diff of the changes; an empty object counts as a leaf in this listing (not for prune), so one added or removed shows as `{}`. Key-paths use the format's separator: `.` for JSON/YAML/TOML, `:` for plist (PlistBuddy) — same as the `merge` conflict warning, except that `--diff` labels quote only an empty key (`""`); they never carry a selector, so a key holding `[` is shown as written.
 - `--check` — exit non-zero if applying *would* change TARGET; write nothing (CI / idempotence).
 - `--indent <N|tab>` — output indentation (default: 2 spaces). **`json` subcommand only**.
 - `--sort-keys` — sort every object's keys in the output (default: preserve TARGET order, append new keys). Byte-format subcommands (`json`/`yaml`/`toml`/`plist`).

@@ -2505,3 +2505,14 @@ fn diff_shows_a_non_finite_real_as_inf_or_nan_in_an_xml_plist() {
     assert_eq!(real_bits(&written, "up"), [f64::INFINITY.to_bits()]);
     assert!(f64::from_bits(real_bits(&written, "odd")[0]).is_nan());
 }
+
+#[test]
+fn diff_shows_an_empty_dict_added() {
+    applies_then_settles(
+        "plist",
+        &xml(pdict(vec![("app", plist::Value::Boolean(true))])),
+        &xml(pdict(vec![("a", pdict(vec![("b", pdict(vec![]))]))])),
+        &[],
+        "+ a:b = {}\n",
+    );
+}

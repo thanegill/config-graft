@@ -1633,3 +1633,54 @@ fn help_shows_the_indent_default() {
         .expect("--indent is in json -h");
     assert!(line.ends_with("[default: 2]"), "got: {line}");
 }
+
+#[test]
+fn diff_shows_an_empty_object_added() {
+    let written = applies_then_settles(
+        "json",
+        br#"{"app":true}"#,
+        br#"{"a":{},"b":{"c":{}}}"#,
+        &[],
+        "+ a = {}\n+ b.c = {}\n",
+    );
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "{\n  \"app\": true,\n  \"a\": {},\n  \"b\": {\n    \"c\": {}\n  }\n}\n"
+    );
+}
+
+#[test]
+fn diff_shows_an_empty_object_filled() {
+    applies_then_settles(
+        "json",
+        br#"{"b":{}}"#,
+        br#"{"b":{"y":2}}"#,
+        &[],
+        "- b = {}\n+ b.y = 2\n",
+    );
+}
+
+#[test]
+fn diff_shows_an_object_emptied_by_a_prune() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.json");
+    fs::write(&base, r#"{"a":{"x":1}}"#).unwrap();
+    applies_then_settles(
+        "json",
+        br#"{"a":{"x":1}}"#,
+        br#"{"a":{}}"#,
+        &["--base", base.to_str().unwrap()],
+        "+ a = {}\n- a.x = 1\n",
+    );
+}
+
+#[test]
+fn diff_leaves_an_unchanged_empty_object_out() {
+    applies_then_settles(
+        "json",
+        br#"{"b":{},"x":1}"#,
+        br#"{"b":{},"x":2}"#,
+        &[],
+        "~ x: 1 => 2\n",
+    );
+}
