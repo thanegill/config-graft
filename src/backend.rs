@@ -3,10 +3,11 @@
 //! The byte formats and the directory tree walk are the same spine with different
 //! ends: read TARGET/DESIRED/BASE into `Node`s, reconcile, then
 //! diff/check/stdout/apply. The [`Backend`] trait captures those ends so a single
-//! [`run`] drives every format. Byte formats plug in via [`ByteBackend<F>`] over
-//! any [`Format`]; [`Directory`] is the tree backend -- which deliberately does
-//! *not* implement the byte-oriented `Format` trait (a tree has no single byte
-//! stream), so it lives here beside the formats rather than among them.
+//! [`Backend::run`] drives every format. Byte formats plug in via
+//! [`ByteBackend<F>`] over any [`Format`]; [`Directory`] is the tree backend --
+//! which deliberately does *not* implement the byte-oriented `Format` trait (a
+//! tree has no single byte stream), so it lives here beside the formats rather
+//! than among them.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -386,8 +387,8 @@ pub(crate) struct Prepared {
     changed: bool,
 }
 
-/// The I/O boundary of a reconcile run. [`run`] owns the shared flow and delegates
-/// the format-specific steps here.
+/// The I/O boundary of a reconcile run. [`Backend::run`] owns the shared flow and
+/// delegates the format-specific steps here.
 pub(crate) trait Backend {
     type Leaf: Leaf;
     /// Separator between key-path components in diagnostics (`--diff` lines and

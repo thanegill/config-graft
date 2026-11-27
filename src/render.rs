@@ -170,12 +170,12 @@ impl<L: Leaf> Node<L> {
             // a bare separator; any other empty key is quoted. `diff` is generic over
             // `L: Leaf` and can't name `FsLeaf`, so the concrete type answers through
             // the `Leaf::is_dir_attrs` trait method.
-            let is_dir_attrs = self
-                .get_path(path)
-                .or_else(|| new.get_path(path))
+            let (old_node, new_node) = (self.get_path(path), new.get_path(path));
+            let is_dir_attrs = old_node
+                .or(new_node)
                 .is_some_and(|node| matches!(node, Node::Leaf(leaf) if leaf.is_dir_attrs()));
             let disp = Self::diff_label(path, sep, is_dir_attrs);
-            match (self.get_path(path), new.get_path(path)) {
+            match (old_node, new_node) {
                 (None, Some(new_node)) => {
                     lines.push((path.clone(), format!("+ {disp} = {new_node}")))
                 }
@@ -204,17 +204,16 @@ impl<L: Leaf> Node<L> {
     /// empty component is quoted (`""`) so an empty-named key is unambiguous rather
     /// than reading as a directory line.
     fn diff_label(path: &ManagedPath, sep: &str, is_dir_attrs: bool) -> String {
-        let label = path
-            .iter()
-            .map(|key| {
+        let label = fmt::from_fn(|f| {
+            write_separated(f, path.iter(), sep, |key| {
                 if key.is_empty() && !is_dir_attrs {
                     quote(key)
                 } else {
                     escape_unprintable(key)
                 }
             })
-            .collect::<Vec<_>>()
-            .join(sep);
+        })
+        .to_string();
         if is_dir_attrs && label.is_empty() {
             sep.to_string()
         } else {

@@ -7,7 +7,7 @@
 //! every element of both sides is an object carrying it -- by that key, deep-merging
 //! the matched records.
 
-use super::{reconcile, ArrayStrategy, ManagedPath, NodeList, Options};
+use super::{reconcile, ArrayStrategy, ManagedPath, Options};
 use crate::value::{Leaf, Node};
 use crate::warning::{DiagnosticPath, Source, Step, Warning};
 use std::collections::{HashMap, HashSet};
@@ -25,7 +25,7 @@ pub(super) fn combine<L: Leaf>(
     base: Option<&Node<L>>,
     opts: &Options,
     path: &ManagedPath,
-) -> (NodeList<L>, Vec<Warning<L>>) {
+) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     match opts.arrays {
         // Atomic: DESIRED's array wins wholesale.
         ArrayStrategy::Replace => (desired.to_vec(), Vec::new()),
@@ -110,7 +110,7 @@ fn ordered_merge<L: Leaf>(
     base: &[Node<L>],
     opts: &Options,
     keys: Option<&[String]>,
-) -> (NodeList<L>, Vec<Warning<L>>) {
+) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     match keys {
         Some(keys) => keyed_merge(target, desired, base, opts, keys),
         None => value_merge(target, desired, base),
@@ -124,7 +124,7 @@ fn value_merge<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
-) -> (NodeList<L>, Vec<Warning<L>>) {
+) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     let verts = membership_merge(target, desired, base);
     let id_of = |e: &Node<L>| verts.iter().position(|v| v == e);
     let (out, mut warnings) = assemble(verts.len(), id_of, &verts, target, desired, base);
@@ -145,7 +145,7 @@ fn keyed_merge<L: Leaf>(
     base: &[Node<L>],
     opts: &Options,
     keys: &[String],
-) -> (NodeList<L>, Vec<Warning<L>>) {
+) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     let key = |e: &Node<L>| identity(e, keys);
     let has = |seq: &[Node<L>], k: &Ident<L>| seq.iter().any(|e| key(e).as_ref() == Some(k));
 
@@ -172,7 +172,7 @@ fn keyed_merge<L: Leaf>(
     // array.
     let find =
         |seq: &[Node<L>], k: &Ident<L>| seq.iter().find(|e| key(e).as_ref() == Some(k)).cloned();
-    let mut merged: NodeList<L> = Vec::with_capacity(survivors.len());
+    let mut merged: Vec<Node<L>> = Vec::with_capacity(survivors.len());
     let mut nested: Vec<Warning<L>> = Vec::new();
     for k in &survivors {
         let value = match (find(target, k), find(desired, k)) {
@@ -290,7 +290,7 @@ fn assemble<L: Leaf>(
     target: &[Node<L>],
     desired: &[Node<L>],
     base: &[Node<L>],
-) -> (NodeList<L>, Vec<Warning<L>>) {
+) -> (Vec<Node<L>>, Vec<Warning<L>>) {
     if n <= 1 {
         return (merged.to_vec(), Vec::new());
     }
@@ -309,7 +309,7 @@ fn assemble<L: Leaf>(
     };
     let (order, conflict_ids) =
         gts_order(n, &restrict(target), &restrict(desired), &restrict(base));
-    let out: NodeList<L> = order.iter().map(|&i| merged[i].clone()).collect();
+    let out: Vec<Node<L>> = order.iter().map(|&i| merged[i].clone()).collect();
     let conflicts = if conflict_ids.is_empty() {
         Vec::new()
     } else {

@@ -41,8 +41,8 @@ type Digest = [u8; 32];
 /// A file's or directory's tracked metadata: a filesystem-agnostic map of
 /// `attribute name -> raw value` (see [`FsLeaf`] for the well-known keys). A
 /// newtype (rather than a bare `BTreeMap` alias) so it can carry attribute logic
-/// like its [`Display`] summary; it `Deref`s to the map for the usual
-/// `insert`/`get`/`iter`.
+/// like its [`Display`](std::fmt::Display) summary; it `Deref`s to the map for the
+/// usual `insert`/`get`/`iter`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) struct FsAttrs(BTreeMap<String, Vec<u8>>);
 
@@ -131,7 +131,7 @@ const TEMP_PREFIX: &str = ".config-graft-tmp.";
 /// [`FsLeaf::DirectoryAttributes`] leaf. The empty string can never be a real directory
 /// entry (`readdir` never yields it), so it can't collide with a managed file --
 /// which lets a directory's metadata reconcile through the same engine as its
-/// entries, with no per-map side payload on [`Node`](crate::value::Node).
+/// entries, with no per-map side payload on [`Node`].
 const DIR_ATTRS_KEY: &str = "";
 
 /// Which extended attributes are managed.
