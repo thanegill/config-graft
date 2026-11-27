@@ -539,3 +539,18 @@ fn zero_and_negative_zero_are_two_array_members_toml() {
     );
     assert_eq!(String::from_utf8(written).unwrap(), "a = [0.0, -0.0]\n");
 }
+
+#[test]
+fn diff_shows_a_non_finite_float_as_toml_spells_it() {
+    let written = applies_then_settles(
+        "toml",
+        b"up = 1.0\ndown = 1.0\nodd = 1.0\nneg = 1.0\n",
+        b"up = inf\ndown = -inf\nodd = nan\nneg = -nan\n",
+        &[],
+        "~ down: 1.0 => -inf\n~ neg: 1.0 => -nan\n~ odd: 1.0 => nan\n~ up: 1.0 => inf\n",
+    );
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "up = inf\ndown = -inf\nodd = nan\nneg = -nan\n"
+    );
+}

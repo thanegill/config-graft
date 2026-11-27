@@ -2,13 +2,14 @@
 //! writes to disk. Warnings render in `warning`, errors in `error`.
 //!
 //! Three format-agnostic primitives -- `quote` (a JSON-escaped string),
-//! `render_f64` (a float as JSON spells it) and `write_separated` (a
-//! `Display`-based join) -- then `escape_unprintable`, shared by every path
-//! label, and [`DiagnosticPath::render`], the paths that warnings and refusals
-//! name; and the two renderings of a whole [`Node`]: its `Display` (the compact
-//! single-line token) and [`Node::diff`], the leaf-level `+`/`-`/`~` listing
-//! behind `--diff`. Each format's leaf `Display` lives with that format's codec
-//! and uses the primitives from here.
+//! `render_f64` (a float as JSON spells it, or as TOML spells NaN and the
+//! infinities) and `write_separated` (a `Display`-based join) -- then
+//! `escape_unprintable`, shared by every path label, and
+//! [`DiagnosticPath::render`], the paths that warnings and refusals name; and the
+//! two renderings of a whole [`Node`]: its `Display` (the compact single-line
+//! token) and [`Node::diff`], the leaf-level `+`/`-`/`~` listing behind `--diff`.
+//! Each format's leaf `Display` lives with that format's codec and uses the
+//! primitives from here.
 //!
 //! This output is asserted byte-for-byte by the test suite, so it is deliberately
 //! all in one file: `value` is the model the engine computes over, and `format` is
@@ -31,17 +32,24 @@ pub fn quote(s: &str) -> String {
 
 /// A float as JSON renders it: the shortest form that round-trips, via `ryu`, with
 /// serde_json's `+` on a positive exponent (the tests below check it against
-/// serde_json's own output). JSON has no NaN or infinity, so those render as
-/// `null`, as every JSON writer does. YAML builds its on-disk spelling from this
-/// one, so its `+` on an exponent is load-bearing there: a YAML 1.1 reader needs
-/// it.
+/// serde_json's own output). JSON never passes a non-finite value here and YAML
+/// spells its own (`.inf`, `.nan`), so only TOML and plist do; those render as
+/// `inf`, `-inf`, `nan` and `-nan`, as TOML spells them, rather than JSON's `null`.
+/// The sign of a NaN is shown because a TOML or binary plist write keeps it, though
+/// no comparison tells two NaNs apart; an XML plist writes every NaN as `NaN`, so
+/// there `-nan` names the value the run holds rather than what lands on disk. YAML
+/// builds its on-disk spelling from this one, so its `+` on an exponent is
+/// load-bearing there: a YAML 1.1 reader needs it.
 ///
 /// Hand-rolling this from Rust's `{:?}` is what the shortest round-tripping form
 /// tempts you into, and it is wrong: `{:?}` picks decimal-versus-exponent at
 /// different thresholds than JSON writers do, in more than one range.
 pub fn render_f64(f: f64) -> String {
-    if !f.is_finite() {
-        return "null".to_string();
+    if f.is_nan() {
+        return if f.is_sign_negative() { "-nan" } else { "nan" }.to_string();
+    }
+    if f.is_infinite() {
+        return if f.is_sign_positive() { "inf" } else { "-inf" }.to_string();
     }
     let mut buffer = ryu::Buffer::new();
     let rendered = buffer.format_finite(f);
@@ -216,8 +224,9 @@ impl<L: Leaf> Node<L> {
 }
 
 /// A compact, single-line token for `--diff`. JSON-representable values match
-/// `serde_json`'s compact form; plist-only leaves get a readable `<date ...>` /
-/// `<data N bytes>` / `<uid N>` token (they have no JSON rendering).
+/// `serde_json`'s compact form; values JSON has no spelling for get a readable
+/// token instead: plist's `<date ...>` / `<data N bytes>` / `<uid N>`, TOML's
+/// `<datetime ...>`, and `inf` / `nan` for a non-finite float.
 impl<L: Leaf> fmt::Display for Node<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -364,9 +373,10 @@ mod tests {
                 "mismatch for {v:e}"
             );
         }
-        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(render_f64(v), "null");
-        }
+        assert_eq!(render_f64(f64::NAN), "nan");
+        assert_eq!(render_f64(-f64::NAN), "-nan");
+        assert_eq!(render_f64(f64::INFINITY), "inf");
+        assert_eq!(render_f64(f64::NEG_INFINITY), "-inf");
     }
 
     /// The edge-case list above passed against a hand-rolled `{:?}` renderer that

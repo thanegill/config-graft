@@ -2463,3 +2463,45 @@ fn a_collapse_inside_a_keyed_record_is_reported_at_the_record() {
     );
     assert_eq!(repeats(&err), Vec::<&str>::new(), "stderr was: {err}");
 }
+
+#[test]
+fn diff_shows_a_non_finite_real_as_inf_or_nan() {
+    let written = applies_then_settles(
+        "plist",
+        &binary(pdict(vec![
+            ("up", plist::Value::Real(1.0)),
+            ("down", plist::Value::Real(1.0)),
+            ("odd", plist::Value::Real(1.0)),
+        ])),
+        &binary(pdict(vec![
+            ("up", plist::Value::Real(f64::INFINITY)),
+            ("down", plist::Value::Real(f64::NEG_INFINITY)),
+            ("odd", plist::Value::Real(f64::NAN)),
+        ])),
+        &[],
+        "~ down: 1.0 => -inf\n~ odd: 1.0 => nan\n~ up: 1.0 => inf\n",
+    );
+    assert_eq!(real_bits(&written, "up"), [f64::INFINITY.to_bits()]);
+    assert_eq!(real_bits(&written, "down"), [f64::NEG_INFINITY.to_bits()]);
+    assert!(f64::from_bits(real_bits(&written, "odd")[0]).is_nan());
+}
+
+#[test]
+fn diff_shows_a_non_finite_real_as_inf_or_nan_in_an_xml_plist() {
+    let written = applies_then_settles(
+        "plist",
+        &xml(pdict(vec![
+            ("up", plist::Value::Real(1.0)),
+            ("odd", plist::Value::Real(1.0)),
+        ])),
+        &xml(pdict(vec![
+            ("up", plist::Value::Real(f64::INFINITY)),
+            ("odd", plist::Value::Real(f64::NAN)),
+        ])),
+        &[],
+        "~ odd: 1.0 => nan\n~ up: 1.0 => inf\n",
+    );
+    assert!(written.starts_with(b"<?xml"), "not written as XML");
+    assert_eq!(real_bits(&written, "up"), [f64::INFINITY.to_bits()]);
+    assert!(f64::from_bits(real_bits(&written, "odd")[0]).is_nan());
+}

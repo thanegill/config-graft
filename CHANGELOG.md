@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **TOML, plist:** `--diff` shows a non-finite float as `inf`, `-inf`, `nan` or `-nan` instead of `null`, which read as a different value; what was written was already right.
 - **TOML:** a CRLF file keeps its line endings instead of being rewritten entirely to LF, even by a run that changed nothing (where `--check` also exited 3); a file that mixes endings takes the one most of its lines have.
 - **YAML:** the refusal for an unsafe edit no longer says anchors and aliases are unsupported; it names an edit that would change what an alias resolves to, and so does `yaml --help`.
 - **YAML:** a key added after an alias to a mapping or sequence (`b: *x`, `<<: *base`) is written after it instead of above earlier keys or refused, and such an alias can now be pruned or replaced.
