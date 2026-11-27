@@ -123,7 +123,7 @@ pub enum Warning<L: Leaf> {
     },
     /// A value the run's output encoding cannot render, replaced as soon as it was
     /// read with one that it can -- so the reconcile, `--diff` and the write all
-    /// agree. `because` completes the sentence "... because <because>".
+    /// agree. `because` completes the sentence `... because <because>`.
     ValueNormalized {
         path: DiagnosticPath,
         source: Source,
