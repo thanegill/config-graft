@@ -83,7 +83,7 @@ Plist notes:
 YAML notes:
 
 - **Comments, blank lines, and formatting are preserved** on the parts of the file config-graft doesn't change — it edits the existing text in place rather than re-emitting it. Only an empty/first-apply target is written canonically.
-- For safety it edits only the well-behaved subset of YAML and **refuses (exit 1, leaving the file untouched) rather than risk corruption** on custom tags, multi-document streams, non-string keys, a non-mapping root, an edit that would change what an alias resolves to, or replacing, pruning or editing inside an alias to a non-empty mapping or sequence. Anchors and aliases are otherwise kept as written, except in an entry config-graft re-renders (a changed sequence, a scalar turned into a collection), which is written expanded. Every write is verified to round-trip back to the intended result before it lands.
+- For safety it edits only the well-behaved subset of YAML and **refuses (exit 1, leaving the file untouched) rather than risk corruption** on custom tags, multi-document streams, non-string keys, a non-mapping root, an edit that would change what an alias resolves to, or editing inside an alias to a non-empty mapping or sequence. Anchors and aliases are otherwise kept as written, except in an entry config-graft re-renders (a changed sequence, a scalar turned into a collection), which is written expanded. Every write is verified to round-trip back to the intended result before it lands.
 - `--indent` is JSON-only; passing it with YAML is an error.
 
 TOML notes:

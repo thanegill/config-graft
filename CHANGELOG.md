@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - **YAML:** the refusal for an unsafe edit no longer says anchors and aliases are unsupported; it names an edit that would change what an alias resolves to, and so does `yaml --help`.
+- **YAML:** a key added after an alias to a mapping or sequence (`b: *x`, `<<: *base`) is written after it instead of above earlier keys or refused, and such an alias can now be pruned or replaced.
 - **YAML:** a key added to a mapping whose first entry is an explicit `? key` or an anchored or tagged key is written instead of refused; a comment indented under such a key is kept above a key added after it, and removed with it when it is pruned.
 - **YAML:** adding keys to a nested mapping that is the last entry of its parent, and to the parent in the same run, is written instead of refused.
 - **YAML:** a file whose lines mostly end in CRLF keeps that ending on the lines config-graft adds or re-renders, instead of mixing in bare LF lines.
