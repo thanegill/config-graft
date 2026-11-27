@@ -7,6 +7,9 @@
 //!
 //! Warnings are diagnostics only -- they never change the exit code.
 
+use std::fmt;
+
+use crate::render::write_separated;
 use crate::value::{Leaf, Node};
 
 /// One step of a [`DiagnosticPath`].
@@ -180,12 +183,11 @@ impl<L: Leaf> Warning<L> {
         let at = self.path().render(sep);
         match self {
             Warning::ContradictoryReorder { elements, .. } => {
-                let elements: Vec<String> = elements.iter().map(Node::to_string).collect();
+                let elements = fmt::from_fn(|f| write_separated(f, elements, ", ", |e| e));
                 format!(
-                    "array `{}` had a contradictory reorder of [{}] between TARGET and \
-                     DESIRED; resolved deterministically (TARGET order preferred)",
-                    at,
-                    elements.join(", ")
+                    "array `{at}` had a contradictory reorder of [{elements}] between \
+                     TARGET and DESIRED; resolved deterministically (TARGET order \
+                     preferred)"
                 )
             }
             Warning::DuplicateCollapsed {
