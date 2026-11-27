@@ -1621,3 +1621,15 @@ fn an_unmanaged_negative_zero_keeps_its_sign() {
         "{\n  \"i\": -0,\n  \"f\": -0.0,\n  \"e\": -0e5,\n  \"x\": 1\n}\n"
     );
 }
+
+#[test]
+fn help_shows_the_indent_default() {
+    let out = run(&["json", "-h"]);
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let line = help
+        .lines()
+        .find(|line| line.trim_start().starts_with("--indent"))
+        .expect("--indent is in json -h");
+    assert!(line.ends_with("[default: 2]"), "got: {line}");
+}
