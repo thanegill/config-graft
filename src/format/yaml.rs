@@ -368,9 +368,6 @@ mod tests {
 
     #[test]
     fn alias_is_resolved_to_its_value() {
-        // saphyr expands aliases during load, so the codec sees the resolved
-        // value. The comment-preserving editor detects anchors/aliases separately
-        // and refuses them.
         let node = yaml_to_node("a: &x 1\nb: *x\n").unwrap();
         assert_eq!(leaf(&node, "a"), YamlLeaf::Int(1));
         assert_eq!(leaf(&node, "b"), YamlLeaf::Int(1));

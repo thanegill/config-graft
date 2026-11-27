@@ -125,8 +125,8 @@ impl Error {
 }
 
 const YAML_UNSAFE: &str = "cannot safely edit this YAML while preserving comments \
-    (unsupported construct, e.g. anchors/aliases, a non-mapping root, or an edit \
-    that would not round-trip); aborting rather than risk corrupting the file";
+    (e.g. an edit that would change what an alias resolves to, or that would not \
+    round-trip); aborting rather than risk corrupting the file";
 
 const TOML_UNSAFE: &str = "cannot safely edit this TOML while preserving comments \
     (an edit that would not round-trip, e.g. a table-shape change the editor can't \
