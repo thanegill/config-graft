@@ -297,8 +297,8 @@ Implemented in **Rust** (this repo):
 - `src/backend.rs` — the shared run: read the three inputs, reconcile, then `--diff`/`--check`/`--stdout`/write. The node type varies per format, so dispatch is **static** through the `Backend` trait's provided `run`: `main` matches the clap subcommand, builds a `RunArgs` from its flags, and calls `ByteBackend::<F>::run` (or `Directory::run` for a tree, §5b).
 - `src/format/yaml_edit.rs` — the comment-preserving YAML writer: a structural diff of the original vs reconciled `Node<YamlLeaf>` trees drives minimal byte-span edits against the original text (spans from `saphyr`'s `MarkedYaml`), with a round-trip backstop that refuses any write that wouldn't reproduce the reconciled result.
 - `src/format/toml_edit_apply.rs` — the comment-preserving TOML writer: mutates `toml_edit`'s format-preserving `DocumentMut` in place (touching only the keys that changed), with the same round-trip backstop that refuses any write that wouldn't reproduce the reconciled result.
-- `src/error.rs` — a typed `Error` enum (format-specific DESIRED errors) and an `Outcome`; `src/main.rs` maps these to exit codes.
-- `src/main.rs` — CLI (clap, per-format subcommands) and the atomic write.
+- `src/error.rs` — a typed `Error` enum (format-specific DESIRED errors) and an `Outcome`; `src/lib.rs` maps these to exit codes.
+- `src/lib.rs` — CLI (clap, per-format subcommands), its `main` and the atomic write; `src/bin/config-graft.rs` only calls that `main`. The library target exists so `xtask` can reach the clap command tree.
 - `tests/{json,plist,yaml,toml,directory}.rs` (+ `tests/common`) — per-format integration tests exercising exit codes and file behavior. `tests/stdout_failure.rs` holds the one test that needs a test binary to itself (a failed `--stdout` write).
 - Map nodes use `indexmap`, and the JSON codec reads objects as an ordered list of entries, so TARGET key order is kept and new keys are appended.
 

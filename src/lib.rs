@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::builder::{OsStringValueParser, TypedValueParser};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod backend;
 mod error;
@@ -306,7 +306,13 @@ impl RunArgs {
     }
 }
 
-fn main() {
+/// The clap command tree, for tooling that renders it (the `xtask` man pages).
+pub fn command() -> clap::Command {
+    Cli::command()
+}
+
+/// Parse the command line, run the chosen subcommand, and exit with its code.
+pub fn main() {
     let cli = Cli::parse();
     // The subcommand picks the format; dispatch statically -- the node type carries
     // the format's leaf type, so each format is its own monomorphization of `run`.
@@ -426,7 +432,7 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{owner_to_keep, parse_merge_keys, Owner};
+    use super::{command, owner_to_keep, parse_merge_keys, Owner};
     use crate::reconcile::Segment;
 
     /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
@@ -527,5 +533,14 @@ mod tests {
         assert_eq!(owner_to_keep(ROOT, ROOT), None);
         assert_eq!(owner_to_keep(Owner { uid: 502, gid: 20 }, ALICE), None);
         assert_eq!(owner_to_keep(Owner { uid: 501, gid: 80 }, ALICE), None);
+    }
+
+    /// `command()` is what the xtask renders, one man page per subcommand.
+    #[test]
+    fn command_exposes_one_subcommand_per_format() {
+        let cmd = command();
+        cmd.clone().debug_assert();
+        let names: Vec<&str> = cmd.get_subcommands().map(|sub| sub.get_name()).collect();
+        assert_eq!(names, ["json", "yaml", "toml", "plist", "directory"]);
     }
 }
