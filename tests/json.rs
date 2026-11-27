@@ -278,11 +278,11 @@ fn merge_conflict_warns_on_stderr_without_failing() {
 
     let out = run(&["json", target.to_str().unwrap(), desired.to_str().unwrap()]);
     assert!(out.status.success()); // conflicts warn but don't change the exit code
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("contradictory reorder"), "stderr was: {err}");
-    assert!(err.contains("`l`"), "stderr was: {err}");
-    // names the conflicting elements
-    assert!(err.contains(r#"["x", "y"]"#), "stderr was: {err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "config-graft: warning: array `l` had a contradictory reorder of [\"x\", \"y\"] \
+         between TARGET and DESIRED; resolved deterministically (TARGET order preferred)\n"
+    );
     // and a deterministic result is still written
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
     assert_eq!(v, serde_json::json!({"l":["x","y"]}));
