@@ -927,7 +927,7 @@ let
       });
     }
     {
-      name = "an XML-illegal byte with `binary = false` is rejected";
+      name = "an XML-illegal character with `binary = false` is rejected";
       expected = 1;
       actual = builtins.length (assertionFailures {
         entries.probe = {

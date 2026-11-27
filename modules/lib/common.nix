@@ -429,8 +429,8 @@ in
               defaultText = literalExpression "config.cfprefsdDomain != null";
               description = ''
                 Generate the plist DESIRED as a binary plist and force the write
-                with `--plist-format binary`, so values XML cannot represent (bytes
-                illegal in XML 1.0, e.g. the ESC 0x1B separators in
+                with `--plist-format binary`, so values XML cannot represent
+                (characters XML 1.0 forbids, e.g. the ESC 0x1B separators in
                 `NSUserKeyEquivalents`) round-trip. When generated from
                 {option}`settings` this runs the entry's {option}`format` generator
                 and converts its output with `pkgs.libplist` at build time, so a
@@ -441,17 +441,17 @@ in
                 *write* follows whatever encoding the target already has, so a
                 binary target (which is what macOS stores) stays binary and keeps
                 its own dates and bytes intact. Set it when {option}`settings`
-                themselves hold a byte XML cannot carry, which an XML DESIRED could
-                not express -- a build-time assertion says so.
+                themselves hold a character XML cannot carry, which an XML DESIRED
+                could not express -- a build-time assertion says so.
 
                 Defaults to `true` for a {option}`cfprefsdDomain` entry, whose whole
                 round-trip is binary anyway ({command}`defaults export` produces a
                 binary plist and {command}`defaults import` reads one back), so
                 nothing a domain holds is squeezed through XML. Setting it to
                 `false` builds that entry's DESIRED as XML again, which is fine for
-                ordinary values but cannot carry a byte XML 1.0 forbids -- the write
-                to cfprefsd stays binary either way, so `false` narrows what the
-                DESIRED can express without widening anything.
+                ordinary values but cannot carry a character XML 1.0 forbids -- the
+                write to cfprefsd stays binary either way, so `false` narrows what
+                the DESIRED can express without widening anything.
               '';
             };
           };
@@ -684,7 +684,7 @@ in
         # CR as the character reference `&#13;`. Escaped backslashes are dropped
         # first, so a value holding the literal text `\u001b` is not mistaken for a
         # control byte. Nix has no character-class regex, hence the substring test.
-        hasXmlIllegalByte =
+        hasXmlIllegalChar =
           value:
           let
             escapes = builtins.replaceStrings [ "\\\\" ] [ "" ] (builtins.toJSON value);
@@ -715,14 +715,14 @@ in
             # An XML DESIRED cannot carry such a character, and the reconcile refuses
             # that write rather than emitting a file only macOS can read. Catch it at
             # build time instead of at activation.
-            assertion = entry.binary || entry.source != null || !(hasXmlIllegalByte entry.settings);
+            assertion = entry.binary || entry.source != null || !(hasXmlIllegalChar entry.settings);
             message = ''
               ${parent}.${format.optionName}."${name}" has `settings` holding a
               character an XML plist cannot carry (a C0 control other than tab,
               newline or carriage return -- e.g. the ESC 0x1B separators in
-              `NSUserKeyEquivalents`), but `binary` is false, so its DESIRED would be
-              generated as XML and the reconcile would refuse the write. Set
-              `binary = true` on this entry.
+              `NSUserKeyEquivalents` -- or U+FFFE or U+FFFF), but `binary` is false,
+              so its DESIRED would be generated as XML and the reconcile would
+              refuse the write. Set `binary = true` on this entry.
             '';
           }
         ]) active
