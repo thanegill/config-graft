@@ -40,7 +40,10 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
         _ => return Err(Error::YamlUnsafe),
     }
 
-    // Apply right-to-left so earlier byte offsets stay valid.
+    // Apply right-to-left so earlier byte offsets stay valid. Insertions at one
+    // offset apply last-pushed first, so a nested mapping's addition, pushed
+    // before its parent's, lands above it; `sort_by` is stable.
+    edits.reverse();
     edits.sort_by(|a, b| b.start.cmp(&a.start).then(b.end.cmp(&a.end)));
     if edits.iter().any(|e| e.start > e.end)
         || edits.windows(2).any(|pair| pair[1].end > pair[0].start)
@@ -561,6 +564,27 @@ mod tests {
         );
         let out = apply("m:\n  &a\u{3000}b k: 1\n", &result("m:\n  k: 1\n  y: 2\n")).unwrap();
         assert_eq!(out, "m:\n  &a\u{3000}b k: 1\n  y: 2\n");
+    }
+
+    #[test]
+    fn adds_a_nested_key_before_a_key_added_after_its_mapping() {
+        let out = apply("a:\n  x: 1\n", &result("a:\n  x: 1\n  y: 2\nb: 3\n")).unwrap();
+        assert_eq!(out, "a:\n  x: 1\n  y: 2\nb: 3\n");
+        let out = apply(
+            "a:\n  b:\n    x: 1\n",
+            &result("a:\n  b:\n    x: 1\n    y: 2\n  c: 4\nd: 5\n"),
+        )
+        .unwrap();
+        assert_eq!(out, "a:\n  b:\n    x: 1\n    y: 2\n  c: 4\nd: 5\n");
+        let out = apply(
+            "a:\n  b:\n    x: 1\n  # under a\n",
+            &result("a:\n  b:\n    x: 1\n    y: 2\n  c: 4\nd: 5\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "a:\n  b:\n    x: 1\n    y: 2\n  c: 4\n  # under a\nd: 5\n"
+        );
     }
 
     #[test]

@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - **YAML:** a key added to a mapping whose first entry is an explicit `? key` or an anchored or tagged key is written instead of refused; a comment indented under such a key is kept above a key added after it, and removed with it when it is pruned.
+- **YAML:** adding keys to a nested mapping that is the last entry of its parent, and to the parent in the same run, is written instead of refused.
 - **A refused file says why** instead of always "is not valid <format>": the parser's message with its line and column, the 512-container depth cap, or what valid YAML holds that can't be reconciled; control and invisible characters from the file are escaped.
 - **An object DESIRED declares empty survives the prune that emptied it**, instead of being deleted and re-added on the next run. YAML writes it as `key: {}`, and TOML turns an emptied dotted or implicit table into an explicit `[a]` header.
 - **An object the app had already emptied survives a prune that removed nothing from it**, instead of being deleted because it was empty. Directory mode is unchanged: a directory the app emptied is still removed once DESIRED drops it, while its attributes match BASE.
