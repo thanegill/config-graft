@@ -144,7 +144,7 @@ impl<L: Leaf> Node<L> {
     /// A compact, leaf-level diff of `self` (old) against `new` (`+` added, `-`
     /// removed, `~` changed), with path components joined by `sep` (`.` for byte
     /// formats, `/` for a directory tree). Arrays and scalars are atomic leaves,
-    /// matching the reconcile semantics.
+    /// matching the reconcile semantics, and so is an empty object.
     ///
     /// An empty final path component is disambiguated by the *node* living there,
     /// not by which backend is running. A leaf under the reserved empty-string key
@@ -162,8 +162,8 @@ impl<L: Leaf> Node<L> {
         // directory's own line (its final segment empty) just before its children.
         let mut lines: Vec<(ManagedPath, String)> = Vec::new();
 
-        let old_leaves: HashSet<ManagedPath> = self.leaf_paths().into_iter().collect();
-        let new_leaves: HashSet<ManagedPath> = new.leaf_paths().into_iter().collect();
+        let old_leaves: HashSet<ManagedPath> = self.diff_paths().into_iter().collect();
+        let new_leaves: HashSet<ManagedPath> = new.diff_paths().into_iter().collect();
         for path in old_leaves.union(&new_leaves) {
             // Decide the label from the actual node at this path, not the backend:
             // only a directory's own-attributes leaf collapses an empty component to
@@ -175,6 +175,17 @@ impl<L: Leaf> Node<L> {
                 .or(new_node)
                 .is_some_and(|node| matches!(node, Node::Leaf(leaf) if leaf.is_dir_attrs()));
             let disp = Self::diff_label(path, sep, is_dir_attrs);
+            let (old_node, new_node) = match (old_node, new_node) {
+                // An emptied or filled object: the empty side is the leaf here, and
+                // the other side's contents are listed as leaves of their own.
+                (Some(Node::Map(old_map)), Some(empty @ Node::Map(_))) if !old_map.is_empty() => {
+                    (None, Some(empty))
+                }
+                (Some(empty @ Node::Map(_)), Some(Node::Map(new_map))) if !new_map.is_empty() => {
+                    (Some(empty), None)
+                }
+                nodes => nodes,
+            };
             match (old_node, new_node) {
                 (None, Some(new_node)) => {
                     lines.push((path.clone(), format!("+ {disp} = {new_node}")))

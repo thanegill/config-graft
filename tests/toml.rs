@@ -554,3 +554,8 @@ fn diff_shows_a_non_finite_float_as_toml_spells_it() {
         "up = inf\ndown = -inf\nodd = nan\nneg = -nan\n"
     );
 }
+
+#[test]
+fn diff_shows_an_empty_table_added() {
+    applies_then_settles("toml", b"app = true\n", b"[a]\n", &[], "+ a = {}\n");
+}
