@@ -55,17 +55,11 @@ fn path_allowing_empty() -> impl TypedValueParser<Value = PathBuf> {
     OsStringValueParser::new().map(PathBuf::from)
 }
 
-/// Positionals and flags common to every format (byte formats and the directory
-/// tree alike).
+/// BASE and the flags common to every format (byte formats and the directory tree
+/// alike). TARGET and DESIRED are declared by each subcommand's own args, ahead of
+/// this flatten, so their help can say file or directory.
 #[derive(Args)]
 pub(crate) struct CommonArgs {
-    /// File to reconcile, in place (created with parents if missing).
-    pub(crate) target: PathBuf,
-
-    /// Managed data to apply (must be a mapping: JSON object / plist dictionary /
-    /// YAML mapping / TOML table).
-    pub(crate) desired: PathBuf,
-
     /// Previous snapshot (last applied); enables pruning. Optional. An empty
     /// value is treated the same as omitting it (no pruning).
     #[arg(value_parser = path_allowing_empty())]
@@ -97,6 +91,13 @@ pub(crate) struct CommonArgs {
 /// shaping that has no meaning for a directory tree.
 #[derive(Args)]
 pub(crate) struct ByteArgs {
+    /// File to reconcile, in place (created with parents if missing).
+    target: PathBuf,
+
+    /// Managed data to apply (must be a mapping: JSON object / plist dictionary /
+    /// YAML mapping / TOML table).
+    desired: PathBuf,
+
     #[command(flatten)]
     common: CommonArgs,
 
@@ -158,6 +159,13 @@ pub(crate) struct PlistArgs {
 /// directory: the common flags plus the tree-only attribute controls.
 #[derive(Args)]
 pub(crate) struct DirArgs {
+    /// File to reconcile, in place (created with parents if missing).
+    target: PathBuf,
+
+    /// Managed data to apply (must be a mapping: JSON object / plist dictionary /
+    /// YAML mapping / TOML table).
+    desired: PathBuf,
+
     #[command(flatten)]
     common: CommonArgs,
 
@@ -242,8 +250,6 @@ impl RunArgs {
     /// take their inert defaults.
     fn from_byte(byte: ByteArgs, indent: Option<Indent>, plist_format: PlistFormat) -> RunArgs {
         let CommonArgs {
-            target,
-            desired,
             base,
             base_flag,
             no_prune,
@@ -251,8 +257,8 @@ impl RunArgs {
             check,
         } = byte.common;
         RunArgs {
-            target,
-            desired,
+            target: byte.target,
+            desired: byte.desired,
             base,
             base_flag,
             no_prune,
@@ -275,8 +281,6 @@ impl RunArgs {
     /// their inert defaults -- a tree exposes none of them.
     fn from_dir(args: DirArgs) -> RunArgs {
         let CommonArgs {
-            target,
-            desired,
             base,
             base_flag,
             no_prune,
@@ -284,8 +288,8 @@ impl RunArgs {
             check,
         } = args.common;
         RunArgs {
-            target,
-            desired,
+            target: args.target,
+            desired: args.desired,
             base,
             base_flag,
             no_prune,
