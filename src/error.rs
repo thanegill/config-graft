@@ -357,3 +357,31 @@ impl From<Outcome> for std::process::ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::format::FormatKind;
+
+    #[test]
+    fn a_desired_root_of_the_wrong_shape_names_what_the_format_expected() {
+        let rendered = |kind: FormatKind| kind.desired_not_mapping(PathBuf::from("d")).to_string();
+        assert_eq!(
+            rendered(FormatKind::Json),
+            "DESIRED must be a JSON object: d"
+        );
+        assert_eq!(
+            rendered(FormatKind::Plist),
+            "DESIRED must be a plist dictionary: d"
+        );
+        assert_eq!(
+            rendered(FormatKind::Yaml),
+            "DESIRED must be a YAML mapping: d"
+        );
+        assert_eq!(
+            rendered(FormatKind::Toml),
+            "DESIRED must be a TOML table: d"
+        );
+    }
+}
