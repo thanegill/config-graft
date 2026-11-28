@@ -28,17 +28,15 @@ let
 
         A skipped entry still advances BASE. When the activation warns and
         carries on -- a {option}`skip` match (or a failed {command}`pgrep`), a
-        blocked {option}`restart`, a failed or empty {command}`defaults export`,
-        or in the system activation a graft or {command}`defaults import` that
-        fails while it carries on -- the generation still records the entry's
-        settings as the ones last applied. A key removed from the settings in
-        that generation is then never pruned: it stays in the app's
-        configuration until it is removed by hand. A failure that ends the
-        activation (every failed graft under home-manager; under nix-darwin, one
-        that reaches the activation script's exit status) leaves BASE where it
-        was, and the next activation retries against it -- on nix-darwin only
-        until a reboot, since {command}`darwin-rebuild` has already pointed the
-        system profile at the failed generation and boot re-links
+        blocked {option}`restart`, or a failed or empty {command}`defaults
+        export` -- the generation still records the entry's settings as the ones
+        last applied. A key removed from the settings in that generation is then
+        never pruned: it stays in the app's configuration until it is removed by
+        hand. A failed graft or {command}`defaults import` fails the activation,
+        which under home-manager and nix-darwin ends it before BASE moves, so the
+        next activation retries against the old one -- on nix-darwin only until
+        a reboot, since {command}`darwin-rebuild` has already pointed the system
+        profile at the failed generation and boot re-links
         {file}`/run/current-system` to it. NixOS never ends early: it records a
         failed snippet and carries on, so there every skip and failure advances
         BASE. This is deliberate: BASE comes from the previous generation rather
@@ -128,9 +126,8 @@ let
   # The body runs in a subshell with errexit on, so it stops at its first failure
   # and its status can be taken: home-manager's own errexit is lifted around the
   # subshell, or the failure would end the activation before the relaunch. A
-  # failed reconcile still relaunches, then fails with `false`. That stops
-  # home-manager; in the system script it reaches the activation only as the
-  # script's last command.
+  # failed reconcile still relaunches, then fails with `false`, which stops
+  # home-manager and trips the system script's ERR trap.
   guardRestart =
     {
       lib,
@@ -281,6 +278,26 @@ in
   # `source` is inert.
   isActive = entry: entry.settings != { } || entry.source != null;
 
+  # What the system modules hand `defaults` for a `cfprefsdDomain`. As root,
+  # `defaults <id>` addresses root's own user domain, which only root's processes
+  # read (/private/var/root/Library/Preferences); the system-wide (any-user) domain
+  # is the file under /Library/Preferences, which `defaults` takes as a path.
+  # Anything already holding a `/` is taken to be a path and passed through.
+  systemDomain =
+    domain:
+    if builtins.match ".*/.*" domain != null then
+      domain
+    else if
+      builtins.elem domain [
+        "NSGlobalDomain"
+        "-g"
+        "-globalDomain"
+      ]
+    then
+      "/Library/Preferences/.GlobalPreferences"
+    else
+      "/Library/Preferences/${domain}";
+
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
   # generated from `settings` by the entry's `pkgs.formats` generator. A plist entry
   # with `binary = true` runs that same generator and converts its output to a binary
@@ -412,8 +429,8 @@ in
               defaultText = literalExpression "config.cfprefsdDomain != null";
               description = ''
                 Generate the plist DESIRED as a binary plist and force the write
-                with `--plist-format binary`, so values XML cannot represent (bytes
-                illegal in XML 1.0, e.g. the ESC 0x1B separators in
+                with `--plist-format binary`, so values XML cannot represent
+                (characters XML 1.0 forbids, e.g. the ESC 0x1B separators in
                 `NSUserKeyEquivalents`) round-trip. When generated from
                 {option}`settings` this runs the entry's {option}`format` generator
                 and converts its output with `pkgs.libplist` at build time, so a
@@ -424,17 +441,17 @@ in
                 *write* follows whatever encoding the target already has, so a
                 binary target (which is what macOS stores) stays binary and keeps
                 its own dates and bytes intact. Set it when {option}`settings`
-                themselves hold a byte XML cannot carry, which an XML DESIRED could
-                not express -- a build-time assertion says so.
+                themselves hold a character XML cannot carry, which an XML DESIRED
+                could not express -- a build-time assertion says so.
 
                 Defaults to `true` for a {option}`cfprefsdDomain` entry, whose whole
                 round-trip is binary anyway ({command}`defaults export` produces a
                 binary plist and {command}`defaults import` reads one back), so
                 nothing a domain holds is squeezed through XML. Setting it to
                 `false` builds that entry's DESIRED as XML again, which is fine for
-                ordinary values but cannot carry a byte XML 1.0 forbids -- the write
-                to cfprefsd stays binary either way, so `false` narrows what the
-                DESIRED can express without widening anything.
+                ordinary values but cannot carry a character XML 1.0 forbids -- the
+                write to cfprefsd stays binary either way, so `false` narrows what
+                the DESIRED can express without widening anything.
               '';
             };
           };
@@ -493,8 +510,9 @@ in
         # here, not `binary`-gated: XML would drop XML-illegal bytes and sub-second
         # dates that both `defaults` ends carry, and the flag keeps the write from
         # depending on what the export produced. A failed graft must not reach the
-        # import, which would rewrite the domain from a stale snapshot; `false`
-        # keeps it fatal under home-manager's errexit.
+        # import, which would rewrite the domain from a stale snapshot. `false` is
+        # what reports it: fatal under home-manager, counted by the system script's
+        # ERR trap (the failed `run` sits in a condition, which doesn't).
         elif ! run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-format binary; then
           _iWarn "Skipping plist domain %s: config-graft failed, so it was left untouched" "$_domain"
           rm -f "$_live"
@@ -666,7 +684,7 @@ in
         # CR as the character reference `&#13;`. Escaped backslashes are dropped
         # first, so a value holding the literal text `\u001b` is not mistaken for a
         # control byte. Nix has no character-class regex, hence the substring test.
-        hasXmlIllegalByte =
+        hasXmlIllegalChar =
           value:
           let
             escapes = builtins.replaceStrings [ "\\\\" ] [ "" ] (builtins.toJSON value);
@@ -697,14 +715,14 @@ in
             # An XML DESIRED cannot carry such a character, and the reconcile refuses
             # that write rather than emitting a file only macOS can read. Catch it at
             # build time instead of at activation.
-            assertion = entry.binary || entry.source != null || !(hasXmlIllegalByte entry.settings);
+            assertion = entry.binary || entry.source != null || !(hasXmlIllegalChar entry.settings);
             message = ''
               ${parent}.${format.optionName}."${name}" has `settings` holding a
               character an XML plist cannot carry (a C0 control other than tab,
               newline or carriage return -- e.g. the ESC 0x1B separators in
-              `NSUserKeyEquivalents`), but `binary` is false, so its DESIRED would be
-              generated as XML and the reconcile would refuse the write. Set
-              `binary = true` on this entry.
+              `NSUserKeyEquivalents` -- or U+FFFE or U+FFFF), but `binary` is false,
+              so its DESIRED would be generated as XML and the reconcile would
+              refuse the write. Set `binary = true` on this entry.
             '';
           }
         ]) active

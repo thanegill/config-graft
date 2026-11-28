@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** nix-darwin `managedPlist`: a `cfprefsdDomain` is the system-wide domain (`/Library/Preferences/<id>`), as documented, instead of root's own user domain. Keys earlier generations wrote stay in root's domain and still win for processes running as root; find them with `sudo defaults read <id>` and remove them with `sudo defaults delete <id> <key>`. On the first switch, a key dropped from `settings` is pruned from the system-wide domain if it holds the same value.
 - **home-manager:** the managed entries run after `linkGeneration`, so an entry moved from `home.file` finds its old store link removed rather than failing activation on it.
 - **`json --help` shows `--indent`'s default as `[default: 2]`**, as `--array-strategy` and `--plist-format` already do.
 - **`--help` reads as a manual:** the root help explains TARGET, DESIRED and BASE and lists the exit codes, and each subcommand describes how its format is written.
@@ -41,6 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A failed entry fails a NixOS or nix-darwin activation**: the system script runs every entry, then exits non-zero; it used to report success unless the failing entry was last. home-manager still stops at the first failure.
 - **`managedPlist`:** a failed or empty `defaults export` no longer wipes the domain ([#59](https://github.com/thanegill/config-graft/issues/59)); the entry is skipped with a warning, and a graft that fails is never imported.
 - **An app's write to TARGET during a run is no longer silently overwritten** (JSON, YAML, TOML, plist). A run read TARGET, reconciled, then renamed its result over the file without checking that TARGET still held what it had read, so anything the app saved in between was lost, even under a key config-graft does not manage. A run now works from a single read of TARGET and compares the file it writes (the resolved file under `--follow-symlinks`) with those bytes just before the rename; if they differ, it discards its result and reconciles again from the new contents, reporting each such pass on stderr. A retry that finds TARGET empty or missing after an earlier pass saw it hold something writes nothing and counts as another change, since that is an app caught between truncating its file and refilling it, and reconciling it as a first apply would write DESIRED alone over every key the app owns. After 3 passes that all found TARGET changed, it **refuses** (exit 1), naming the file and leaving it as the other process wrote it. This narrows the window rather than closing it: `rename(2)` cannot be made conditional, so a write landing between the final comparison and the rename is still replaced. Each pass prints its own `--diff` and warnings. Runs that write nothing are unaffected, and directory mode is unchanged.
 - **YAML:** a prune that removes every key writes `{}` (after any comments, before a document-end `...`) instead of being refused or leaving a comment-only file most loaders read as null; a later run that adds keys replaces it.
