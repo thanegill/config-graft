@@ -11,6 +11,35 @@ let
   # ends in one.
   safeName = builtins.replaceStrings [ "/" ] [ "-" ];
 
+  # What a directory entry's `xattrs` can say, in `--xattrs` terms.
+  xattrsPolicies = [
+    "all"
+    "safe"
+    "none"
+  ];
+
+  # Where a `cfprefsdDomain` lives, given the Preferences directory a bare id
+  # names a file in: `NSGlobalDomain` (and its aliases) is `.GlobalPreferences`,
+  # and anything already holding a `/` is taken to be a path and passed through.
+  domainAddress =
+    preferences: domain:
+    if builtins.match ".*/.*" domain != null then
+      domain
+    else if
+      builtins.elem domain [
+        "NSGlobalDomain"
+        "-g"
+        "-globalDomain"
+      ]
+    then
+      "${preferences}/.GlobalPreferences"
+    else
+      "${preferences}/${domain}";
+
+  # A path with its `.` and `..` components and repeated slashes resolved, as
+  # Nix resolves a path literal; a relative one is taken from `/`.
+  normalizePath = path: toString (/. + "/${path}");
+
   # The attribute *policy* flags of a directory entry, separate from `--manage-root`:
   # the policy says which attributes are reconciled at all, `--manage-root` says
   # whether the target's own attributes are among them. A reconcile wants both; a
@@ -46,6 +75,11 @@ let
 
         This narrows the window rather than closing it: an app that starts after
         the check, or writes while the reconcile runs, can still race it.
+
+        Once the entry is removed, the prune of what it last applied honours both
+        lists, but only as a skip: while a {option}`skip` process or a
+        {option}`restart` app is running, the prune is skipped with a warning and
+        not retried, and no app is quit or relaunched.
 
         A skipped entry still advances BASE. When the activation warns and
         carries on -- a {option}`skip` match (or a failed {command}`pgrep`), a
@@ -363,25 +397,23 @@ in
   # `source` is inert.
   isActive = entry: entry.settings != { } || entry.source != null;
 
+  inherit normalizePath;
+
   # What the system modules hand `defaults` for a `cfprefsdDomain`. As root,
   # `defaults <id>` addresses root's own user domain, which only root's processes
   # read (/private/var/root/Library/Preferences); the system-wide (any-user) domain
   # is the file under /Library/Preferences, which `defaults` takes as a path.
   # Anything already holding a `/` is taken to be a path and passed through.
-  systemDomain =
-    domain:
-    if builtins.match ".*/.*" domain != null then
-      domain
-    else if
-      builtins.elem domain [
-        "NSGlobalDomain"
-        "-g"
-        "-globalDomain"
-      ]
-    then
-      "/Library/Preferences/.GlobalPreferences"
-    else
-      "/Library/Preferences/${domain}";
+  systemDomain = domainAddress "/Library/Preferences";
+
+  # The plist file backing a `cfprefsdDomain`, as a normalized absolute path, given
+  # the Preferences directory a bare id names a file in.
+  domainPlist =
+    preferences: domain:
+    let
+      address = domainAddress preferences domain;
+    in
+    normalizePath (if builtins.match ".*[.]plist" address != null then address else "${address}.plist");
 
   # DESIRED store path for one entry: a pre-built `source` when given, otherwise
   # generated from `settings` by the entry's `pkgs.formats` generator. A plist entry
@@ -454,7 +486,10 @@ in
               type = config.format.type;
               default = { };
               example = format.settingsExample;
-              description = "Freeform ${format.name} data reconciled into {option}`target`. Empty disables the entry.";
+              description = ''
+                Freeform ${format.name} data reconciled into {option}`target`. Emptying
+                it, like removing the entry, prunes every key the entry last applied.
+              '';
             };
 
             source = mkOption {
@@ -671,11 +706,7 @@ in
             };
 
             xattrs = mkOption {
-              type = types.enum [
-                "all"
-                "safe"
-                "none"
-              ];
+              type = types.enum xattrsPolicies;
               default = "all";
               description = ''
                 Which extended attributes to reconcile (`--xattrs`): `all`, `safe`
@@ -726,6 +757,309 @@ in
         '';
       };
     };
+
+  # A byte-format entry as the next generation's prune needs it, once the entry is
+  # gone: what it is and how it was written, as meaning rather than flags, so the
+  # code that prunes it maps the meaning to flags. `identity` is the normalized
+  # absolute path the entry manages (for a `cfprefsdDomain` entry, the plist file
+  # backing the domain, so a switch between the two forms is one entry),
+  # `snapshot` is where its DESIRED sits in the generation, and `domain` is what
+  # `defaults` is handed, null for a file. `manageRoot` is not recorded: a prune
+  # never manages the target's own attributes. `whileRunning.restart` is, but a
+  # prune treats a running app it names as a `skip` match and never quits one.
+  mkUnit =
+    {
+      format,
+      entry,
+      identity,
+      snapshot,
+      domain ? null,
+    }:
+    {
+      kind = if domain != null then "domain" else format.name;
+      inherit identity snapshot domain;
+      binary = format.name == "plist" && entry.binary;
+      inherit (entry) followSymlinks;
+      noOwner = false;
+      xattrs = "all";
+      inherit (entry.whileRunning) skip restart;
+    };
+
+  mkDirectoryUnit =
+    {
+      entry,
+      identity,
+      snapshot,
+    }:
+    {
+      kind = "directory";
+      inherit identity snapshot;
+      domain = null;
+      binary = false;
+      followSymlinks = false;
+      inherit (entry) noOwner xattrs;
+      inherit (entry.whileRunning) skip restart;
+    };
+
+  # This generation's manifest: every unit it manages, versioned so a later
+  # generation's prune can refuse a layout it does not know rather than misread it.
+  mkManifest =
+    units:
+    builtins.toJSON {
+      version = 1;
+      inherit units;
+    };
+
+  # Reconcile back to empty every unit the previous generation's manifest lists
+  # and this generation no longer manages, against that unit's own previous
+  # snapshot as BASE, so a removed entry takes exactly the keys or files it last
+  # applied and leaves what the app or user wrote. Without it, pruning only fires
+  # while an entry stays declared: emptying its `settings` or deleting it drops
+  # its reconcile and its snapshot together, and what it last applied stays.
+  #
+  # The previous manifest is read as data and pruned by this generation's code and
+  # binary. A unit is still managed when this generation has one with the same
+  # identity *and* snapshot, so a renamed entry, or one of two entries sharing a
+  # target, is pruned against its own BASE before the live entries re-apply what
+  # is still declared; the caller runs this before them.
+  #
+  # `prevRoot` is a shell expression for the previous generation's root, valid
+  # only once `hasPrev` (a shell condition) holds. `claimed` lists the absolute
+  # paths `claimedBy` (home.file, environment.etc) now links; those, a symlinked
+  # target (unless its entry wrote through the link), anything resolving into the
+  # store, and a target or domain that no longer exists are skipped. A failed row
+  # warns and the next one runs: errexit is lifted for the whole prune, and every
+  # status it acts on is tested in a condition, so the caller only has to keep an
+  # ERR trap from firing.
+  mkPruneScript =
+    {
+      lib,
+      pkgs,
+      formats,
+      package,
+      prevRoot,
+      hasPrev,
+      manifestRel,
+      units,
+      claimed,
+      claimedBy,
+      restartUser ? null,
+      needsUser ? false,
+      commands ? { },
+    }:
+    let
+      exe = lib.getExe package;
+      jq = lib.getExe pkgs.jq;
+      realpath = "${pkgs.coreutils}/bin/realpath";
+      defaults = commands.defaults or "/usr/bin/defaults";
+      bools = [
+        true
+        false
+      ];
+
+      empty = pkgs.runCommand "config-graft-empty-desired" { } (
+        "mkdir -p $out/directory\n"
+        + lib.concatMapStrings (
+          format:
+          "cp ${pkgs.writeText "config-graft-empty-${format.name}" format.emptyDocument} $out/${format.name}\n"
+        ) formats
+      );
+
+      # Inline rather than a store file, so a test can rewrite its paths along with
+      # the script's. It reaches jq through `printf`, a builtin, since an exec
+      # argument is capped (128 KiB on Linux) and `claimed` lists every link.
+      context = builtins.toJSON {
+        current = map (unit: { inherit (unit) identity snapshot; }) units;
+        inherit claimed;
+      };
+
+      # One NUL-terminated field per line read below, in this order, for each unit
+      # no longer managed; `tostring` keeps a field the shell reads as text.
+      rows = ''
+        $context[0].current as $current
+        | $context[0].claimed as $claimed
+        | .units[]
+        | select(. as $unit | $current | any(.identity == $unit.identity and .snapshot == $unit.snapshot) | not)
+        | (.skip // []) as $skip
+        | (.restart // []) as $restart
+        | (.kind, .identity, .snapshot, (.domain // ""), (.binary == true), (.followSymlinks == true),
+           (.noOwner == true), (.xattrs // "all"), (.identity as $identity | $claimed | any(. == $identity)),
+           ($skip | length), $skip[], ($restart | length), $restart[])
+        | tostring
+      '';
+
+      flagsArm = key: flags: "${key}) _flags=(${lib.concatStringsSep " " flags}) ;;";
+      fileArms = lib.concatMap (
+        format:
+        lib.concatMap (
+          binary:
+          map (
+            followSymlinks:
+            flagsArm "${format.name}/${lib.boolToString binary}/${lib.boolToString followSymlinks}"
+              (fileWriteFlags {
+                inherit lib format;
+                entry = { inherit binary followSymlinks; };
+              })
+          ) bools
+        ) bools
+      ) formats;
+      directoryArms = lib.concatMap (
+        noOwner:
+        map (
+          xattrs:
+          flagsArm "${lib.boolToString noOwner}/${xattrs}" (directoryPolicyFlags {
+            inherit lib;
+            entry = { inherit noOwner xattrs; };
+          })
+        ) xattrsPolicies
+      ) bools;
+
+      # A removed entry's `restart` apps are only asked whether they run, never
+      # quit: one that does skips the row, as a `skip` match would, and one that
+      # is not installed (-1728) counts as not running, as in `guardRestart`.
+      osascript = commands.osascript or "/usr/bin/osascript";
+      asUser =
+        if restartUser == null then
+          ""
+        else
+          "/bin/launchctl asuser \"$(/usr/bin/id -u -- ${lib.escapeShellArg restartUser})\" /usr/bin/sudo --user=${lib.escapeShellArg restartUser} -- ";
+      guardRestarting = body: ''
+        _restartBlocked=""
+        ${lib.optionalString (needsUser && restartUser == null) ''
+          if (( ''${#_restart[@]} )); then
+            _restartBlocked="system.primaryUser is not set, so whether its apps run cannot be asked"
+          fi
+        ''}
+        _restartErr=$(mktemp)
+        for _id in "''${_restart[@]}"; do
+          if [[ -n "$_restartBlocked" ]]; then break; fi
+          if ! _state=$(${asUser}${osascript} -e "application id \"$_id\" is running" 2>"$_restartErr"); then
+            if [[ "$(<"$_restartErr")" == *"(-1728)"* ]]; then _state=false; else _state=""; fi
+          fi
+          if [[ $_state == true ]]; then
+            _restartBlocked="$_id is running"
+            break
+          elif [[ $_state != false ]]; then
+            cat "$_restartErr" >&2
+            _restartBlocked="could not tell whether $_id is running"
+            break
+          fi
+        done
+        rm -f "$_restartErr"
+        if [[ -z "$_restartBlocked" ]]; then
+        ${body}
+        else
+          _iWarn "Skipping %s: %s (whileRunning.restart)" "$_label" "$_restartBlocked"
+        fi
+      '';
+
+      guardSkip =
+        body:
+        guardRunning {
+          inherit lib pkgs commands;
+          body = guardRestarting body;
+          names = [ ''"''${_skip[@]}"'' ];
+          label = ''"$_label"'';
+        };
+    in
+    ''
+      _pruneErrexit=""
+      if [[ $- == *e* ]]; then _pruneErrexit=1; set +e; fi
+      _pruneRows=""
+      if ${hasPrev} && [[ -e "${prevRoot}/${manifestRel}" ]]; then
+        _pruneManifest="${prevRoot}/${manifestRel}"
+        _pruneVersion=$(${jq} -r .version "$_pruneManifest" 2>&1)
+        if [[ "$_pruneVersion" != 1 ]]; then
+          _iWarn "Not pruning removed managed entries: %s is not a version 1 manifest (%s)" "$_pruneManifest" "$_pruneVersion"
+        elif ! _pruneRows=$(mktemp) \
+          || ! ${jq} --raw-output0 --slurpfile context <(printf '%s' ${lib.escapeShellArg context}) ${lib.escapeShellArg rows} "$_pruneManifest" > "$_pruneRows"; then
+          _iWarn "Not pruning removed managed entries: could not read %s" "$_pruneManifest"
+        else
+          while IFS= read -r -d "" -u 3 _kind; do
+            for _field in _identity _snapshot _domain _binary _followSymlinks _noOwner _xattrs _claimed _skipCount; do
+              IFS= read -r -d "" -u 3 "$_field"
+            done
+            _skip=()
+            for (( _k = 0; _k < _skipCount; _k++ )); do
+              IFS= read -r -d "" -u 3 _name
+              _skip+=("$_name")
+            done
+            IFS= read -r -d "" -u 3 _restartCount
+            _restart=()
+            _restartValid=1
+            for (( _k = 0; _k < _restartCount; _k++ )); do
+              IFS= read -r -d "" -u 3 _id
+              _restart+=("$_id")
+              [[ $_id =~ ^[A-Za-z0-9.-]+$ ]] || _restartValid=""
+            done
+
+            _prev="${prevRoot}/$_snapshot"
+            _target=$_identity
+            _label=$_identity
+            if [[ $_kind == domain ]]; then _label=$_domain; fi
+            _flags=()
+            _known=1
+            case "$_kind" in
+              domain) [[ -n $_domain ]] || _known="" ;;
+              directory)
+                case "$_noOwner/$_xattrs" in
+                  ${lib.concatStringsSep "\n        " directoryArms}
+                  *) _known="" ;;
+                esac
+                ;;
+              *)
+                case "$_kind/$_binary/$_followSymlinks" in
+                  ${lib.concatStringsSep "\n        " fileArms}
+                  *) _known="" ;;
+                esac
+                ;;
+            esac
+            if [[ $_target != /* || -z $_snapshot || -z $_restartValid ]]; then _known=""; fi
+            _resolved=$(${realpath} -m -- "$_target" 2>/dev/null)
+            _pruneFailed=""
+
+            if [[ -z $_known ]]; then
+              _iWarn "Not pruning removed %s: this config-graft cannot read how the previous generation recorded it (%s)" "$_label" "$_kind"
+            elif [[ ! -e "$_prev" ]]; then
+              _iWarn "Not pruning removed %s: the previous generation has no snapshot of it at %s" "$_label" "$_prev"
+            elif [[ $_claimed == true ]]; then
+              _iWarn "Not pruning removed %s: it is now linked by ${claimedBy}" "$_label"
+            elif [[ $_kind == domain ]]; then
+              if ! ${defaults} read "$_domain" >/dev/null 2>&1; then
+                _i "Not pruning removed plist domain %s: it does not exist" "$_domain"
+              else
+                ${guardSkip ''
+                  _i "Pruning removed managed plist domain %s" "$_domain"
+                  _desired=${empty}/plist
+                  ${domainRoundTrip {
+                    inherit exe commands;
+                    onFailure = "_pruneFailed=1";
+                  }}
+                ''}
+              fi
+            elif [[ -L "$_target" && ( $_kind == directory || $_followSymlinks != true ) ]]; then
+              _iWarn "Not pruning removed %s: it is a symlink, which its entry did not write through" "$_label"
+            elif [[ $_resolved == ${builtins.storeDir}/* ]]; then
+              _iWarn "Not pruning removed %s: it resolves into ${builtins.storeDir}" "$_label"
+            elif [[ ! -e "$_target" || ( $_kind == directory && ! -d "$_target" ) ]]; then
+              _i "Not pruning removed %s: it does not exist" "$_label"
+            else
+              ${guardSkip ''
+                _i "Pruning removed managed %s %s" "$_kind" "$_target"
+                if ! run ${exe} "$_kind" "$_target" "${empty}/$_kind" "$_prev" "''${_flags[@]}"; then
+                  _pruneFailed=1
+                fi
+              ''}
+            fi
+            if [[ -n $_pruneFailed ]]; then
+              _iWarn "Could not prune removed %s; what it last applied is left in place" "$_label"
+            fi
+          done 3< "$_pruneRows"
+        fi
+        if [[ -n "$_pruneRows" ]]; then rm -f "$_pruneRows"; fi
+      fi
+      if [[ -n "$_pruneErrexit" ]]; then set -e; fi
+    '';
 
   # Build-time guards for one format's active entries: `cfprefsdDomain` drives
   # macOS-only tooling, and `settings`/`source` are mutually exclusive.
@@ -836,4 +1170,19 @@ in
         ]
       ) entries
     );
+
+  # Build-time guard against two entries sharing a snapshot path. `safeName` maps
+  # `a/b` and `a-b` to the same name, and the snapshot is linked once per path, so
+  # one entry would silently be reconciled against the other's BASE. `entries` is a
+  # list of `{ option, name, snapshot }`, `option` the entry's full option path.
+  mkSnapshotAssertions =
+    { lib, entries }:
+    lib.mapAttrsToList (snapshot: sharing: {
+      assertion = builtins.length sharing < 2;
+      message = ''
+        ${lib.concatMapStringsSep " and " (e: "${e.option}.\"${e.name}\"") sharing} share the
+        snapshot path `${snapshot}`, since `/` in an entry's name becomes `-`
+        there. Rename one of them.
+      '';
+    }) (builtins.groupBy (e: e.snapshot) entries);
 }

@@ -13,6 +13,12 @@
 # `cfprefsd` instead of editing the file, addressed by path as the system-wide
 # domain under /Library/Preferences (`systemDomain`); a build-time assertion
 # requires a Darwin host.
+#
+# That covers keys dropped from an entry that stays declared. An entry that is
+# removed -- its `settings` emptied, or the entry deleted -- has no reconcile left,
+# so each generation also embeds a manifest of what it manages, and the activation
+# script first prunes what the previous manifest lists and this generation no
+# longer manages (`mkPruneScript`).
 let
   configGraftLib = import ./.;
   inherit (configGraftLib) formats;
@@ -42,7 +48,9 @@ let
         writes to, but which should be partially managed declaratively. Each entry
         deep-merges its {option}`settings` into the absolute {option}`target` during
         system activation (via {command}`config-graft`), keeping keys the app wrote
-        that aren't managed here and pruning keys dropped from Nix.
+        that aren't managed here and pruning keys dropped from Nix. Removing an
+        entry, or emptying its {option}`settings`, prunes every key it last applied
+        on the next activation.
       '';
       type = configGraftLib.entryType {
         inherit
@@ -88,7 +96,8 @@ let
       tree into the absolute {option}`target` during system activation (via
       {command}`config-graft directory`): files the app created are kept,
       files dropped from {option}`source` are pruned, and per-file mode/owner/xattrs
-      are reconciled.
+      are reconciled. Removing an entry prunes every file it last applied on the next
+      activation.
     '';
     type = configGraftLib.directoryEntryType {
       inherit lib pkgs;
@@ -109,9 +118,15 @@ let
 
   # Directory entries (all active — `source` is required), each with its snapshot
   # path and reconcile script. `entry.target` is absolute.
-  directoryEntries = lib.mapAttrsToList (name: entry: {
-    inherit entry;
+  directoryEntries = lib.mapAttrsToList (name: entry: rec {
+    inherit entry name;
+    option = "environment.managedDirectory";
     snapshotRel = "config-graft/managed-directory/${configGraftLib.safeName name}";
+    unit = configGraftLib.mkDirectoryUnit {
+      inherit entry;
+      identity = configGraftLib.normalizePath entry.target;
+      snapshot = snapshotRel;
+    };
     script = configGraftLib.mkDirectoryReconcileScript {
       inherit
         lib
@@ -132,9 +147,24 @@ let
 
   entries = lib.concatMap (
     { format, active }:
-    lib.mapAttrsToList (name: entry: {
-      inherit format entry;
+    lib.mapAttrsToList (name: entry: rec {
+      inherit format entry name;
+      option = "environment.${format.optionName}";
       snapshotRel = "config-graft/managed-${format.name}/${configGraftLib.safeName name}";
+      unit =
+        if format.name == "plist" && entry.cfprefsdDomain != null then
+          configGraftLib.mkUnit {
+            inherit format entry;
+            identity = configGraftLib.domainPlist "/Library/Preferences" entry.cfprefsdDomain;
+            snapshot = snapshotRel;
+            domain = configGraftLib.systemDomain entry.cfprefsdDomain;
+          }
+        else
+          configGraftLib.mkUnit {
+            inherit format entry;
+            identity = configGraftLib.normalizePath entry.target;
+            snapshot = snapshotRel;
+          };
       desired = configGraftLib.mkDesired {
         inherit
           lib
@@ -150,6 +180,12 @@ let
   # The previous generation's toplevel during activation: the `/run/current-system`
   # link is swapped to the new one only as activation's last step.
   prevGenRoot = "/run/current-system";
+
+  # What this generation manages, as the manifest the next activation reads to
+  # find what it no longer does, embedded beside the snapshots it points at.
+  units = map (e: e.unit) (entries ++ directoryEntries);
+
+  manifestRel = "config-graft/manifest.json";
 
   # Sets `_prev` to the previous generation's snapshot of an entry, the BASE, or
   # empty when it has none.
@@ -187,6 +223,29 @@ let
         shift
         printf "config-graft: warning: $_fmt\n" "$@" >&2
       }
+
+      # A removed entry whose prune fails is warned about and left behind; it
+      # does not fail the activation, so the ERR trap is off around it.
+      trap - ERR
+      ${configGraftLib.mkPruneScript {
+        inherit
+          lib
+          pkgs
+          formats
+          manifestRel
+          units
+          ;
+        package = config.environment.managed.package;
+        prevRoot = prevGenRoot;
+        hasPrev = "true";
+        claimed = map (e: configGraftLib.normalizePath "/etc/${e.target}") (
+          lib.filter (e: e.enable) (lib.attrValues config.environment.etc)
+        );
+        inherit restartUser;
+        needsUser = true;
+        claimedBy = "environment.etc";
+      }}
+      trap '_failed=1' ERR
     ''
     + lib.concatMapStringsSep "\n" (
       e:
@@ -233,9 +292,12 @@ in
       };
     };
 
-  config = lib.mkIf (entries != [ ] || directoryEntries != [ ]) {
+  # Unconditional: the generation that removes the last entry has none left to key
+  # it off, and its prune is what cleans up after them.
+  config = {
     # Embed each DESIRED into the toplevel closure at its snapshot path (a directory
-    # DESIRED is a symlink to its store tree, which config-graft follows as BASE).
+    # DESIRED is a symlink to its store tree, which config-graft follows as BASE),
+    # and the manifest naming them.
     system.systemBuilderCommands =
       lib.concatMapStrings (e: ''
         mkdir -p "$(dirname "$out/${e.snapshotRel}")"
@@ -244,7 +306,11 @@ in
       + lib.concatMapStrings (e: ''
         mkdir -p "$(dirname "$out/${e.snapshotRel}")"
         ln -s ${e.entry.source} $out/${e.snapshotRel}
-      '') directoryEntries;
+      '') directoryEntries
+      + ''
+        mkdir -p "$(dirname "$out/${manifestRel}")"
+        ln -s ${pkgs.writeText "config-graft-manifest.json" (configGraftLib.mkManifest units)} $out/${manifestRel}
+      '';
 
     # Each wrapper places the activation script its own way (see `activationWiring`).
     system.activationScripts = activationWiring activationScript;
@@ -278,6 +344,21 @@ in
         optionName = "managedDirectory";
         entries = config.environment.managedDirectory;
         needsUser = true;
+      }
+      # A relative target would resolve against wherever activation runs.
+      ++ map (e: {
+        assertion = lib.hasPrefix "/" e.entry.target;
+        message = ''
+          ${e.option}."${e.name}".target is `${e.entry.target}`, which is not an
+          absolute path. A system entry's target is used as given; start it with `/`.
+        '';
+      }) (builtins.filter (e: e.entry.cfprefsdDomain or null == null) entries ++ directoryEntries)
+      ++ configGraftLib.mkSnapshotAssertions {
+        inherit lib;
+        entries = map (e: {
+          inherit (e) option name;
+          snapshot = e.snapshotRel;
+        }) (entries ++ directoryEntries);
       }
       ++ (
         # config-graft reconciles a mutable file/tree in place; `environment.etc`

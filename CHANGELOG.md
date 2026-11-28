@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Nix modules: removing an entry prunes what it last applied** ([#31](https://github.com/thanegill/config-graft/issues/31)), as dropping a key from a declared entry always did. Each generation records a manifest of its entries, and the next activation, before any entry runs, reconciles each one it no longer declares against an empty document with its last snapshot as BASE. A symlinked, store-linked or `home.file`/`environment.etc`-linked target is skipped with a warning, and so is an entry whose `whileRunning.skip` process or `restart` app is running (no app is quit for a removed entry); a missing target is not recreated, and a failed prune warns without failing the activation. A removal is not pruned on the first switch onto this version, at boot, when activating a generation built before this version, or after a skipped or failed prune (see README).
 - **Nix modules:** a per-entry `followSymlinks` option passes `--follow-symlinks`, so a target linked to a file kept elsewhere is written through the link.
 - **A scoped `--merge-key` whose PATH names no array is reported on stderr**, such as a key copied in the quoted form a warning prints (`x."[b]"`), which used to merge by value with nothing said.
 - **Man pages:** the Nix package installs config-graft(1) and one page per subcommand, generated from the `--help` text by `cargo xtask man`.
@@ -21,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Nix modules:** importing the home-manager, NixOS or nix-darwin module adds config-graft and jq to the closure even with no entries, so the generation that removes the last entry can prune it. On a system outside the flake's four, set `managed.package`.
+- **Breaking:** NixOS and nix-darwin: a `managed*` entry whose `target` is not an absolute path fails the build. It was used as given, relative to wherever activation ran. A `cfprefsdDomain` entry, which ignores `target`, is exempt.
 - **Breaking:** nix-darwin `managedPlist`: a `cfprefsdDomain` is the system-wide domain (`/Library/Preferences/<id>`), as documented, instead of root's own user domain. Keys earlier generations wrote stay in root's domain and still win for processes running as root; find them with `sudo defaults read <id>` and remove them with `sudo defaults delete <id> <key>`. On the first switch, a key dropped from `settings` is pruned from the system-wide domain if it holds the same value.
 - **home-manager:** the managed entries run after `linkGeneration`, so an entry moved from `home.file` finds its old store link removed rather than failing activation on it.
 - **`json --help` shows `--indent`'s default as `[default: 2]`**, as `--array-strategy` and `--plist-format` already do.
@@ -42,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Nix modules:** two entries of one format whose names differ only in `/` against `-` (`a/b.json` and `a-b.json`) fail the build. They shared a snapshot path, so one of them was reconciled against the other's BASE.
 - **A failed entry fails a NixOS or nix-darwin activation**: the system script runs every entry, then exits non-zero; it used to report success unless the failing entry was last. home-manager still stops at the first failure.
 - **`managedPlist`:** a failed or empty `defaults export` no longer wipes the domain ([#59](https://github.com/thanegill/config-graft/issues/59)); the entry is skipped with a warning, and a graft that fails is never imported.
 - **An app's write to TARGET during a run is no longer silently overwritten** (JSON, YAML, TOML, plist). A run read TARGET, reconciled, then renamed its result over the file without checking that TARGET still held what it had read, so anything the app saved in between was lost, even under a key config-graft does not manage. A run now works from a single read of TARGET and compares the file it writes (the resolved file under `--follow-symlinks`) with those bytes just before the rename; if they differ, it discards its result and reconciles again from the new contents, reporting each such pass on stderr. A retry that finds TARGET empty or missing after an earlier pass saw it hold something writes nothing and counts as another change, since that is an app caught between truncating its file and refilling it, and reconciling it as a first apply would write DESIRED alone over every key the app owns. After 3 passes that all found TARGET changed, it **refuses** (exit 1), naming the file and leaving it as the other process wrote it. This narrows the window rather than closing it: `rename(2)` cannot be made conditional, so a write landing between the final comparison and the rename is still replaced. Each pass prints its own `--diff` and warnings. Runs that write nothing are unaffected, and directory mode is unchanged.
