@@ -42,7 +42,9 @@
           # config-graft (2): reconciled through cfprefsd: set `cfprefsdDomain` so
           # the merge goes `defaults export` -> config-graft -> `defaults import`,
           # instead of editing the file (whose on-disk copy cfprefsd may override
-          # from cache). Runs as root, so this targets the system/global domain.
+          # from cache). The id is reconciled as the system-wide domain, by path
+          # (/Library/Preferences/com.acme.daemon); a user's own value for a key
+          # still overrides it for that user.
           {
             environment.managedPlist."/Library/Preferences/com.acme.daemon.plist" = {
               cfprefsdDomain = "com.acme.daemon";
