@@ -63,7 +63,7 @@ Each codec's mechanics are documented at the code. These are the decisions that 
 
 ### TOML
 
-The root is always a table, so `NotTomlTable` is unreachable; it is kept only for `FormatKind` symmetry.
+The root is always a table, so neither `DesiredNotMapping` nor `TargetNotMapping` can fire for TOML; their `Toml` arms exist only because `FormatKind` matches are total.
 
 ### Directory mode (`directory.rs`)
 

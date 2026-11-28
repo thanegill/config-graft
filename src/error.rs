@@ -8,21 +8,15 @@ use std::path::{Path, PathBuf};
 
 /// A reconcile run that failed (always maps to exit code 1).
 ///
-/// DESIRED parse/shape failures are format-specific: each format reports the
-/// concrete thing it expected (a JSON object, a plist dictionary, a YAML
-/// mapping) rather than a generic catch-all.
+/// DESIRED parse/shape errors carry the format, so each message names the
+/// concrete thing it expected (a JSON object, a plist dictionary, a YAML mapping)
+/// rather than a generic catch-all.
 #[derive(Debug)]
 pub enum Error {
-    /// DESIRED parsed but its root is not a JSON object.
-    NotJsonObject(PathBuf),
-    /// DESIRED parsed but its root is not a plist dictionary.
-    NotPlistDictionary(PathBuf),
-    /// DESIRED parsed but its root is not a YAML mapping.
-    NotYamlMapping(PathBuf),
-    /// DESIRED parsed but its root is not a TOML table. (Structurally
-    /// unreachable -- a parsed TOML document always has a table root -- but kept so
-    /// every format answers the same questions.)
-    NotTomlTable(PathBuf),
+    /// DESIRED parsed but its root is not the format's mapping: a JSON object, a
+    /// plist dictionary or a YAML mapping. (Unreachable for TOML, whose parsed
+    /// document always has a table root.)
+    DesiredNotMapping { path: PathBuf, kind: FormatKind },
     /// Writing the target failed.
     Write {
         path: PathBuf,
@@ -172,16 +166,12 @@ fn write_reason(
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::NotJsonObject(p) => write!(f, "DESIRED must be a JSON object: {}", p.display()),
-            Error::NotPlistDictionary(p) => {
-                write!(f, "DESIRED must be a plist dictionary: {}", p.display())
-            }
-            Error::NotYamlMapping(p) => {
-                write!(f, "DESIRED must be a YAML mapping: {}", p.display())
-            }
-            Error::NotTomlTable(p) => {
-                write!(f, "DESIRED must be a TOML table: {}", p.display())
-            }
+            Error::DesiredNotMapping { path, kind } => write!(
+                f,
+                "DESIRED must be {}: {}",
+                kind.root_mapping(),
+                path.display()
+            ),
             Error::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
             Error::TargetKeptChanging { path, passes } => write!(
                 f,
@@ -355,5 +345,40 @@ impl From<Outcome> for std::process::ExitCode {
             Outcome::Applied => std::process::ExitCode::SUCCESS,
             Outcome::WouldChange => std::process::ExitCode::from(3),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::Error;
+    use crate::format::FormatKind;
+
+    #[test]
+    fn a_desired_root_of_the_wrong_shape_names_what_the_format_expected() {
+        let rendered = |kind: FormatKind| {
+            Error::DesiredNotMapping {
+                path: PathBuf::from("d"),
+                kind,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            rendered(FormatKind::Json),
+            "DESIRED must be a JSON object: d"
+        );
+        assert_eq!(
+            rendered(FormatKind::Plist),
+            "DESIRED must be a plist dictionary: d"
+        );
+        assert_eq!(
+            rendered(FormatKind::Yaml),
+            "DESIRED must be a YAML mapping: d"
+        );
+        assert_eq!(
+            rendered(FormatKind::Toml),
+            "DESIRED must be a TOML table: d"
+        );
     }
 }
