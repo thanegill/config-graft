@@ -479,6 +479,20 @@ mod tests {
     const ROOT: Owner = Owner { uid: 0, gid: 0 };
 
     #[test]
+    fn dest_dir_is_the_parent_or_dot_for_a_bare_name() {
+        use std::path::{Path, PathBuf};
+
+        use super::dest_dir;
+
+        assert_eq!(dest_dir(Path::new("config.json")), PathBuf::from("."));
+        assert_eq!(dest_dir(Path::new("app/config.json")), PathBuf::from("app"));
+        assert_eq!(
+            dest_dir(Path::new("/etc/config.json")),
+            PathBuf::from("/etc")
+        );
+    }
+
+    #[test]
     fn a_privileged_rewrite_hands_the_file_back_to_its_owner() {
         let root_with_group = Owner { uid: 0, gid: 20 };
         assert_eq!(owner_to_keep(ALICE, ROOT), Some(ALICE));
