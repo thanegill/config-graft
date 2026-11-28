@@ -473,9 +473,10 @@ pub(crate) trait Backend {
     /// byte format the write lands only while TARGET still holds it.
     type Snapshot;
     /// Separator between key-path components in diagnostics (`--diff` lines and
-    /// `merge` conflict warnings): the format's own separator for byte formats
-    /// (`.` for JSON/YAML/TOML, `:` for plist), `/` for a directory tree.
-    const COMPONENT_SEPARATOR: &'static str;
+    /// `merge` conflict warnings) and, for byte formats, in a `--merge-key` scope:
+    /// the format's own separator for byte formats (`.` for JSON/YAML/TOML, `:` for
+    /// plist), `/` for a directory tree.
+    const PATH_SEP: &'static str;
 
     /// Parsed `--merge-key` specs for the array engine. Byte formats parse them
     /// against their own key-path separator; a tree has no arrays, so the default
@@ -609,7 +610,7 @@ pub(crate) trait Backend {
                     path: DiagnosticPath::new(),
                     kind,
                 }],
-                Self::COMPONENT_SEPARATOR,
+                Self::PATH_SEP,
             );
         }
         Err(Error::TargetKeptChanging {
@@ -742,15 +743,15 @@ pub(crate) trait Backend {
         // Diagnostics only: none of these change the exit code.
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
-        emit(&warnings, Self::COMPONENT_SEPARATOR);
-        emit(&lossy_collapses(&combined), Self::COMPONENT_SEPARATOR);
+        emit(&warnings, Self::PATH_SEP);
+        emit(&lossy_collapses(&combined), Self::PATH_SEP);
 
         // Before `prepare`, which serializes and can refuse: `--diff` is a preview,
         // so it should still show what the run would do to a target the writer then
         // turns out to be unable to represent.
         if args.diff {
             let before = target_as_read.as_ref().unwrap_or(&target);
-            print!("{}", before.diff(&result, Self::COMPONENT_SEPARATOR));
+            print!("{}", before.diff(&result, Self::PATH_SEP));
         }
 
         let Prepared { output, changed } =
@@ -802,12 +803,10 @@ pub(crate) struct ByteBackend<F>(PhantomData<F>);
 impl<F: Format> Backend for ByteBackend<F> {
     type Leaf = F::Leaf;
     type Snapshot = Option<Vec<u8>>;
-    // Byte formats diff and report conflicts with the format's own key-path
-    // separator (`.` for JSON/YAML/TOML, `:` for plist).
-    const COMPONENT_SEPARATOR: &'static str = F::PATH_SEP;
+    const PATH_SEP: &'static str = F::PATH_SEP;
 
     fn merge_keys(args: &RunArgs) -> MergeKeys {
-        MergeKeys::parse(&args.merge_key, F::PATH_SEP)
+        MergeKeys::parse(&args.merge_key, Self::PATH_SEP)
     }
 
     /// Read through a symlinked TARGET, so under `--follow-symlinks` this is the
@@ -873,7 +872,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         let current = snapshot.as_deref().unwrap_or_default();
         emit(
             &F::refuse_on_write(result, target, current, opts)?,
-            F::PATH_SEP,
+            Self::PATH_SEP,
         );
         let output = F::serialize(result, current, opts)?;
         Ok(Prepared {
@@ -913,7 +912,7 @@ impl<F: Format> Backend for ByteBackend<F> {
                         change,
                     },
                 }],
-                F::PATH_SEP,
+                Self::PATH_SEP,
             );
         }
         Ok(outcome)
@@ -932,7 +931,7 @@ impl Backend for Directory {
     // A tree is read entry by entry, so there is no single snapshot to check before
     // the write; that read/apply window is a SPEC section 10 trade-off.
     type Snapshot = ();
-    const COMPONENT_SEPARATOR: &'static str = "/";
+    const PATH_SEP: &'static str = "/";
 
     fn error_desired_absent(path: PathBuf) -> Error {
         Error::MissingDesiredDirectory(path)
@@ -1083,7 +1082,7 @@ mod tests {
         impl Backend for AppSavesDuringWrite {
             type Leaf = Leaf;
             type Snapshot = Snapshot;
-            const COMPONENT_SEPARATOR: &'static str = JsonBackend::COMPONENT_SEPARATOR;
+            const PATH_SEP: &'static str = JsonBackend::PATH_SEP;
 
             fn merge_keys(args: &RunArgs) -> MergeKeys {
                 JsonBackend::merge_keys(args)
