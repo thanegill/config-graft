@@ -161,6 +161,54 @@ fn prune_removes_a_dir_the_app_already_emptied() {
 }
 
 #[test]
+fn empty_desired_tree_prunes_managed_files_and_keeps_the_rest() {
+    // The contract the Nix modules' prune of a removed `managedDirectory` entry
+    // leans on: the target is reconciled against an empty DESIRED tree with the
+    // entry's last snapshot as BASE, both store paths and so read-only (0555
+    // directories, 0444 files). Managed files go and their emptied directories
+    // collapse, a file the app wrote or edited away from BASE stays, and without
+    // `--manage-root` the target keeps its own mode, not the empty DESIRED's.
+    if !permissions_enforced("empty_desired_tree_prunes_managed_files_and_keeps_the_rest") {
+        return;
+    }
+    let dir = ScratchDir::new();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("empty");
+    let base = dir.path().join("base");
+    fs::create_dir_all(&desired).unwrap();
+    write(&base.join("managed.txt"), "v1");
+    write(&base.join("edited.txt"), "v1");
+    write(&base.join("sub/nested.txt"), "v2");
+    write(&target.join("managed.txt"), "v1");
+    write(&target.join("edited.txt"), "app edit");
+    write(&target.join("sub/nested.txt"), "v2");
+    write(&target.join("app.txt"), "app");
+    chmod_tree(&base, 0o555, 0o444);
+    chmod_tree(&desired, 0o555, 0o444);
+    for file in ["managed.txt", "sub/nested.txt"] {
+        fs::set_permissions(target.join(file), fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    fs::set_permissions(target.join("sub"), fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let out = graft(&[
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!target.join("managed.txt").exists());
+    assert!(!target.join("sub").exists());
+    assert_eq!(read(&target.join("edited.txt")), "app edit");
+    assert_eq!(read(&target.join("app.txt")), "app");
+    assert_eq!(mode_of(&target), 0o700);
+}
+
+#[test]
 fn no_prune_keeps_dropped_file() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("target");
