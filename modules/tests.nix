@@ -995,6 +995,23 @@ let
       );
     }
     {
+      name = "a relative system target is rejected, and a domain entry's ignored one is not";
+      expected = 2;
+      actual = builtins.length (
+        builtins.filter (lib.hasInfix "which is not an") (
+          failedAssertions (systemConfig {
+            managedJson."etc/app.json".settings.a = 1;
+            managedDirectory."srv/tree".source = "/source";
+            managedJson."/etc/ok.json".settings.a = 1;
+            managedPlist."com.example.app" = {
+              cfprefsdDomain = "com.example.app";
+              settings.a = 1;
+            };
+          })
+        )
+      );
+    }
+    {
       name = "system entries whose names share a snapshot path are rejected";
       expected = 1;
       actual = builtins.length (

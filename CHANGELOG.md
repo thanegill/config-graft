@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** NixOS and nix-darwin: a `managed*` entry whose `target` is not an absolute path fails the build. It was used as given, relative to wherever activation ran. A `cfprefsdDomain` entry, which ignores `target`, is exempt.
 - **Breaking:** nix-darwin `managedPlist`: a `cfprefsdDomain` is the system-wide domain (`/Library/Preferences/<id>`), as documented, instead of root's own user domain. Keys earlier generations wrote stay in root's domain and still win for processes running as root; find them with `sudo defaults read <id>` and remove them with `sudo defaults delete <id> <key>`. On the first switch, a key dropped from `settings` is pruned from the system-wide domain if it holds the same value.
 - **home-manager:** the managed entries run after `linkGeneration`, so an entry moved from `home.file` finds its old store link removed rather than failing activation on it.
 - **`json --help` shows `--indent`'s default as `[default: 2]`**, as `--array-strategy` and `--plist-format` already do.

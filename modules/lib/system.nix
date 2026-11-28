@@ -281,6 +281,14 @@ in
         entries = config.environment.managedDirectory;
         needsUser = true;
       }
+      # A relative target would resolve against wherever activation runs.
+      ++ map (e: {
+        assertion = lib.hasPrefix "/" e.entry.target;
+        message = ''
+          ${e.option}."${e.name}".target is `${e.entry.target}`, which is not an
+          absolute path. A system entry's target is used as given; start it with `/`.
+        '';
+      }) (builtins.filter (e: e.entry.cfprefsdDomain or null == null) entries ++ directoryEntries)
       ++ configGraftLib.mkSnapshotAssertions {
         inherit lib;
         entries = map (e: {
