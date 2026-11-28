@@ -815,6 +815,34 @@ fn no_owner_applies_without_managing_ownership() {
     assert_eq!(check.status.code(), Some(0));
 }
 
+#[test]
+fn ownership_is_part_of_a_diff_unless_no_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&target.join("f.txt"), "old");
+    write(&desired.join("f.txt"), "new");
+    let meta = fs::metadata(target.join("f.txt")).unwrap();
+    let owner = format!("{}:{}", meta.uid(), meta.gid());
+
+    let diff_of = |flags: &[&str]| {
+        let mut args = flags.to_vec();
+        args.extend([
+            "--diff",
+            "--check",
+            target.to_str().unwrap(),
+            desired.to_str().unwrap(),
+        ]);
+        let out = graft(&args);
+        assert_eq!(out.status.code(), Some(3), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let managed = diff_of(&[]);
+    assert!(managed.contains(&owner), "diff was: {managed:?}");
+    let unmanaged = diff_of(&["--no-owner"]);
+    assert!(!unmanaged.contains(&owner), "diff was: {unmanaged:?}");
+}
+
 /// Whether `dir`'s filesystem keeps `case-probe` and `CASE-PROBE` apart, found
 /// independently of config-graft.
 fn keeps_case_apart(dir: &Path) -> bool {
