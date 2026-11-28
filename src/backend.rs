@@ -17,8 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, FsLeaf};
 use crate::format::{
-    is_blank, parse_file, read_bytes, read_file, Format, FormatKind, Normalization, Normalized,
-    WriteOpts,
+    is_blank, parse_file, read_bytes, read_file, Format, Normalization, Normalized, WriteOpts,
 };
 use crate::reconcile::{
     key_of, merge_key_fields, reconcile, ArrayStrategy, ManagedPath, MergeKeys, Options,
@@ -851,7 +850,10 @@ impl<F: Format> Backend for ByteBackend<F> {
     }
 
     fn error_desired_not_mapping(path: PathBuf) -> Error {
-        F::KIND.desired_not_mapping(path)
+        Error::DesiredNotMapping {
+            path,
+            kind: F::KIND,
+        }
     }
 
     fn error_target_not_mapping(path: PathBuf) -> Error {
@@ -947,8 +949,9 @@ impl Backend for Directory {
         Error::MissingDesiredDirectory(path)
     }
 
+    // `read_tree` refuses a non-directory DESIRED, so this is unreachable.
     fn error_desired_not_mapping(path: PathBuf) -> Error {
-        FormatKind::Directory.desired_not_mapping(path)
+        Error::NotDirectory(path)
     }
 
     // A tree's root is always a map and `read_tree` already refuses a non-directory,

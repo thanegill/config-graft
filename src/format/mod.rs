@@ -13,7 +13,7 @@
 //! plugs into the shared run driver via its own `Backend` impl (`Directory::run`).
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::Error;
@@ -42,9 +42,6 @@ pub enum FormatKind {
     Plist,
     Yaml,
     Toml,
-    /// A directory *tree* rather than a single file. Not a byte-oriented
-    /// [`Format`]; it tags the directory backend's errors.
-    Directory,
 }
 
 /// How many containers a document may nest. The bound is the engine's, not any
@@ -56,14 +53,13 @@ pub enum FormatKind {
 pub(crate) const MAX_DEPTH: usize = 512;
 
 impl FormatKind {
-    /// The format's name, for diagnostics that are not per-format errors.
+    /// The format's name, for diagnostics.
     pub fn name(self) -> &'static str {
         match self {
             FormatKind::Json => "JSON",
             FormatKind::Plist => "plist",
             FormatKind::Yaml => "YAML",
             FormatKind::Toml => "TOML",
-            FormatKind::Directory => "a directory",
         }
     }
 
@@ -74,21 +70,17 @@ impl FormatKind {
             FormatKind::Plist => "a dictionary",
             FormatKind::Yaml => "a mapping",
             FormatKind::Toml => "a table",
-            FormatKind::Directory => "a directory",
         }
     }
 
-    /// The format-specific error for DESIRED's root not being this format's
-    /// object/dictionary/mapping type.
-    pub fn desired_not_mapping(self, path: PathBuf) -> Error {
+    /// This format's root mapping named with the format, for diagnostics: "a JSON
+    /// object".
+    pub fn root_mapping(self) -> &'static str {
         match self {
-            FormatKind::Json => Error::NotJsonObject(path),
-            FormatKind::Plist => Error::NotPlistDictionary(path),
-            FormatKind::Yaml => Error::NotYamlMapping(path),
-            FormatKind::Toml => Error::NotTomlTable(path),
-            // A real directory's root is always a Map, so this is unreachable in
-            // practice (like NotTomlTable); kept for FormatKind symmetry.
-            FormatKind::Directory => Error::NotDirectory(path),
+            FormatKind::Json => "a JSON object",
+            FormatKind::Plist => "a plist dictionary",
+            FormatKind::Yaml => "a YAML mapping",
+            FormatKind::Toml => "a TOML table",
         }
     }
 }
