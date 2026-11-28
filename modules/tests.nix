@@ -6,7 +6,9 @@
 #
 # Almost everything here is a pure evaluation of `lib/common.nix` -- no platform
 # module, no home-manager input -- so the assertions read as plain
-# expected/actual. `binaryTargetRun` is the exception: it runs the real binary.
+# expected/actual. `binaryTargetRun` and `homeFileMigrationRun` are the exceptions:
+# they run the real binary. `hmActivation` evaluates the home-manager module itself,
+# with home-manager's own pieces stubbed.
 {
   lib,
   pkgs,
@@ -25,6 +27,7 @@ let
       format = pkgs.formats.plist { };
       cfprefsdDomain = null;
       binary = false;
+      followSymlinks = false;
     }
     // overrides;
 
@@ -66,16 +69,16 @@ let
   # The documented default of an entry's `package` option, as the manual renders it.
   packageDefaultText = type: (type.getSubOptions [ ]).package.defaultText.text;
 
-  # `binary`'s default is computed from `cfprefsdDomain`, so it has to be observed
-  # through an evaluated submodule rather than the plain attrset above.
-  resolvedBinary =
-    overrides:
+  # An entry's option defaults, `binary`'s computed from `cfprefsdDomain` among
+  # them, observed through an evaluated submodule rather than the plain attrset above.
+  resolvedEntry =
+    parent: overrides:
     let
       evaluated = lib.evalModules {
         modules = [
           {
             options.entries = lib.mkOption {
-              type = plistEntryType "home";
+              type = plistEntryType parent;
               default = { };
             };
           }
@@ -83,7 +86,9 @@ let
         ];
       };
     in
-    evaluated.config.entries.probe.binary;
+    evaluated.config.entries.probe;
+
+  resolvedBinary = overrides: (resolvedEntry "home" overrides).binary;
 
   # The DESIRED derivation for one entry, as a path so two can be compared without
   # building either.
@@ -158,6 +163,88 @@ let
           || { echo "the managed key was not grafted in"; exit 1; }
         echo ok > $out
       '';
+
+  # The home-manager module's activation entries, evaluated without a home-manager
+  # input: `lib.hm.dag.entryAfter` and the few options the module writes are
+  # stubbed, which is enough to read each entry's ordering.
+  hmActivation =
+    let
+      hmLib = lib.extend (
+        _: _: {
+          hm.dag.entryAfter = after: data: { inherit after data; };
+        }
+      );
+      stub = type: lib.mkOption { inherit type; };
+      evaluated = hmLib.evalModules {
+        modules = [
+          (import ./home-manager.nix {
+            self.packages.${pkgs.stdenv.hostPlatform.system}.default = package;
+          })
+          {
+            options.home = {
+              file = stub (lib.types.attrsOf lib.types.raw);
+              activation = stub (lib.types.attrsOf lib.types.raw);
+              homeDirectory = stub lib.types.str;
+            };
+            options.assertions = stub (lib.types.listOf lib.types.raw);
+            config = {
+              _module.args.pkgs = pkgs;
+              home.homeDirectory = "/home/probe";
+              home.managedJson.probe = {
+                settings.a = 1;
+                followSymlinks = true;
+              };
+              home.managedDirectory.tree.source = "/source";
+            };
+          }
+        ];
+      };
+    in
+    evaluated.config.home.activation;
+
+  # An entry moved from `home.file` to `managedJson`: until home-manager's
+  # `linkGeneration` removes it, the target is still the old generation's link into
+  # the store. The module's script must refuse that link rather than write through
+  # it, and once the link is gone must create a regular file -- which is why the
+  # activation is ordered after `linkGeneration` (`hmActivation` above).
+  homeFileMigrationRun =
+    let
+      oldHomeFile = pkgs.writeText "old-home-file.json" ''{"a":0}'';
+      reconcile = common.mkEntryReconcileScript {
+        inherit lib;
+        format = {
+          name = "json";
+        };
+        entry = entry {
+          inherit package;
+          format = pkgs.formats.json { };
+        };
+        desired = pkgs.writeText "desired.json" ''{"a":1}'';
+        target = "target.json";
+      };
+    in
+    pkgs.runCommand "config-graft-module-home-file-migration" { } ''
+      run() { "$@"; }
+      _i() { :; }
+      _prev=""
+      ln -s ${oldHomeFile} target.json
+
+      if ( ${reconcile} ) 2> refused.log; then
+        echo "wrote through the old home.file link"; exit 1
+      fi
+      grep -q -- '--follow-symlinks' refused.log \
+        || { echo "the refusal did not name the flag:"; cat refused.log; exit 1; }
+      [ "$(readlink target.json)" = ${oldHomeFile} ] \
+        || { echo "the old link was replaced"; exit 1; }
+
+      rm target.json
+      ${reconcile}
+      [ -f target.json ] && [ ! -L target.json ] \
+        || { echo "no regular file after the link was removed"; exit 1; }
+      grep -q '"a": 1' target.json \
+        || { echo "the managed key was not written"; exit 1; }
+      echo ok > $out
+    '';
 
   # A generator distinguishable from the default only by what it emits. Under the
   # old `builtins.toJSON` path the entry's `format` was bypassed, so this produced
@@ -375,6 +462,53 @@ let
       });
     }
     {
+      name = "file path passes `--follow-symlinks` when `followSymlinks` is set";
+      expected = true;
+      actual = lib.hasInfix " --follow-symlinks" (script {
+        followSymlinks = true;
+      });
+    }
+    {
+      name = "file path omits `--follow-symlinks` by default";
+      expected = false;
+      actual = lib.hasInfix "--follow-symlinks" (script { });
+    }
+    {
+      # The domain path writes a scratch file it made itself, never `target`.
+      name = "cfprefsd path ignores `followSymlinks`";
+      expected = false;
+      actual = lib.hasInfix "--follow-symlinks" (script {
+        cfprefsdDomain = "com.example.app";
+        followSymlinks = true;
+      });
+    }
+    {
+      name = "`followSymlinks` defaults to false";
+      expected = false;
+      actual = (resolvedEntry "home" { settings.a = 1; }).followSymlinks;
+    }
+    {
+      # Through the real module and a non-plist entry, so the option cannot move
+      # into the plist-only block unnoticed.
+      name = "a home-manager managedJson entry maps `followSymlinks` to the flag";
+      expected = true;
+      actual = lib.hasInfix " --follow-symlinks" hmActivation.managedJson.data;
+    }
+    {
+      name = "home-manager runs byte-format and directory entries after linkGeneration";
+      expected = {
+        managedJson = [
+          "writeBoundary"
+          "linkGeneration"
+        ];
+        managedDirectory = [
+          "writeBoundary"
+          "linkGeneration"
+        ];
+      };
+      actual = lib.mapAttrs (_: activation: activation.after) hmActivation;
+    }
+    {
       name = "a binary DESIRED runs the entry's own `format` generator";
       expected = true;
       actual =
@@ -432,4 +566,5 @@ assert lib.assertMsg (failures == [ ]) (
 pkgs.runCommand "config-graft-module-tests" { } ''
   echo "${toString (builtins.length cases)} module assertions passed" > $out
   cat ${binaryTargetRun} >> $out
+  cat ${homeFileMigrationRun} >> $out
 ''

@@ -114,6 +114,22 @@ in
                 used to build {option}`settings`. Override to use a validating format.
               '';
             };
+
+            followSymlinks = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                When {option}`target` is a symlink, write the file it resolves to
+                (`--follow-symlinks`). Without it, an activation that would change a
+                symlinked {option}`target` fails rather than replacing the link with
+                a regular file; one with nothing to change still succeeds. Set it for
+                a target linked to a file kept elsewhere, such as a dotfiles checkout.
+                A link into {file}`/nix/store` cannot be written through even with
+                this set; a former `home.file` or `environment.etc` link is removed
+                by activation before this entry runs.
+                Ignored when the entry reconciles through `cfprefsdDomain`.
+              '';
+            };
           }
           // lib.optionalAttrs (format.name == "plist") {
             # `defaults`/`plutil`/`cfprefsd` are macOS-only; `mkAssertions` guards a
@@ -208,7 +224,7 @@ in
         _i "Reconciling managed ${format.name} file %s" "$_target"
         run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${
           lib.optionalString (format.name == "plist" && entry.binary) " --plist-format binary"
-        }
+        }${lib.optionalString entry.followSymlinks " --follow-symlinks"}
       '';
 
   # Directory-format entry type. Unlike the byte formats there is no `settings`
