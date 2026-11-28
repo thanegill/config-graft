@@ -10,7 +10,7 @@ use std::hash::Hash;
 use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 
-use super::{Format, FormatKind, ParseFailure, WriteOpts, MAX_DEPTH};
+use super::{is_blank, Format, FormatKind, ParseFailure, WriteOpts, MAX_DEPTH};
 use crate::error::Error;
 use crate::render::{quote, render_f64};
 use crate::value::{CanonicalF64, Leaf, Node};
@@ -115,9 +115,7 @@ impl Format for Yaml {
             ParseFailure::syntax_at_line(marker.line(), marker.col() + 1, error.info())
         })?;
         match docs.as_slice() {
-            [] if bytes.iter().all(u8::is_ascii_whitespace) => {
-                Err(ParseFailure::syntax("no document"))
-            }
+            [] if is_blank(bytes) => Err(ParseFailure::syntax("no document")),
             [] => Ok(Node::empty_map()),
             [doc] if doc.is_null() && is_empty_document(text) => Ok(Node::empty_map()),
             [doc] => Yaml::decode(doc),

@@ -420,12 +420,30 @@ fn keep_owner(file: &fs::File, previous: Owner, created: Owner) -> std::io::Resu
     Ok(kept)
 }
 
+/// Whether [`write_atomic`] replaced the target.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WriteOutcome {
+    /// Replaced, with the [`ModeChange`] when a special bit was dropped.
+    Written(Option<ModeChange>),
+    /// The target no longer held the bytes the run reconciled; nothing was written.
+    TargetChanged,
+}
+
 /// Atomic in-place write: temp file in the same dir, fsync, set its owner and mode,
 /// then rename over the target. A new file gets 0644; a rewrite keeps TARGET's
 /// owner and group on a privileged run (a failure to keep them refuses the write)
 /// and gets [`mode::rewritten_mode`], and returns the [`ModeChange`] when the
 /// rewrite rule or the system dropped a special bit, for the caller to report.
-pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<Option<ModeChange>> {
+///
+/// Renames only while the target still holds `expected` (`None`: no file), the bytes
+/// the content was reconciled from; otherwise discards the temp file. The check runs
+/// as late as it can, but `rename(2)` cannot make it conditional, so a write landing
+/// between the two is still replaced.
+pub(crate) fn write_atomic(
+    path: &Path,
+    content: &[u8],
+    expected: Option<&[u8]>,
+) -> std::io::Result<WriteOutcome> {
     let previous = fs::metadata(path).ok();
     let dir = dest_dir(path);
     fs::create_dir_all(&dir)?;
@@ -450,20 +468,28 @@ pub(crate) fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<Optio
     let requested = rewrite.map_or(0o644, |(_, _, mode)| mode);
     mode::set_mode(tmp.as_file(), requested)?;
     let actual = mode::mode_of(&tmp.as_file().metadata()?);
+    let current = format::read_bytes(path).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("reading it back before the rename: {e}"))
+    })?;
+    if current.as_deref() != expected {
+        return Ok(WriteOutcome::TargetChanged);
+    }
     tmp.persist(path).map_err(|e| e.error)?;
     // fsync the directory so the rename itself survives a crash (content fsync alone
     // doesn't make the new directory entry durable). Best-effort: the rename already
     // landed, so a filesystem that can't fsync a directory (e.g. some network mounts)
     // must not turn a successful write into an error.
     let _ = fsync_dir(&dir);
-    Ok(rewrite.and_then(|(previous, writer, requested)| {
-        let modes = Modes {
-            previous,
-            requested,
-            actual,
-        };
-        ModeChange::between(modes, writer)
-    }))
+    Ok(WriteOutcome::Written(rewrite.and_then(
+        |(previous, writer, requested)| {
+            let modes = Modes {
+                previous,
+                requested,
+                actual,
+            };
+            ModeChange::between(modes, writer)
+        },
+    )))
 }
 
 /// fsync a directory so its recent entry changes (renames/creates/unlinks) are
@@ -587,5 +613,112 @@ mod tests {
         cmd.clone().debug_assert();
         let names: Vec<&str> = cmd.get_subcommands().map(|sub| sub.get_name()).collect();
         assert_eq!(names, ["json", "yaml", "toml", "plist", "directory"]);
+    }
+
+    mod guarded_write {
+        use std::fs;
+        use std::path::Path;
+
+        use crate::{write_atomic, WriteOutcome};
+
+        /// The names in `dir`, sorted, so a leftover temp file shows up.
+        fn names(dir: &Path) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn replaces_a_target_that_still_holds_the_expected_bytes() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::write(&target, "{\"a\": 1}\n").unwrap();
+
+            let written = write_atomic(&target, b"{\"a\": 2}\n", Some(b"{\"a\": 1}\n")).unwrap();
+
+            assert!(matches!(written, WriteOutcome::Written(_)), "{written:?}");
+            assert_eq!(fs::read(&target).unwrap(), b"{\"a\": 2}\n");
+        }
+
+        #[test]
+        fn creates_a_target_that_is_still_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+
+            let written = write_atomic(&target, b"{}\n", None).unwrap();
+
+            assert_eq!(written, WriteOutcome::Written(None));
+            assert_eq!(fs::read(&target).unwrap(), b"{}\n");
+        }
+
+        #[test]
+        fn leaves_a_target_rewritten_since_the_read_untouched() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            // Same length as what was read: a size check alone would miss it.
+            fs::write(&target, "{\"a\": 9}\n").unwrap();
+
+            let written = write_atomic(&target, b"{\"a\": 2}\n", Some(b"{\"a\": 1}\n")).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert_eq!(fs::read(&target).unwrap(), b"{\"a\": 9}\n");
+            assert_eq!(names(dir.path()), ["t.json"]);
+        }
+
+        #[test]
+        fn a_target_created_since_the_read_is_a_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::write(&target, "{}\n").unwrap();
+
+            let written = write_atomic(&target, b"{}\n", None).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert_eq!(names(dir.path()), ["t.json"]);
+        }
+
+        #[test]
+        fn a_target_deleted_since_the_read_is_a_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+
+            let written = write_atomic(&target, b"{}\n", Some(b"{}\n")).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert!(names(dir.path()).is_empty());
+        }
+
+        #[test]
+        fn an_empty_target_is_not_an_absent_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::write(&target, "").unwrap();
+
+            let written = write_atomic(&target, b"{}\n", None).unwrap();
+
+            assert_eq!(written, WriteOutcome::TargetChanged);
+            assert_eq!(fs::read(&target).unwrap(), b"");
+        }
+
+        #[test]
+        fn a_target_that_cannot_be_read_back_is_an_error_not_a_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("t.json");
+            fs::create_dir(&target).unwrap();
+
+            let error = write_atomic(&target, b"{}\n", Some(b"{}\n")).unwrap_err();
+
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("reading it back before the rename"),
+                "{error}"
+            );
+            assert_eq!(names(dir.path()), ["t.json"]);
+        }
     }
 }
