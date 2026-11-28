@@ -152,7 +152,8 @@ pub(crate) struct ByteArgs {
     /// or set (two-way union, ignoring order and duplicates).
     #[arg(
         long = "array-strategy",
-        default_value = "merge",
+        value_enum,
+        default_value_t,
         value_name = "STRATEGY"
     )]
     array_strategy: ArrayStrategy,
@@ -188,8 +189,9 @@ pub(crate) struct PlistArgs {
     /// Which encoding to write: follow the target's own (default), xml, or binary.
     #[arg(
         long = "plist-format",
-        value_name = "ENCODING",
-        default_value = "follow"
+        value_enum,
+        default_value_t,
+        value_name = "ENCODING"
     )]
     plist_format: PlistFormat,
 }
