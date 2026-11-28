@@ -32,6 +32,10 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
     let marked = MarkedYaml::load_from_str(text).map_err(|_| Error::YamlUnsafe)?;
     let mut edits = Vec::new();
     match marked.as_slice() {
+        [root] if !root.data.is_null() && target_map.is_empty() => {
+            let offsets = ByteOffsets::new(text);
+            edits.extend(fill_empty_root(root, text, &offsets, result_map)?);
+        }
         [root] if !root.data.is_null() => {
             let offsets = ByteOffsets::new(text);
             diff_map(target_map, result_map, root, text, &offsets, &mut edits)?
@@ -39,7 +43,8 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
         [] | [_] => edits.extend(append_to_empty(text, result_map)),
         _ => return Err(Error::YamlUnsafe),
     }
-    if mostly_crlf(text) {
+    let newline = if mostly_crlf(text) { "\r\n" } else { "\n" };
+    if newline == "\r\n" {
         for edit in &mut edits {
             edit.text = edit.text.replace('\n', "\r\n");
         }
@@ -59,12 +64,59 @@ pub fn apply(text: &str, result: &Node<YamlLeaf>) -> Result<String, Error> {
     for e in &edits {
         out.replace_range(e.start..e.end, &e.text);
     }
+    if result_map.is_empty() && !target_map.is_empty() && holds_no_node(&out) {
+        // The line helpers split only on LF, so in a file broken by bare CRs a
+        // removal can swallow comments; the round-trip cannot see them, and the
+        // `{}` would make the over-deletion parse.
+        if text.replace("\r\n", "").contains('\r') {
+            return Err(Error::YamlUnsafe);
+        }
+        out = with_empty_mapping(&out, newline);
+    }
 
     // Backstop: the edited text must parse back to exactly the reconciled result.
     match parse_node(&out) {
         Some(ref got) if got == result => Ok(out),
         _ => Err(Error::YamlUnsafe),
     }
+}
+
+/// Whether saphyr loads no node from `text`, or a single null one: what is left
+/// of a mapping once a prune removes every key is then only whitespace,
+/// comments, directives and document markers. Most YAML loaders read such a
+/// file as null, not as an empty mapping, so the prune writes an explicit `{}`.
+fn holds_no_node(text: &str) -> bool {
+    match MarkedYaml::load_from_str(text).as_deref() {
+        Ok([]) => true,
+        Ok([document]) => document.data.is_null(),
+        _ => false,
+    }
+}
+
+/// `out`, which holds no node, with `{}` written on a line of its own: before
+/// the first document-end `...`, which libyaml loaders refuse to see a node
+/// after, or else after everything the file keeps. A blank `out` becomes just
+/// `{}`, as the canonical writer gives for an empty mapping.
+fn with_empty_mapping(out: &str, newline: &str) -> String {
+    let empty_mapping = format!("{{}}{newline}");
+    if out.trim().is_empty() {
+        return empty_mapping;
+    }
+    let mut line_start = 0;
+    for line in out.split_inclusive('\n') {
+        let after_marker = line.strip_prefix("...");
+        if after_marker.is_some_and(|rest| rest.trim().is_empty() || rest.starts_with([' ', '\t']))
+        {
+            return format!(
+                "{}{empty_mapping}{}",
+                &out[..line_start],
+                &out[line_start..]
+            );
+        }
+        line_start += line.len();
+    }
+    let separator = if out.ends_with('\n') { "" } else { newline };
+    format!("{out}{separator}{empty_mapping}")
 }
 
 /// A byte-range replacement in the original text.
@@ -99,6 +151,41 @@ fn append_to_empty(text: &str, rmap: &IndexMap<String, Node<YamlLeaf>>) -> Optio
         end: text.len(),
         text: insert,
     })
+}
+
+/// The edit that replaces `root`, an empty mapping such as the `{}` a prune of
+/// every key writes, with every entry of `rmap` as a block mapping; `None` when
+/// `rmap` is empty. `diff_map` cannot add to it, having no entry to add after.
+/// The entries start at column 0; after a `---`, anchor or tag on the same line
+/// they start on the next one, so the marker stays on the mapping rather than
+/// its first key.
+fn fill_empty_root(
+    root: &MarkedYaml,
+    src: &str,
+    offsets: &ByteOffsets,
+    rmap: &IndexMap<String, Node<YamlLeaf>>,
+) -> Result<Option<Edit>, Error> {
+    if rmap.is_empty() {
+        return Ok(None);
+    }
+    let start = offsets.of(root.span.start).ok_or(Error::YamlUnsafe)?;
+    let end = content_end(root, src, offsets).ok_or(Error::YamlUnsafe)?;
+    let entries: Vec<String> = rmap
+        .iter()
+        .map(|(key, value)| emit_entry(key, value, 0))
+        .collect();
+    let line_start = line_start(src, start);
+    let marker = src[line_start..start].trim_end_matches([' ', '\t']);
+    let (start, lead) = if marker.is_empty() {
+        (line_start, "")
+    } else {
+        (line_start + marker.len(), "\n")
+    };
+    Ok(Some(Edit {
+        start,
+        end,
+        text: format!("{lead}{}", entries.join("\n")),
+    }))
 }
 
 /// The byte offset of every char in a text, plus the text's length.

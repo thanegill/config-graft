@@ -1161,13 +1161,68 @@ fn comment_only_desired_prunes_managed_keys() {
 }
 
 #[test]
-fn prune_of_every_key_keeps_the_comments() {
-    yaml_golden("# café\na: 1\n", "# x\n", Some("a: 1\n"), "# café\n");
+fn prune_of_every_key_keeps_the_comments_above_an_empty_mapping() {
+    yaml_golden("# café\na: 1\n", "# x\n", Some("a: 1\n"), "# café\n{}\n");
     for desired in ["{}\n", "---\n", "# nothing managed\n"] {
-        yaml_golden("# h\na: 1\n", desired, Some("a: 1\n"), "# h\n");
-        yaml_golden("a: 1\n# tail\n", desired, Some("a: 1\n"), "# tail\n");
-        yaml_golden("---\na: 1\n", desired, Some("a: 1\n"), "---\n");
+        yaml_golden("# h\na: 1\n", desired, Some("a: 1\n"), "# h\n{}\n");
+        yaml_golden("a: 1\n# tail\n", desired, Some("a: 1\n"), "# tail\n{}\n");
+        yaml_golden("a: 1\n# tail", desired, Some("a: 1\n"), "# tail\n{}\n");
+        yaml_golden("---\na: 1\n", desired, Some("a: 1\n"), "---\n{}\n");
     }
+}
+
+#[test]
+fn prune_of_every_key_writes_an_empty_mapping() {
+    for desired in ["{}\n", "---\n", "# nothing managed\n"] {
+        yaml_golden("a: 1\n", desired, Some("a: 1\n"), "{}\n");
+        yaml_golden("t:\n  a: 1\n", desired, Some("t:\n  a: 1\n"), "{}\n");
+        yaml_golden("a: 1\r\nb: 2\r\n", desired, Some("a: 1\nb: 2\n"), "{}\r\n");
+    }
+    yaml_golden("{}\n", "{}\n", Some("a: 1\n"), "{}\n");
+    yaml_golden("{\n  a: 1\n}\n", "{}\n", Some("a: 1\n"), "{\n}\n");
+    yaml_golden("\n\na: 1\n\t\n", "{}\n", Some("a: 1\n"), "{}\n");
+    yaml_golden("a: &x 1\nb: *x\n", "{}\n", Some("a: 1\nb: 1\n"), "{}\n");
+}
+
+#[test]
+fn prune_of_every_key_writes_the_empty_mapping_before_a_document_end() {
+    let base = Some("a: 1\n");
+    yaml_golden("a: 1\n...\n", "{}\n", base, "{}\n...\n");
+    yaml_golden("---\na: 1\n...\n", "{}\n", base, "---\n{}\n...\n");
+    yaml_golden("a: 1\n...\n# after\n", "{}\n", base, "{}\n...\n# after\n");
+    yaml_golden("a: 1\n...\t# c\n", "{}\n", base, "{}\n...\t# c\n");
+}
+
+#[test]
+fn an_empty_mapping_left_by_a_prune_is_filled_again() {
+    let base = Some("{}\n");
+    yaml_golden("# c\n{}\n", "x: 1\n", base, "# c\nx: 1\n");
+    yaml_golden("{}\n", "x: 1\nt:\n  y: 2\n", base, "x: 1\nt:\n  y: 2\n");
+    yaml_golden(
+        "{}\r\n",
+        "x: 1\nt:\n  y: 2\n",
+        base,
+        "x: 1\r\nt:\r\n  y: 2\r\n",
+    );
+    yaml_golden("---\n{}\n", "x: 1\n", base, "---\nx: 1\n");
+    yaml_golden("{}\n...\n", "x: 1\n", base, "x: 1\n...\n");
+    yaml_golden("{\n}\n", "x: 1\n", base, "x: 1\n");
+    yaml_golden("--- {}\n", "x: 1\n", base, "---\nx: 1\n");
+    yaml_golden("&r {}\n", "x: 1\n", base, "&r\nx: 1\n");
+    yaml_golden("!!map {}\n", "x: 1\n", base, "!!map\nx: 1\n");
+    yaml_golden("---\t{}\n", "x: 1\n", base, "---\nx: 1\n");
+    yaml_golden("  {}\n", "x: 1\nt:\n  y: 2\n", base, "x: 1\nt:\n  y: 2\n");
+}
+
+#[test]
+fn a_prune_that_empties_a_file_broken_by_bare_crs_is_refused() {
+    let err = yaml_refuses_with_base("# keep me\r# and me\ra: 1\r", "{}\n", Some("a: 1\n"));
+    assert!(err.contains("cannot safely edit this YAML"), "got: {err}");
+}
+
+#[test]
+fn a_comment_only_target_with_nothing_to_prune_is_left_alone() {
+    yaml_golden("# only\n", "{}\n", Some("a: 1\n"), "# only\n");
 }
 
 #[test]
@@ -1177,8 +1232,8 @@ fn whitespace_only_desired_is_still_absent() {
 }
 
 #[test]
-fn comment_only_desired_that_would_empty_the_target_is_refused() {
-    let err = yaml_refuses_with_base("a: 1\n", "# nothing managed\n", Some("a: 1\n"));
+fn a_prune_that_leaves_a_dangling_alias_is_still_refused() {
+    let err = yaml_refuses_with_base("a: &x 1\nb: *x\n", "{}\n", Some("a: 1\n"));
     assert!(err.contains("cannot safely edit this YAML"), "got: {err}");
 }
 
