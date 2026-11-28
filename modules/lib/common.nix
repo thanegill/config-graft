@@ -250,6 +250,50 @@ let
         if (( _graftStatus != 0 )); then false; fi
       '';
 
+  # The cfprefsd round trip of one plist domain: export `$_domain`, graft
+  # `$_desired` into it with `$_prev` as BASE, and import the result. The three are
+  # shell variables the caller sets, so a domain this generation declares and one
+  # an earlier generation recorded go through the same guards. `onFailure` is shell
+  # code run once, after the scratch file is gone, when the graft or the import
+  # failed; a skip is not a failure.
+  #
+  # Read the live domain through cfprefsd (not the on-disk file, which may be
+  # staler than cfprefsd's cache). A domain that does not exist yet exports as an
+  # empty dictionary with status 0, so a failed or empty export is never a first
+  # run: grafting onto nothing and importing the result would replace every key the
+  # domain holds with the managed ones alone. `--plist-format binary` is
+  # unconditional here, not `binary`-gated: XML would drop XML-illegal bytes and
+  # sub-second dates that both `defaults` ends carry, and the flag keeps the write
+  # from depending on what the export produced. A failed graft must not reach the
+  # import, which would rewrite the domain from a stale snapshot. The failed `run`
+  # sits in a condition, which neither home-manager's errexit nor the system
+  # script's ERR trap sees, so `onFailure` is what reports it.
+  domainRoundTrip =
+    {
+      exe,
+      commands,
+      onFailure,
+    }:
+    let
+      defaults = commands.defaults or "/usr/bin/defaults";
+    in
+    ''
+      _live=$(mktemp)
+      _roundTripFailed=""
+      if ! ${defaults} export "$_domain" "$_live"; then
+        _iWarn "Skipping plist domain %s: defaults export failed, so it was left untouched" "$_domain"
+      elif [[ ! -s "$_live" ]]; then
+        _iWarn "Skipping plist domain %s: defaults export wrote nothing, so it was left untouched" "$_domain"
+      elif ! run ${exe} plist "$_live" "$_desired" "$_prev" --plist-format binary; then
+        _iWarn "Skipping plist domain %s: config-graft failed, so it was left untouched" "$_domain"
+        _roundTripFailed=1
+      elif ! run ${defaults} import "$_domain" "$_live"; then
+        _roundTripFailed=1
+      fi
+      rm -f "$_live"
+      if [[ -n "$_roundTripFailed" ]]; then ${onFailure}; fi
+    '';
+
   # Wraps an entry's reconcile `body` so it runs only while none of the processes
   # `names` expands to is running. `names` is a list of shell words, so the names
   # can be literals (`lib.escapeShellArg`) or come from a variable at run time, and
@@ -528,40 +572,18 @@ in
       restartUser ? null,
     }:
     let
-      defaults = commands.defaults or "/usr/bin/defaults";
       isDomain = format.name == "plist" && entry.cfprefsdDomain != null;
       label = if isDomain then entry.cfprefsdDomain else target;
 
       domainScript = ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
         _i "Reconciling managed plist domain %s" "$_domain"
-
-        # Read the live domain through cfprefsd (not the on-disk file, which may be
-        # staler than cfprefsd's cache). A domain that does not exist yet exports
-        # as an empty dictionary with status 0, so a failed or empty export is never
-        # a first run: grafting onto nothing and importing the result would replace
-        # every key the domain holds with the managed ones alone.
-        _live=$(mktemp)
-        if ! ${defaults} export "$_domain" "$_live"; then
-          _iWarn "Skipping plist domain %s: defaults export failed, so it was left untouched" "$_domain"
-        elif [[ ! -s "$_live" ]]; then
-          _iWarn "Skipping plist domain %s: defaults export wrote nothing, so it was left untouched" "$_domain"
-        # Graft our settings into the live state, then push it back through cfprefsd
-        # so it adopts the merged result. `--plist-format binary` is unconditional
-        # here, not `binary`-gated: XML would drop XML-illegal bytes and sub-second
-        # dates that both `defaults` ends carry, and the flag keeps the write from
-        # depending on what the export produced. A failed graft must not reach the
-        # import, which would rewrite the domain from a stale snapshot. `false` is
-        # what reports it: fatal under home-manager, counted by the system script's
-        # ERR trap (the failed `run` sits in a condition, which doesn't).
-        elif ! run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-format binary; then
-          _iWarn "Skipping plist domain %s: config-graft failed, so it was left untouched" "$_domain"
-          rm -f "$_live"
-          false
-        else
-          run ${defaults} import "$_domain" "$_live"
-        fi
-        rm -f "$_live"
+        _desired=${desired}
+        ${domainRoundTrip {
+          inherit commands;
+          exe = lib.getExe entry.package;
+          onFailure = "false";
+        }}
       '';
 
       fileScript = ''

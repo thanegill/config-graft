@@ -261,6 +261,11 @@ let
       export:missing) cp "$STUB_DIR/empty.plist" "$3" ;;
       export:existing) cp "$STUB_DIR/existing.plist" "$3" ;;
       export:corrupt) echo "not a plist" > "$3" ;;
+      export:importfails) cp "$STUB_DIR/existing.plist" "$3" ;;
+      import:importfails)
+        echo "stub: import failed" >&2
+        exit 1
+        ;;
       import:*) cp "$3" "$STUB_DIR/imported.plist" ;;
     esac
   '';
@@ -324,18 +329,21 @@ let
 
         fail() { echo "$1 (export=$STUB_EXPORT strict=$STRICT)"; cat out; exit 1; }
         for STRICT in 1 0; do
-          for STUB_EXPORT in fail nothing missing existing corrupt; do
+          for STUB_EXPORT in fail nothing missing existing corrupt importfails; do
             export STRICT STUB_EXPORT
             rm -f imported.plist imported.xml log
             status=0
             ${domainScenario} > out 2>&1 || status=$?
-            if [ "$STUB_EXPORT:$STRICT" = corrupt:1 ]; then
-              [ "$status" != 0 ] || fail "a failed graft did not fail the activation"
+            if [ "$STUB_EXPORT:$STRICT" = corrupt:1 ] || [ "$STUB_EXPORT:$STRICT" = importfails:1 ]; then
+              [ "$status" != 0 ] || fail "a failed graft or import did not fail the activation"
             else
               [ "$status" = 0 ] || fail "the scenario exited $status"
               grep -q "reached the next entry" out || fail "the script stopped short"
             fi
             case $STUB_EXPORT in
+              importfails)
+                [ ! -e imported.plist ] || fail "the stub imported after failing"
+                ;;
               fail|nothing|corrupt)
                 [ ! -e imported.plist ] || fail "imported over the domain after a bad export"
                 grep -q "warning: Skipping plist domain com.example.app" out \
@@ -894,6 +902,8 @@ let
         done
         STUB_EXPORT=corrupt expect 1 "a failed cfprefsd graft"
         [ ! -e imported.plist ] || fail "a failed cfprefsd graft was imported"
+        STUB_EXPORT=importfails expect 1 "a failed cfprefsd import"
+        [ ! -e imported.plist ] || fail "the stub imported after failing"
         STUB_EXPORT=fail expect 0 "a skipped export"
         [ ! -e imported.plist ] || fail "a skipped export was imported"
         STUB_FIRST=0 STUB_EXPORT=existing expect 0 "a skip while running"
