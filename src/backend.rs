@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Outcome};
 use crate::format::directory::{self, AttrPolicy, FsLeaf};
 use crate::format::{
-    parse_file, read_bytes, read_file, Format, FormatKind, Normalization, Normalized, WriteOpts,
+    is_blank, parse_file, read_bytes, read_file, Format, FormatKind, Normalization, Normalized,
+    WriteOpts,
 };
 use crate::reconcile::{
     key_of, merge_key_fields, reconcile, ArrayStrategy, ManagedPath, MergeKeys, Options,
@@ -38,6 +39,8 @@ pub(crate) enum Pass {
     Done(Outcome),
     /// TARGET changed before the write could replace it; nothing was written.
     TargetChanged,
+    /// TARGET was vacant after an earlier pass saw content, so the pass was not run.
+    TargetEmptied,
 }
 
 /// Output preferences as the flags asked for them, before any format settles what
@@ -496,6 +499,13 @@ pub(crate) trait Backend {
     /// Take this pass's [`Backend::Snapshot`] of TARGET.
     fn snapshot(args: &RunArgs) -> Result<Self::Snapshot, Error>;
 
+    /// Whether `snapshot` shows TARGET with nothing in it -- absent, or only
+    /// whitespace -- which a pass reconciles as a first apply. Default: never, as
+    /// for a tree, which no pass retries.
+    fn is_vacant(_snapshot: &Self::Snapshot) -> bool {
+        false
+    }
+
     /// TARGET as of `snapshot`, with [`Backend::read`]'s meaning of `Ok(None)`.
     fn read_target(
         args: &RunArgs,
@@ -564,14 +574,33 @@ pub(crate) trait Backend {
     /// `ByteBackend::<Json>::run(args)` / `Directory::run(args)`.
     ///
     /// A pass whose write finds TARGET changed since it was read starts over from
-    /// the new contents, for up to [`PASSES`] passes in all, then refuses.
+    /// the new contents, for up to [`PASSES`] passes in all, then refuses. A later
+    /// pass that finds TARGET vacant after an earlier one saw it hold something
+    /// writes nothing and counts as another change: that is an app caught between
+    /// truncating its file and refilling it, and reconciling it as a first apply
+    /// would write DESIRED alone over every key the app owns. Such a pass does no
+    /// work, so the next follows at once and usually ends the same way.
     fn run(args: &RunArgs) -> Result<Outcome, Error> {
+        let mut seen_content = false;
         for pass in 1..=PASSES {
             let snapshot = Self::snapshot(args)?;
-            let kind = match Self::pass(args, snapshot)? {
+            let vacant = Self::is_vacant(&snapshot);
+            let ended = if seen_content && vacant {
+                Pass::TargetEmptied
+            } else {
+                Self::pass(args, snapshot)?
+            };
+            seen_content |= !vacant;
+            let file = args.target.clone();
+            let kind = match ended {
                 Pass::Done(outcome) => return Ok(outcome),
                 Pass::TargetChanged => WarningKind::TargetChanged {
-                    file: args.target.clone(),
+                    file,
+                    pass,
+                    passes: PASSES,
+                },
+                Pass::TargetEmptied => WarningKind::TargetEmptied {
+                    file,
                     pass,
                     passes: PASSES,
                 },
@@ -789,6 +818,10 @@ impl<F: Format> Backend for ByteBackend<F> {
     /// file the write resolves to and re-reads before its rename.
     fn snapshot(args: &RunArgs) -> Result<Option<Vec<u8>>, Error> {
         read_bytes(&args.target).map_err(|source| Error::read(&args.target, source))
+    }
+
+    fn is_vacant(snapshot: &Option<Vec<u8>>) -> bool {
+        snapshot.as_deref().is_none_or(is_blank)
     }
 
     fn read_target(
@@ -1046,6 +1079,7 @@ mod tests {
             static SAVES_LEFT: Cell<usize> = const { Cell::new(0) };
             static SAVE: Cell<Save> = const { Cell::new(Save::NewValue) };
             static WRITES: Cell<usize> = const { Cell::new(0) };
+            static SNAPSHOTS: Cell<usize> = const { Cell::new(0) };
         }
 
         /// What the app's save does to the file TARGET resolves to.
@@ -1054,6 +1088,8 @@ mod tests {
             NewValue,
             /// A new file holding the same bytes, renamed into its place.
             SameBytes,
+            /// The first half of a save that truncates the file, then refills it.
+            Truncate,
         }
 
         /// The JSON backend with an app that saves TARGET just before each write
@@ -1086,7 +1122,12 @@ mod tests {
             }
 
             fn snapshot(args: &RunArgs) -> Result<Snapshot, Error> {
+                SNAPSHOTS.set(SNAPSHOTS.get() + 1);
                 JsonBackend::snapshot(args)
+            }
+
+            fn is_vacant(snapshot: &Snapshot) -> bool {
+                JsonBackend::is_vacant(snapshot)
             }
 
             fn read_target(
@@ -1140,6 +1181,7 @@ mod tests {
                             fs::copy(&saved, &replacement).unwrap();
                             fs::rename(&replacement, &saved).unwrap();
                         }
+                        Save::Truncate => fs::write(&saved, "").unwrap(),
                     }
                 }
                 JsonBackend::apply(args, snapshot, target, result, base, output)
@@ -1153,9 +1195,20 @@ mod tests {
         /// A `json` run over a TARGET holding `{"app": 0}` and a DESIRED that
         /// manages one key, with the app set to make `saves` saves of kind `save`.
         fn race(saves: usize, save: Save) -> (tempfile::TempDir, PathBuf, Result<Outcome, Error>) {
+            race_from(Some("{\"app\": 0}\n"), saves, save)
+        }
+
+        /// [`race`] over a TARGET holding `initial` (`None`: no file).
+        fn race_from(
+            initial: Option<&str>,
+            saves: usize,
+            save: Save,
+        ) -> (tempfile::TempDir, PathBuf, Result<Outcome, Error>) {
             let dir = tempfile::tempdir().unwrap();
             let target = dir.path().join("t.json");
-            fs::write(&target, "{\"app\": 0}\n").unwrap();
+            if let Some(initial) = initial {
+                fs::write(&target, initial).unwrap();
+            }
             let outcome = run(dir.path(), &target, &[], saves, save);
             (dir, target, outcome)
         }
@@ -1170,6 +1223,7 @@ mod tests {
             SAVES_LEFT.set(saves);
             SAVE.set(save);
             WRITES.set(0);
+            SNAPSHOTS.set(0);
             let desired = dir.join("d.json");
             fs::write(&desired, "{\"managed\": true}\n").unwrap();
             let mut argv = vec!["config-graft".into(), "json".into()];
@@ -1243,6 +1297,42 @@ mod tests {
             assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
             assert_eq!(json_at(&real), json!({"app": 1, "managed": true}));
             assert_eq!(names(dir.path()), ["d.json", "real.json", "t.json"]);
+        }
+
+        #[test]
+        fn a_target_caught_mid_save_empty_is_not_reconciled_as_a_first_apply() {
+            let (dir, target, outcome) = race(1, Save::Truncate);
+
+            assert!(
+                matches!(outcome, Err(Error::TargetKeptChanging { passes: 3, .. })),
+                "{outcome:?}"
+            );
+            assert_eq!(WRITES.get(), 1);
+            assert_eq!(SNAPSHOTS.get(), 3);
+            assert_eq!(fs::read(&target).unwrap(), b"");
+            assert_eq!(names(dir.path()), ["d.json", "t.json"]);
+        }
+
+        #[test]
+        fn a_target_vacant_from_the_start_is_a_first_apply_in_one_pass() {
+            for initial in [None, Some(""), Some("\n")] {
+                let (_dir, target, outcome) = race_from(initial, 0, Save::NewValue);
+
+                assert_eq!(outcome.unwrap(), Outcome::Applied, "{initial:?}");
+                assert_eq!(SNAPSHOTS.get(), 1, "{initial:?}");
+                assert_eq!(json_at(&target), json!({"managed": true}), "{initial:?}");
+            }
+        }
+
+        #[test]
+        fn a_vacant_target_is_one_a_pass_would_reconcile_as_a_first_apply() {
+            let vacant = |bytes: Option<&[u8]>| JsonBackend::is_vacant(&bytes.map(<[u8]>::to_vec));
+
+            assert!(vacant(None));
+            assert!(vacant(Some(b"")));
+            assert!(vacant(Some(b" \n\t")));
+            assert!(!vacant(Some(b"{}")));
+            assert!(!vacant(Some(b" {")));
         }
     }
 }

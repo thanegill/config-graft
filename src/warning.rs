@@ -166,6 +166,15 @@ pub enum WarningKind<L: Leaf> {
         pass: usize,
         passes: usize,
     },
+    /// TARGET was empty or missing at pass `pass` of `passes` after an earlier pass
+    /// read content from it, as an app partway through a save leaves it, so that
+    /// pass wrote nothing rather than reconcile it as a first apply. Its warning's
+    /// `path` is always the document root.
+    TargetEmptied {
+        file: PathBuf,
+        pass: usize,
+        passes: usize,
+    },
 }
 
 impl<L: Leaf> Warning<L> {
@@ -279,6 +288,12 @@ impl<L: Leaf> Warning<L> {
             WarningKind::TargetChanged { file, pass, passes } => format!(
                 "{} changed between config-graft's read and its write, so pass {pass} \
                  of {passes} wrote nothing",
+                file.display()
+            ),
+            WarningKind::TargetEmptied { file, pass, passes } => format!(
+                "{} is empty or missing after an earlier pass read content from it, as \
+                 an app partway through saving it would leave it, so pass {pass} of \
+                 {passes} wrote nothing",
                 file.display()
             ),
             WarningKind::MoreValuesNormalized {
@@ -399,6 +414,24 @@ mod tests {
             warning.render("."),
             "/x/config.json changed between config-graft's read and its write, so pass 1 \
              of 3 wrote nothing"
+        );
+    }
+
+    #[test]
+    fn a_pass_that_found_target_emptied_says_why_it_wrote_nothing() {
+        let warning = Warning::<JsonLeaf> {
+            path: DiagnosticPath::new(),
+            kind: WarningKind::TargetEmptied {
+                file: PathBuf::from("/x/config.json"),
+                pass: 2,
+                passes: 3,
+            },
+        };
+        assert_eq!(
+            warning.render("."),
+            "/x/config.json is empty or missing after an earlier pass read content from \
+             it, as an app partway through saving it would leave it, so pass 2 of 3 wrote \
+             nothing"
         );
     }
 }
