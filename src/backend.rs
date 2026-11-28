@@ -24,7 +24,7 @@ use crate::reconcile::{
 use crate::render::render_selector;
 use crate::value::{Leaf, Node};
 use crate::warning::{DiagnosticPath, Source, Step, Warning, WarningKind};
-use crate::RunArgs;
+use crate::{symlink, RunArgs};
 
 /// Output preferences as the flags asked for them, before any format settles what
 /// depends on the target's bytes.
@@ -523,6 +523,12 @@ pub(crate) trait Backend {
         output: Option<&[u8]>,
     ) -> Result<(), Error>;
 
+    /// Refuse now what [`Backend::apply`] would refuse before writing anything, so a
+    /// `--check` with a change pending predicts the apply. Default: nothing to refuse.
+    fn preflight_write(_args: &RunArgs) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// The reconcile-run driver: read the three inputs, reconcile, then `--diff` /
     /// `--check` / `--stdout` / apply. Provided -- backends supply only the I/O ends
     /// above; every format shares this spine. Dispatched as `Backend::run`, e.g.
@@ -667,11 +673,11 @@ pub(crate) trait Backend {
         let Prepared { output, changed } = Self::prepare(args, write_opts, &target, &result)?;
 
         if args.check {
-            return Ok(if changed {
-                Outcome::WouldChange
-            } else {
-                Outcome::Applied
-            });
+            if !changed {
+                return Ok(Outcome::Applied);
+            }
+            Self::preflight_write(args)?;
+            return Ok(Outcome::WouldChange);
         }
         if args.stdout {
             // Only the byte formats expose `--stdout`; the directory subcommand has
@@ -778,16 +784,23 @@ impl<F: Format> Backend for ByteBackend<F> {
         output: Option<&[u8]>,
     ) -> Result<(), Error> {
         let output = output.expect("byte backend always produces output");
-        let mode_change = crate::write_atomic(&args.target, output).map_err(|e| Error::Write {
-            path: args.target.clone(),
-            source: e,
-        })?;
+        let resolved = symlink::write_path(&args.target, args.symlinks)?;
+        let written = resolved.as_deref().unwrap_or(&args.target);
+        let mode_change =
+            crate::write_atomic(written, output).map_err(|source| match &resolved {
+                Some(resolved) => Error::WriteThroughSymlink {
+                    link: args.target.clone(),
+                    resolved: resolved.clone(),
+                    source,
+                },
+                None => Error::write(&args.target, source),
+            })?;
         if let Some(change) = mode_change {
             emit::<F::Leaf>(
                 &[Warning {
                     path: DiagnosticPath::new(),
                     kind: WarningKind::SpecialModeBitsCleared {
-                        file: args.target.clone(),
+                        file: written.to_path_buf(),
                         change,
                     },
                 }],
@@ -795,6 +808,10 @@ impl<F: Format> Backend for ByteBackend<F> {
             );
         }
         Ok(())
+    }
+
+    fn preflight_write(args: &RunArgs) -> Result<(), Error> {
+        symlink::write_path(&args.target, args.symlinks).map(|_| ())
     }
 }
 

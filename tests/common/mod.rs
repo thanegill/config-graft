@@ -17,6 +17,22 @@ pub fn run(args: &[&str]) -> std::process::Output {
         .expect("run config-graft")
 }
 
+/// Give `path` the setuid `mode`, returning whether an unprivileged rewrite can be
+/// seen clearing it. A privileged run keeps setuid, and the Nix build sandbox
+/// refuses to set it or silently drops it, so a caller skips on `false`.
+pub fn set_setuid_mode(path: &std::path::Path, mode: u32) -> bool {
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if fs::metadata(path).unwrap().uid() == 0 {
+        return false;
+    }
+    match fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return false,
+        set => set.unwrap(),
+    }
+    fs::metadata(path).unwrap().permissions().mode() & 0o7777 == mode
+}
+
 /// Run, assert it failed with exit code 1, and return its stderr.
 pub fn stderr_of(args: &[&str]) -> String {
     let out = run(args);
