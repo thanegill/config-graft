@@ -224,9 +224,10 @@ pub(crate) struct DirArgs {
 }
 
 /// The resolved options a [`Backend`] run reads, built from whichever subcommand
-/// clap parsed. Flags a given format doesn't expose are filled with today's
-/// defaults (directory: no stdout/symlinks/array/merge_key/indent/plist_format;
-/// byte formats: no manage_root/no_owner/xattrs), so the backend logic is unchanged.
+/// clap parsed. A flag the subcommand doesn't expose holds an inert default, so
+/// one run driver serves every format: a directory run never writes stdout,
+/// follows no symlinks and has no arrays or indent, and a byte-format run manages
+/// no directory attributes.
 pub(crate) struct RunArgs {
     pub(crate) target: PathBuf,
     pub(crate) desired: PathBuf,
