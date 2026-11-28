@@ -321,8 +321,8 @@ pub fn command() -> clap::Command {
     Cli::command()
 }
 
-/// Parse the command line, run the chosen subcommand, and exit with its code.
-pub fn main() {
+/// Parse the command line, run the chosen subcommand, and return its exit code.
+pub fn main() -> process::ExitCode {
     let cli = Cli::parse();
     // The subcommand picks the format; dispatch statically -- the node type carries
     // the format's leaf type, so each format is its own monomorphization of `run`.
@@ -350,10 +350,10 @@ pub fn main() {
         Command::Directory(a) => Directory::run(&RunArgs::from_dir(a)),
     };
     match result {
-        Ok(outcome) => process::exit(outcome.code()),
+        Ok(outcome) => outcome.into(),
         Err(e) => {
             eprintln!("config-graft: {e}");
-            process::exit(1);
+            process::ExitCode::FAILURE
         }
     }
 }

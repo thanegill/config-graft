@@ -349,11 +349,11 @@ pub enum Outcome {
     WouldChange,
 }
 
-impl Outcome {
-    pub fn code(self) -> i32 {
-        match self {
-            Outcome::Applied => 0,
-            Outcome::WouldChange => 3,
+impl From<Outcome> for std::process::ExitCode {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Applied => std::process::ExitCode::SUCCESS,
+            Outcome::WouldChange => std::process::ExitCode::from(3),
         }
     }
 }
