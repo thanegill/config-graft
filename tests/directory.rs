@@ -1310,3 +1310,15 @@ fn applying_directory_attributes_keeps_an_out_of_scope_xattr() {
         Some(b"k".as_slice())
     );
 }
+
+#[test]
+fn help_shows_the_xattrs_default() {
+    let out = graft(&["-h"]);
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    let line = help
+        .lines()
+        .find(|line| line.trim_start().starts_with("--xattrs"))
+        .expect("--xattrs is in directory -h");
+    assert!(line.contains("[default: all]"), "got: {line}");
+}
