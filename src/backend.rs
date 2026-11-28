@@ -485,12 +485,12 @@ pub(crate) fn emit<L: Leaf>(warnings: &[Warning<L>], sep: &str) {
     }
 }
 
-/// A reconciled result prepared for the output phase: its serialized bytes (byte
-/// formats only; `None` for a tree) and whether applying it would change on-disk
-/// state. Produced by [`Backend::prepare`] in one step, from the same
+/// A reconciled result prepared for the output phase: the backend's
+/// [`Backend::Output`] and whether applying it would change on-disk state.
+/// Produced by [`Backend::prepare`] in one step, from the same
 /// [`Backend::Snapshot`] the reconcile read.
-pub(crate) struct Prepared {
-    output: Option<Vec<u8>>,
+pub(crate) struct Prepared<Output> {
+    output: Output,
     changed: bool,
 }
 
@@ -502,6 +502,9 @@ pub(crate) trait Backend {
     /// format, nothing for a tree. Every step of the pass works from it, and for a
     /// byte format the write lands only while TARGET still holds it.
     type Snapshot;
+    /// What [`Backend::prepare`] hands the write: the serialized bytes for a byte
+    /// format, nothing for a tree, which is written from the result itself.
+    type Output;
     /// Separator between key-path components in diagnostics (`--diff` lines and
     /// `merge` conflict warnings) and, for byte formats, in a `--merge-key` scope:
     /// the format's own separator for byte formats (`.` for JSON/YAML/TOML, `:` for
@@ -567,9 +570,8 @@ pub(crate) trait Backend {
         Ok(None)
     }
 
-    /// Prepare the reconciled `result` for the output phase: its serialized bytes
-    /// (byte formats only -- `None` for a tree, which has no single byte stream) and
-    /// whether applying it would change on-disk state. Both come from `snapshot`,
+    /// Prepare the reconciled `result` for the output phase: its [`Backend::Output`]
+    /// and whether applying it would change on-disk state. Both come from `snapshot`,
     /// the bytes `target` was parsed from: serializing from a later read could apply
     /// the comment-preserving edit to a template the reconcile never saw.
     fn prepare(
@@ -578,7 +580,7 @@ pub(crate) trait Backend {
         snapshot: &Self::Snapshot,
         target: &Node<Self::Leaf>,
         result: &Node<Self::Leaf>,
-    ) -> Result<Prepared, Error>;
+    ) -> Result<Prepared<Self::Output>, Error>;
 
     /// Apply the reconciled `result` to the target, or report that TARGET no longer
     /// matches `snapshot` and write nothing. `base` is the reconcile ancestor (used
@@ -589,8 +591,13 @@ pub(crate) trait Backend {
         target: &Node<Self::Leaf>,
         result: &Node<Self::Leaf>,
         base: Option<&Node<Self::Leaf>>,
-        output: Option<&[u8]>,
+        output: &Self::Output,
     ) -> Result<WriteOutcome, Error>;
+
+    /// Write `output` to stdout, for `--stdout`. Surfaces write failures
+    /// (ENOSPC/EIO/BrokenPipe/...): a discarded error means `config-graft ...
+    /// --stdout > file` could truncate the file yet still exit 0.
+    fn write_stdout(output: &Self::Output) -> Result<(), Error>;
 
     /// Refuse now what [`Backend::apply`] would refuse before writing anything, so a
     /// `--check` with a change pending predicts the apply. Default: nothing to refuse.
@@ -777,28 +784,11 @@ pub(crate) trait Backend {
             return Ok(Pass::Done(Outcome::WouldChange));
         }
         if args.stdout {
-            // Only the byte formats expose `--stdout`; the directory subcommand has
-            // no such flag, so `stdout` is always false for a tree and this branch
-            // is byte-only -- `output` is always `Some` here.
-            let bytes = output.expect("byte backend produces output when --stdout is set");
-            // Surface write failures (ENOSPC/EIO/BrokenPipe/...): a discarded error
-            // means `config-graft ... --stdout > file` could truncate the file yet
-            // still exit 0. Flush too, so a deferred buffer error isn't lost. No
-            // error kind is special-cased.
-            let mut out = std::io::stdout();
-            out.write_all(&bytes).map_err(Error::StdoutWrite)?;
-            out.flush().map_err(Error::StdoutWrite)?;
+            Self::write_stdout(&output)?;
             return Ok(Pass::Done(Outcome::Applied));
         }
         if changed {
-            let written = Self::apply(
-                args,
-                &snapshot,
-                &target,
-                &result,
-                base.as_ref(),
-                output.as_deref(),
-            )?;
+            let written = Self::apply(args, &snapshot, &target, &result, base.as_ref(), &output)?;
             if written == WriteOutcome::TargetChanged {
                 return Ok(Pass::TargetChanged);
             }
@@ -815,6 +805,7 @@ pub(crate) struct ByteBackend<F>(PhantomData<F>);
 impl<F: Format> Backend for ByteBackend<F> {
     type Leaf = F::Leaf;
     type Snapshot = Option<Vec<u8>>;
+    type Output = Vec<u8>;
     const PATH_SEP: &'static str = F::PATH_SEP;
 
     fn merge_keys(args: &RunArgs) -> MergeKeys {
@@ -880,7 +871,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         snapshot: &Option<Vec<u8>>,
         target: &Node<F::Leaf>,
         result: &Node<F::Leaf>,
-    ) -> Result<Prepared, Error> {
+    ) -> Result<Prepared<Vec<u8>>, Error> {
         let current = snapshot.as_deref().unwrap_or_default();
         emit(
             &F::refuse_on_write(result, target, current, opts)?,
@@ -889,7 +880,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         let output = F::serialize(result, current, opts)?;
         Ok(Prepared {
             changed: output != current,
-            output: Some(output),
+            output,
         })
     }
 
@@ -899,9 +890,8 @@ impl<F: Format> Backend for ByteBackend<F> {
         _target: &Node<F::Leaf>,
         _result: &Node<F::Leaf>,
         _base: Option<&Node<F::Leaf>>,
-        output: Option<&[u8]>,
+        output: &Vec<u8>,
     ) -> Result<WriteOutcome, Error> {
-        let output = output.expect("byte backend always produces output");
         let resolved = symlink::write_path(&args.target, args.symlinks)?;
         let written = resolved.as_deref().unwrap_or(&args.target);
         let outcome =
@@ -930,6 +920,13 @@ impl<F: Format> Backend for ByteBackend<F> {
         Ok(outcome)
     }
 
+    fn write_stdout(output: &Vec<u8>) -> Result<(), Error> {
+        // Flush too, so a deferred buffer error isn't lost.
+        let mut out = std::io::stdout();
+        out.write_all(output).map_err(Error::StdoutWrite)?;
+        out.flush().map_err(Error::StdoutWrite)
+    }
+
     fn preflight_write(args: &RunArgs) -> Result<(), Error> {
         symlink::write_path(&args.target, args.symlinks).map(|_| ())
     }
@@ -943,6 +940,7 @@ impl Backend for Directory {
     // A tree is read entry by entry, so there is no single snapshot to check before
     // the write; that read/apply window is a SPEC section 10 trade-off.
     type Snapshot = ();
+    type Output = ();
     const PATH_SEP: &'static str = "/";
 
     fn error_desired_absent(path: PathBuf) -> Error {
@@ -978,11 +976,11 @@ impl Backend for Directory {
         _snapshot: &(),
         target: &Node<FsLeaf>,
         result: &Node<FsLeaf>,
-    ) -> Result<Prepared, Error> {
+    ) -> Result<Prepared<()>, Error> {
         directory::refuse_aliased_names(&args.target, target, result)?;
         // A tree has no byte form; change detection is a structural node compare.
         Ok(Prepared {
-            output: None,
+            output: (),
             changed: target != result,
         })
     }
@@ -993,10 +991,14 @@ impl Backend for Directory {
         target: &Node<FsLeaf>,
         result: &Node<FsLeaf>,
         base: Option<&Node<FsLeaf>>,
-        _output: Option<&[u8]>,
+        _output: &(),
     ) -> Result<WriteOutcome, Error> {
         directory::apply_tree(&args.target, Some(target), result, base, args.dir_policy())
             .map(|_| WriteOutcome::Written(None))
+    }
+
+    fn write_stdout(_output: &()) -> Result<(), Error> {
+        unreachable!("the directory subcommand has no --stdout flag")
     }
 }
 
@@ -1095,6 +1097,7 @@ mod tests {
         impl Backend for AppSavesDuringWrite {
             type Leaf = Leaf;
             type Snapshot = Snapshot;
+            type Output = Vec<u8>;
             const PATH_SEP: &'static str = JsonBackend::PATH_SEP;
 
             fn merge_keys(args: &RunArgs) -> MergeKeys {
@@ -1150,7 +1153,7 @@ mod tests {
                 snapshot: &Snapshot,
                 target: &Node<Leaf>,
                 result: &Node<Leaf>,
-            ) -> Result<Prepared, Error> {
+            ) -> Result<Prepared<Vec<u8>>, Error> {
                 JsonBackend::prepare(args, opts, snapshot, target, result)
             }
 
@@ -1160,7 +1163,7 @@ mod tests {
                 target: &Node<Leaf>,
                 result: &Node<Leaf>,
                 base: Option<&Node<Leaf>>,
-                output: Option<&[u8]>,
+                output: &Vec<u8>,
             ) -> Result<WriteOutcome, Error> {
                 let writes = WRITES.get() + 1;
                 WRITES.set(writes);
@@ -1180,6 +1183,10 @@ mod tests {
                     }
                 }
                 JsonBackend::apply(args, snapshot, target, result, base, output)
+            }
+
+            fn write_stdout(output: &Vec<u8>) -> Result<(), Error> {
+                JsonBackend::write_stdout(output)
             }
 
             fn preflight_write(args: &RunArgs) -> Result<(), Error> {
