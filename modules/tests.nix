@@ -19,6 +19,8 @@
   package,
 }:
 let
+  configGraftLib = import ./lib;
+
   # An entry as the submodule would produce it, so `mkEntryReconcileScript` and
   # `mkDesired` see the same shape they see in a real module.
   entry =
@@ -371,7 +373,13 @@ let
     let
       hmLib = lib.extend (
         _: _: {
-          hm.dag.entryAfter = after: data: { inherit after data; };
+          hm.dag = {
+            entryAfter = after: data: {
+              inherit after data;
+              before = [ ];
+            };
+            entryBetween = before: after: data: { inherit before after data; };
+          };
         }
       );
       stub = type: lib.mkOption { inherit type; };
@@ -383,7 +391,19 @@ let
         })
         {
           options.home = {
-            file = stub (lib.types.attrsOf lib.types.raw);
+            # A link's `target` defaults to its name, as home-manager's does.
+            file = stub (
+              lib.types.attrsOf (
+                lib.types.submodule (
+                  { name, ... }:
+                  {
+                    freeformType = lib.types.attrsOf lib.types.raw;
+                    options.target = lib.mkOption { default = name; };
+                    options.enable = lib.mkOption { default = true; };
+                  }
+                )
+              )
+            );
             activation = stub (lib.types.attrsOf lib.types.raw);
             homeDirectory = stub lib.types.str;
           };
@@ -923,6 +943,503 @@ let
         echo "system failure handling ok" > $out
       '';
 
+  # The prune of removed entries, run against a previous generation the builder
+  # lays out: a manifest written by `mkManifest` from units built by `mkUnit` and
+  # `mkDirectoryUnit`, the snapshots it names, and a target for each. Paths start
+  # at `/cg-test-root`, which the builder rewrites to its own directory in the
+  # manifest and in the script, since a unit's identity is absolute. `defaults` and
+  # `pgrep` are stubs, and config-graft is wrapped to log its arguments, so the
+  # flags each unit's meaning maps to are checked against what the live entries
+  # pass. Both shells run it: home-manager's `set -euo pipefail` and the system
+  # script's none.
+  pruneRoot = "/cg-test-root";
+
+  pruneUnit =
+    name: overrides:
+    common.mkUnit {
+      format = {
+        inherit name;
+      };
+      entry = entry overrides;
+      identity = "${pruneRoot}/home/${overrides.file}";
+      snapshot = "snap/${overrides.snap or overrides.file}";
+      domain = overrides.domain or null;
+    };
+
+  domainUnit =
+    domain: whileRunning:
+    common.mkUnit {
+      format.name = "plist";
+      entry = entry {
+        cfprefsdDomain = domain;
+        binary = true;
+        inherit whileRunning;
+      };
+      identity = "${pruneRoot}/prefs/${domain}.plist";
+      snapshot = "snap/${domain}";
+      inherit domain;
+    };
+
+  stillUnit = pruneUnit "json" { file = "still.json"; };
+
+  previousUnits = [
+    (pruneUnit "json" { file = "removed.json"; })
+    stillUnit
+    (pruneUnit "json" {
+      file = "renamed.json";
+      snap = "renamed-old.json";
+    })
+    (pruneUnit "json" {
+      file = "gone/gone.json";
+      snap = "gone.json";
+    })
+    (pruneUnit "json" { file = "nosnap.json"; })
+    (pruneUnit "json" { file = "bad.json"; })
+    (pruneUnit "yaml" { file = "removed.yaml"; })
+    (pruneUnit "toml" { file = "removed.toml"; })
+    (pruneUnit "plist" { file = "removed.plist"; })
+    (pruneUnit "plist" {
+      file = "binary.plist";
+      binary = true;
+    })
+    (pruneUnit "json" {
+      file = "followed.json";
+      followSymlinks = true;
+    })
+    (pruneUnit "json" { file = "linked.json"; })
+    (pruneUnit "json" {
+      file = "store.json";
+      followSymlinks = true;
+    })
+    (pruneUnit "json" { file = "claimed.json"; })
+    (pruneUnit "json" {
+      file = "running.json";
+      whileRunning.skip = [ "MeetingBar" ];
+    })
+    (domainUnit "com.example.present" { })
+    (domainUnit "com.example.absent" { })
+    (domainUnit "com.example.exportfails" { })
+    (domainUnit "com.example.corrupt" { })
+    (domainUnit "com.example.running" { skip = [ "MeetingBar" ]; })
+    (domainUnit "com.example.restarting" { restart = [ "com.example.Running" ]; })
+    (domainUnit "com.example.uninstalled" { restart = [ "com.example.NotInstalled" ]; })
+    (domainUnit "com.example.badid" { restart = [ "not an id" ]; })
+    (pruneUnit "json" {
+      file = "old-target.json";
+      snap = "retarget.json";
+    })
+    (stillUnit // { identity = "relative.json"; })
+    (common.mkDirectoryUnit {
+      entry = {
+        noOwner = true;
+        xattrs = "none";
+        whileRunning = whileRunning { };
+      };
+      identity = "${pruneRoot}/home/tree";
+      snapshot = "snap/tree";
+    })
+    (common.mkDirectoryUnit {
+      entry = {
+        noOwner = false;
+        xattrs = "all";
+        whileRunning = whileRunning { };
+      };
+      identity = "${pruneRoot}/home/treelink";
+      snapshot = "snap/tree";
+    })
+    (common.mkDirectoryUnit {
+      entry = {
+        noOwner = false;
+        xattrs = "all";
+        whileRunning = whileRunning { };
+      };
+      identity = "${pruneRoot}/home/notadir";
+      snapshot = "snap/tree";
+    })
+    (
+      stillUnit
+      // {
+        kind = "ini";
+        identity = "${pruneRoot}/home/unknown.ini";
+      }
+    )
+  ];
+
+  previousManifest = pkgs.writeText "previous-manifest.json" (common.mkManifest previousUnits);
+
+  pruneDefaults = pkgs.writeShellScript "prune-defaults" ''
+    echo "$*" >> "$STUB_DIR/defaults.log"
+    case "$1:$2" in
+      read:com.example.absent) exit 1 ;;
+      read:*) ;;
+      export:com.example.exportfails) exit 1 ;;
+      export:com.example.corrupt) echo "not a plist" > "$3" ;;
+      export:*) cp "$STUB_DIR/domain-live.plist" "$3" ;;
+      import:*) cp "$3" "$STUB_DIR/imported-$2.plist" ;;
+    esac
+  '';
+
+  prunePgrep = pkgs.writeShellScript "prune-pgrep" ''
+    [ "$3" = MeetingBar ] && exit 0
+    exit 1
+  '';
+
+  # Asked whether an app runs: `com.example.Running` does, `com.example.NotInstalled`
+  # fails as an app that is not installed does (-1728), and any other is not
+  # running. Anything else (a quit) is logged as a failure of the test.
+  pruneOsascript = pkgs.writeShellScript "prune-osascript" ''
+    echo "$*" >> "$STUB_DIR/osascript.log"
+    case "$*" in
+      *'"com.example.Running" is running') echo true ;;
+      *'"com.example.NotInstalled" is running')
+        echo 'execution error: Can not get application id "com.example.NotInstalled". (-1728)' >&2
+        exit 1
+        ;;
+      *' is running') echo false ;;
+      *) echo "unexpected osascript: $*" >> "$STUB_DIR/unexpected.log" ;;
+    esac
+  '';
+
+  loggingPackage = pkgs.writeShellScriptBin "config-graft" ''
+    printf '%s\n' "$*" >> "$STUB_DIR/argv.log"
+    exec ${lib.getExe package} "$@"
+  '';
+
+  pruneScenario = scenario "prune-scenario" ''
+    ${common.mkPruneScript {
+      inherit lib pkgs;
+      inherit (configGraftLib) formats;
+      package = loggingPackage;
+      prevRoot = "$PWD/prev";
+      hasPrev = "[[ -z \${NO_PREV-} ]]";
+      manifestRel = "manifest.json";
+      units = [
+        stillUnit
+        (pruneUnit "json" {
+          file = "renamed.json";
+          snap = "renamed-new.json";
+        })
+        (pruneUnit "json" {
+          file = "new-target.json";
+          snap = "retarget.json";
+        })
+      ];
+      claimed = [ "${pruneRoot}/home/claimed.json" ];
+      claimedBy = "home.file";
+      commands = {
+        defaults = pruneDefaults;
+        pgrep = prunePgrep;
+        osascript = pruneOsascript;
+      };
+    }}
+    if [[ $STRICT == 1 && $- != *e* ]]; then echo "errexit was not restored"; fi
+  '';
+
+  pruneRuns =
+    pkgs.runCommand "config-graft-module-prune"
+      {
+        nativeBuildInputs = [
+          pkgs.libplist
+          pkgs.jq
+        ];
+      }
+      ''
+        export STUB_DIR=$PWD
+        sed "s|${pruneRoot}|$PWD/root|g" ${pruneScenario} > prune.sh
+        chmod +x prune.sh
+        storeJson=${pkgs.writeText "store.json" ''{"managed":1}''}
+
+        plist() { printf '<plist version="1.0"><dict>%s</dict></plist>' "$2" > "$1.xml"; plistutil -f bin -i "$1.xml" -o "$1"; }
+        setup() {
+          rm -rf prev root defaults.log argv.log osascript.log unexpected.log imported-*.plist out
+          mkdir -p prev/snap root/home root/prefs root/dotfiles
+          sed "s|${pruneRoot}|$PWD/root|g" ${previousManifest} > prev/manifest.json
+          h=root/home
+          for f in removed still renamed-old bad followed linked store claimed running retarget; do
+            echo '{"managed":1,"edited":5}' > prev/snap/$f.json
+          done
+          echo '{"managed":1}' > prev/snap/gone.json
+          echo '{"managed":1,"edited":9,"app":2}' > $h/removed.json
+          echo '{"managed":1,"app":3}' > $h/still.json
+          echo '{"managed":1,"app":3}' > $h/renamed.json
+          echo '{"managed":1,"app":4}' > $h/nosnap.json
+          echo 'not json' > $h/bad.json
+          echo '{"managed":1,"app":5}' > root/dotfiles/followed.json
+          ln -s ../dotfiles/followed.json $h/followed.json
+          echo '{"managed":1,"app":6}' > root/dotfiles/linked.json
+          ln -s ../dotfiles/linked.json $h/linked.json
+          ln -s $storeJson $h/store.json
+          echo '{"managed":1,"app":7}' > $h/claimed.json
+          echo '{"managed":1,"app":8}' > $h/running.json
+          echo '{"managed":1,"app":9}' > $h/old-target.json
+          echo 'a file, not a tree' > $h/notadir
+          printf 'managed: 1\n' > prev/snap/removed.yaml
+          printf 'managed: 1\n' > $h/removed.yaml
+          printf 'managed = 1\n' > prev/snap/removed.toml
+          printf 'managed = 1\n# app\napp = 2\n' > $h/removed.toml
+          plist prev/snap/removed.plist '<key>managed</key><integer>1</integer>'
+          cp prev/snap/removed.plist prev/snap/binary.plist
+          for d in present absent exportfails corrupt running restarting uninstalled badid; do
+            cp prev/snap/removed.plist prev/snap/com.example.$d
+          done
+          plist $h/removed.plist '<key>managed</key><integer>1</integer><key>app</key><integer>2</integer>'
+          cp $h/removed.plist $h/binary.plist
+          plist domain-live.plist '<key>managed</key><integer>1</integer><key>appOwned</key><string>x</string>'
+          mkdir -p prev/snap/tree/sub $h/tree/sub root/dotfiles/tree
+          echo v1 > prev/snap/tree/managed.txt
+          echo v2 > prev/snap/tree/sub/nested.txt
+          cp -r prev/snap/tree/. $h/tree/
+          cp -r prev/snap/tree/. root/dotfiles/tree/
+          echo app > $h/tree/app.txt
+          chmod 700 $h/tree
+          ln -s ../dotfiles/tree $h/treelink
+          cp $h/still.json still.before
+        }
+        fail() { echo "$1 (strict=$STRICT)"; cat out; exit 1; }
+        json() { jq -cS . "$1"; }
+        warned() { grep -qF "warning: $1" out || fail "no warning: $1"; }
+
+        for STRICT in 1 0; do
+          export STRICT
+          setup
+          status=0
+          ./prune.sh > out 2>&1 || status=$?
+          [ "$status" = 0 ] || fail "the prune exited $status"
+          grep -q "reached the next entry" out || fail "the prune stopped short"
+          ! grep -q "errexit was not restored" out || fail "errexit was not restored"
+          h=root/home
+
+          [ "$(json $h/removed.json)" = '{"app":2,"edited":9}' ] || fail "removed.json was not pruned to the app's keys"
+          cmp -s still.before $h/still.json || fail "a still-managed entry was touched"
+          [ "$(json $h/renamed.json)" = '{"app":3}' ] || fail "a renamed entry was not pruned against its old snapshot"
+          [ ! -e $h/gone ] || fail "a target that was gone was created"
+          [ "$(json $h/nosnap.json)" = '{"app":4,"managed":1}' ] || fail "a unit without a snapshot was pruned"
+          warned "Not pruning removed $PWD/root/home/nosnap.json: the previous generation has no snapshot"
+          [ "$(cat $h/bad.json)" = 'not json' ] || fail "a target config-graft refused was touched"
+          warned "Could not prune removed $PWD/root/home/bad.json"
+          [ "$(cat $h/removed.yaml)" = '{}' ] || fail "an all-managed YAML file was not pruned to {}"
+          [ "$(cat $h/removed.toml)" = "$(printf '# app\napp = 2')" ] || fail "removed.toml was not pruned"
+          for f in removed binary; do
+            [ "$(head -c 7 $h/$f.plist)" = bplist0 ] || fail "$f.plist did not stay binary"
+            plistutil -f xml -i $h/$f.plist -o $f.xml
+            ! grep -q '<key>managed</key>' $f.xml && grep -q '<key>app</key>' $f.xml || fail "$f.plist was not pruned"
+          done
+          [ -L $h/followed.json ] || fail "a followed link was replaced"
+          [ "$(json root/dotfiles/followed.json)" = '{"app":5}' ] || fail "a followed link was not pruned through"
+          [ "$(json root/dotfiles/linked.json)" = '{"app":6,"managed":1}' ] || fail "a link was written through without followSymlinks"
+          warned "Not pruning removed $PWD/root/home/linked.json: it is a symlink"
+          [ "$(readlink $h/store.json)" = "$storeJson" ] || fail "a store link was replaced"
+          warned "Not pruning removed $PWD/root/home/store.json: it resolves into"
+          [ "$(json $h/claimed.json)" = '{"app":7,"managed":1}' ] || fail "a target home.file claims was pruned"
+          warned "Not pruning removed $PWD/root/home/claimed.json: it is now linked by home.file"
+          [ "$(json $h/running.json)" = '{"app":8,"managed":1}' ] || fail "a file was pruned while its app ran"
+          warned "Skipping $PWD/root/home/running.json: MeetingBar is running"
+
+          plistutil -f xml -i imported-com.example.present.plist -o present.xml 2>/dev/null || fail "the present domain was not imported"
+          ! grep -q '<key>managed</key>' present.xml && grep -q '<key>appOwned</key>' present.xml || fail "the present domain was not pruned to its own keys"
+          ! grep -q "export com.example.absent" defaults.log || fail "a domain that does not exist was exported"
+          [ ! -e imported-com.example.absent.plist ] || fail "a domain that does not exist was created"
+          [ ! -e imported-com.example.exportfails.plist ] || fail "a domain whose export failed was imported"
+          warned "Skipping plist domain com.example.exportfails: defaults export failed"
+          [ ! -e imported-com.example.running.plist ] || fail "a domain was pruned while its app ran"
+          warned "Skipping com.example.running: MeetingBar is running"
+          [ ! -e imported-com.example.restarting.plist ] || fail "a domain was pruned while its restart app ran"
+          warned "Skipping com.example.restarting: com.example.Running is running (whileRunning.restart)"
+          [ -e imported-com.example.uninstalled.plist ] || fail "a restart app that is not installed blocked the prune"
+          [ ! -e unexpected.log ] || fail "the prune asked an app to do more than say whether it runs: $(cat unexpected.log)"
+          [ ! -e imported-com.example.corrupt.plist ] || fail "a domain whose graft failed was imported"
+          warned "Could not prune removed com.example.corrupt"
+          [ "$(json $h/old-target.json)" = '{"app":9}' ] || fail "a retargeted entry's old target was not pruned"
+          warned "Not pruning removed relative.json: this config-graft cannot read"
+          warned "Not pruning removed com.example.badid: this config-graft cannot read"
+          ! grep -q "not an id" osascript.log || fail "an invalid restart id reached osascript"
+          [ "$(cat $h/notadir)" = 'a file, not a tree' ] || fail "a directory unit pruned a file"
+          ! grep -q " $PWD/root/home/notadir " argv.log || fail "a directory unit ran on a file"
+
+          [ ! -e $h/tree/managed.txt ] && [ ! -e $h/tree/sub ] || fail "the tree's managed files were not pruned"
+          [ "$(cat $h/tree/app.txt)" = app ] || fail "the tree's app file was not kept"
+          [ "$(stat -c %a $h/tree 2>/dev/null || stat -f %Lp $h/tree)" = 700 ] || fail "the tree root's mode was changed"
+          [ -e root/dotfiles/tree/managed.txt ] || fail "a symlinked tree root was pruned through"
+          warned "Not pruning removed $PWD/root/home/treelink: it is a symlink"
+          warned "Not pruning removed $PWD/root/home/unknown.ini: this config-graft cannot read"
+
+          grep -qx "json $PWD/root/home/followed.json [^ ]*/json $PWD/prev/snap/followed.json --follow-symlinks" argv.log \
+            || fail "followSymlinks did not map to --follow-symlinks"
+          grep -qx "plist $PWD/root/home/binary.plist [^ ]*/plist $PWD/prev/snap/binary.plist --plist-format binary" argv.log \
+            || fail "binary did not map to --plist-format binary"
+          grep -qx "plist $PWD/root/home/removed.plist [^ ]*/plist $PWD/prev/snap/removed.plist" argv.log \
+            || fail "a plist without binary got flags"
+          grep -qx "directory $PWD/root/home/tree [^ ]*/directory $PWD/prev/snap/tree --no-owner --xattrs none" argv.log \
+            || fail "noOwner and xattrs did not map to their flags"
+          ! grep -q -- --manage-root argv.log || fail "a prune managed a root"
+
+          tar -cf first.tar root
+          ./prune.sh > out 2>&1 || fail "the second run failed"
+          tar -cf second.tar root
+          cmp -s first.tar second.tar || fail "a second run changed something"
+        done
+
+        # A command the prune does not guard, failing, must not end a home-manager
+        # activation: the domain round trip's scratch file cannot be made.
+        setup
+        sed 's|_live=$(mktemp)|_live=$(false)|' prune.sh > unguarded.sh
+        chmod +x unguarded.sh
+        STRICT=1 ./unguarded.sh > out 2>&1 || fail "an unguarded failure ended the prune"
+        grep -q "reached the next entry" out || fail "an unguarded failure stopped the prune short"
+        warned "Skipping plist domain com.example.present: defaults export failed"
+
+        setup
+        jq '.version = 2' prev/manifest.json > v2.json && mv v2.json prev/manifest.json
+        STRICT=1 ./prune.sh > out 2>&1 || fail "an unknown version failed the run"
+        grep -q "is not a version 1 manifest" out || fail "an unknown version was not reported"
+        [ "$(json root/home/removed.json)" = '{"app":2,"edited":9,"managed":1}' ] || fail "an unknown version was pruned"
+
+        setup
+        NO_PREV=1 STRICT=1 ./prune.sh > out 2>&1 || fail "no previous generation failed the run"
+        [ ! -e argv.log ] || fail "something was pruned without a previous generation"
+        echo "prune of removed entries ok" > $out
+      '';
+
+  # The system module's own script with a previous generation the builder lays
+  # out, `/run/current-system` and the test root rewritten to the builder's
+  # directory. `shared.json` is declared under a new name, so the previous
+  # generation's unit for it is pruned against its old snapshot, dropping `b`,
+  # and the live entry, which runs after the prune, puts `a` back. A prune row
+  # that fails warns without failing the activation; a live entry that fails still
+  # does.
+  systemPruneScenario =
+    broken:
+    systemActivation {
+      managedJson = {
+        "${pruneRoot}/shared.json".settings.a = 1;
+      }
+      // lib.optionalAttrs broken { "${pruneRoot}/broken.json".settings.a = 1; };
+    };
+
+  systemPreviousManifest = pkgs.writeText "system-previous-manifest.json" (
+    common.mkManifest [
+      (common.mkUnit {
+        format.name = "json";
+        entry = entry { };
+        identity = "${pruneRoot}/shared.json";
+        snapshot = "config-graft/managed-json/old-name";
+      })
+      (common.mkUnit {
+        format.name = "json";
+        entry = entry { };
+        identity = "${pruneRoot}/bad.json";
+        snapshot = "config-graft/managed-json/bad";
+      })
+      (common.mkUnit {
+        format.name = "plist";
+        entry = entry { cfprefsdDomain = "com.example.present"; };
+        identity = "${pruneRoot}/com.example.present.plist";
+        snapshot = "config-graft/managed-plist/domain";
+        domain = "com.example.present";
+      })
+      (common.mkUnit {
+        format.name = "plist";
+        entry = entry {
+          cfprefsdDomain = "com.example.restarting";
+          whileRunning.restart = [ "com.example.Running" ];
+        };
+        identity = "${pruneRoot}/com.example.restarting.plist";
+        snapshot = "config-graft/managed-plist/domain";
+        domain = "com.example.restarting";
+      })
+    ]
+  );
+
+  systemPruneRun =
+    pkgs.runCommand "config-graft-module-system-prune"
+      {
+        nativeBuildInputs = [ pkgs.jq ];
+      }
+      ''
+        fail() { echo "$1"; cat out; exit 1; }
+        for script in ${systemPruneScenario false}:0 ${systemPruneScenario true}:1; do
+          rm -rf prev root
+          mkdir -p prev/config-graft/managed-json prev/config-graft/managed-plist root
+          sed -e "s|${pruneRoot}|$PWD/root|g" ${systemPreviousManifest} > prev/config-graft/manifest.json
+          echo '{"a":1,"b":2}' > prev/config-graft/managed-json/old-name
+          echo '{"a":1}' > prev/config-graft/managed-json/bad
+          echo '<plist version="1.0"><dict/></plist>' > prev/config-graft/managed-plist/domain
+          echo '{"a":1,"b":2,"app":true}' > root/shared.json
+          echo 'not json' > root/bad.json
+          echo 'not json' > root/broken.json
+          # The domain's round trip cannot make its scratch file: a failure the
+          # prune does not guard, which must not reach the ERR trap either.
+          sed -e "s|/run/current-system|$PWD/prev|g" -e "s|${pruneRoot}|$PWD/root|g" \
+            -e 's|/usr/bin/defaults|${pruneDefaults}|g' -e 's|_live=$(mktemp)|_live=$(false)|' \
+            "''${script%:*}" > activate
+          chmod +x activate
+          export STUB_DIR=$PWD
+          status=0
+          ./activate > out 2>&1 || status=$?
+          [ "$status" = "''${script#*:}" ] || fail "exited $status, expected ''${script#*:}"
+          [ "$(jq -cS . root/shared.json)" = '{"a":1,"app":true}' ] \
+            || fail "the shared target was not pruned, then re-applied: $(cat root/shared.json)"
+          grep -q "warning: Could not prune removed $PWD/root/bad.json" out || fail "the failed prune row was not reported"
+          grep -q "warning: Skipping plist domain com.example.present: defaults export failed" out \
+            || fail "the domain's prune did not run"
+          grep -q "warning: Skipping com.example.restarting: system.primaryUser is not set" out \
+            || fail "a restart app was asked about without system.primaryUser"
+          [ ! -e imported-com.example.restarting.plist ] || fail "a restart entry's domain was imported"
+        done
+        echo "system prune ok" > $out
+      '';
+
+  # home-manager's own prune step, as the module generates it, run under
+  # home-manager's `set -euo pipefail`: on a first switch, with no `oldGenPath`,
+  # it must do nothing, and with one it prunes what that generation's manifest
+  # lists and this one does not declare.
+  hmPruneScript = pkgs.writeShellScript "hm-prune" ''
+    set -euo pipefail
+    run() { "$@"; }
+    _i() { :; }
+    _iWarn() {
+      _fmt="$1"
+      shift
+      printf "warning: $_fmt\n" "$@"
+    }
+    ${(hmConfig {
+      homeDirectory = pruneRoot;
+      managedJson."kept.json".settings.a = 1;
+    }).home.activation.managedPrune.data
+    }
+    echo "reached the next entry"
+  '';
+
+  hmPreviousManifest = pkgs.writeText "hm-previous-manifest.json" (
+    common.mkManifest [
+      (common.mkUnit {
+        format.name = "json";
+        entry = entry { };
+        identity = "${pruneRoot}/removed.json";
+        snapshot = ".local/state/home-manager/managed-json/removed.json";
+      })
+    ]
+  );
+
+  hmPruneRun = pkgs.runCommand "config-graft-module-hm-prune" { nativeBuildInputs = [ pkgs.jq ]; } ''
+    fail() { echo "$1"; cat out; exit 1; }
+    sed "s|${pruneRoot}|$PWD/root|g" ${hmPruneScript} > prune.sh
+    chmod +x prune.sh
+    mkdir -p root gen/home-files/.local/state/home-manager/managed-json
+    echo '{"managed":1,"app":2}' > root/removed.json
+
+    (unset oldGenPath; ./prune.sh) > out 2>&1 || fail "a first switch failed the prune"
+    grep -q "reached the next entry" out || fail "a first switch stopped the activation"
+    [ "$(jq -cS . root/removed.json)" = '{"app":2,"managed":1}' ] || fail "a first switch pruned"
+
+    sed "s|${pruneRoot}|$PWD/root|g" ${hmPreviousManifest} \
+      > gen/home-files/.local/state/home-manager/managed-manifest.json
+    echo '{"managed":1}' > gen/home-files/.local/state/home-manager/managed-json/removed.json
+    oldGenPath=$PWD/gen ./prune.sh > out 2>&1 || fail "the prune failed"
+    [ "$(jq -cS . root/removed.json)" = '{"app":2}' ] || fail "the removed entry was not pruned"
+    echo "home-manager prune ok" > $out
+  '';
+
   # A generator distinguishable from the default only by what it emits. Under the
   # old `builtins.toJSON` path the entry's `format` was bypassed, so this produced
   # a derivation identical to the default one -- which is exactly the regression
@@ -983,6 +1500,134 @@ let
   };
 
   cases = [
+    {
+      # Only an enabled link claims its path.
+      name = "the prune skips what home.file and environment.etc link";
+      expected = [
+        true
+        false
+        true
+        false
+      ];
+      actual =
+        let
+          hmScript =
+            (hmConfig {
+              file.".config/linked".source = "/linked";
+              file.".config/off" = {
+                source = "/off";
+                enable = false;
+              };
+            }).home.activation.managedPrune.data;
+          systemScript =
+            (systemConfig {
+              etc."app.conf" = {
+                target = "app.conf";
+                enable = true;
+              };
+              etc."off.conf" = {
+                target = "off.conf";
+                enable = false;
+              };
+            }).system.activationScripts.config-graft.text;
+        in
+        [
+          (lib.hasInfix "\"/home/probe/.config/linked\"" hmScript)
+          (lib.hasInfix "\"/home/probe/.config/off\"" hmScript)
+          (lib.hasInfix "\"/etc/app.conf\"" systemScript)
+          (lib.hasInfix "\"/etc/off.conf\"" systemScript)
+        ];
+    }
+    {
+      # What the prune compares against: a respelled target is the same file, and
+      # a domain is the plist file behind it.
+      name = "every platform keys its entries by normalized identity";
+      expected = true;
+      actual =
+        let
+          hmScript =
+            (hmConfig {
+              managedDirectory."./tree/../tree2".source = "/source";
+            }).home.activation.managedPrune.data;
+          systemScript =
+            (systemConfig {
+              managedJson."/srv/./app//config.json".settings.a = 1;
+              managedDirectory."/srv/tree/".source = "/source";
+              managedPlist.prefs = {
+                cfprefsdDomain = "com.example.app";
+                settings.a = 1;
+              };
+            }).system.activationScripts.config-graft.text;
+        in
+        lib.hasInfix ''"identity":"/home/probe/tree2"'' hmScript
+        && lib.hasInfix ''"identity":"/srv/app/config.json"'' systemScript
+        && lib.hasInfix ''"identity":"/srv/tree"'' systemScript
+        && lib.hasInfix ''"identity":"/Library/Preferences/com.example.app.plist"'' systemScript;
+    }
+    {
+      # The generation that removes the last entry must still prune after it.
+      name = "a system configuration with no entries still links a manifest and runs the prune";
+      expected = true;
+      actual =
+        let
+          config = systemConfig { };
+        in
+        config.system.activationScripts ? config-graft
+        && lib.hasInfix "config-graft/manifest.json" config.system.systemBuilderCommands
+        && lib.hasInfix "/run/current-system/config-graft/manifest.json" config.system.activationScripts.config-graft.text;
+    }
+    {
+      name = "a home-manager configuration with no entries still links a manifest and runs the prune";
+      expected = true;
+      actual =
+        let
+          config = hmConfig { };
+        in
+        config.home.file ? ".local/state/home-manager/managed-manifest.json"
+        && lib.hasInfix "managed-manifest.json" config.home.activation.managedPrune.data;
+    }
+    {
+      # A domain and the plist file behind it are one entry, and a respelled
+      # target is the same file.
+      name = "home-manager records normalized identities in the manifest";
+      expected = [
+        {
+          kind = "json";
+          identity = "/home/probe/app/config.json";
+          domain = null;
+        }
+        {
+          kind = "domain";
+          identity = "/home/probe/Library/Preferences/com.example.app.plist";
+          domain = "com.example.app";
+        }
+      ];
+      actual =
+        map (unit: { inherit (unit) kind identity domain; })
+          (builtins.fromJSON
+            (hmConfig {
+              managedPlist.prefs = {
+                cfprefsdDomain = "com.example.app";
+                settings.a = 1;
+              };
+              managedJson.config = {
+                target = "./app/../app//config.json";
+                settings.a = 1;
+              };
+            }).home.file.".local/state/home-manager/managed-manifest.json".source.text
+          ).units;
+    }
+    {
+      name = "a system domain is recorded by its /Library/Preferences path";
+      expected = [
+        "/Library/Preferences/.GlobalPreferences.plist"
+        "/Library/Preferences/.GlobalPreferences"
+      ];
+      actual = [
+        (common.domainPlist "/Library/Preferences" "NSGlobalDomain")
+        (common.systemDomain "NSGlobalDomain")
+      ];
+    }
     {
       name = "home-manager entries whose names share a snapshot path are rejected";
       expected = 1;
@@ -1188,18 +1833,37 @@ let
       actual = lib.hasInfix " --follow-symlinks" hmActivation.managedJson.data;
     }
     {
-      name = "home-manager runs byte-format and directory entries after linkGeneration";
+      name = "home-manager runs the prune, then the entries, after linkGeneration";
       expected = {
-        managedJson = [
-          "writeBoundary"
-          "linkGeneration"
-        ];
-        managedDirectory = [
-          "writeBoundary"
-          "linkGeneration"
-        ];
+        managedJson = {
+          after = [
+            "writeBoundary"
+            "linkGeneration"
+          ];
+          before = [ ];
+        };
+        managedDirectory = {
+          after = [
+            "writeBoundary"
+            "linkGeneration"
+          ];
+          before = [ ];
+        };
+        managedPrune = {
+          after = [
+            "writeBoundary"
+            "linkGeneration"
+          ];
+          before = [
+            "managedJson"
+            "managedPlist"
+            "managedToml"
+            "managedYaml"
+            "managedDirectory"
+          ];
+        };
       };
-      actual = lib.mapAttrs (_: activation: activation.after) hmActivation;
+      actual = lib.mapAttrs (_: activation: { inherit (activation) after before; }) hmActivation;
     }
     {
       name = "a binary DESIRED runs the entry's own `format` generator";
@@ -1379,4 +2043,7 @@ pkgs.runCommand "config-graft-module-tests" { } ''
   cat ${homeFileMigrationRun} >> $out
   cat ${restartRuns} >> $out
   cat ${failingSystemRun} >> $out
+  cat ${pruneRuns} >> $out
+  cat ${systemPruneRun} >> $out
+  cat ${hmPruneRun} >> $out
 ''

@@ -11,6 +11,12 @@
 # generation's copy is reachable at `$oldGenPath/home-files/<snapshot>` on the next
 # switch (GC-safe: the old generation is a GC root). Unset $oldGenPath on the first
 # switch -> no pruning.
+#
+# That covers keys dropped from an entry that stays declared. An entry that is
+# removed -- its `settings` emptied, or the entry deleted -- has no reconcile left,
+# so each generation also links a manifest of what it manages, and an
+# unconditional activation step, ahead of the entries, prunes what the previous
+# manifest lists and this generation no longer manages (`mkPruneScript`).
 { self }:
 {
   config,
@@ -40,7 +46,9 @@ let
         which home-manager should partially manage. Each entry deep-merges its
         {option}`settings` into {option}`target` during activation (via
         {command}`config-graft`), keeping keys the app wrote that aren't managed here
-        and pruning keys dropped from Nix. All activation is handled by this module.
+        and pruning keys dropped from Nix. Removing an entry, or emptying its
+        {option}`settings`, prunes every key it last applied on the next switch. All
+        activation is handled by this module.
       '';
       type = configGraftLib.entryType {
         inherit
@@ -82,7 +90,8 @@ let
       {option}`target` during activation (via {command}`config-graft
       directory`): files the app created are kept, files dropped from {option}`source`
       are pruned, and per-file mode/xattrs (and, unless {option}`noOwner`, owner) are
-      reconciled. All activation is handled by this module.
+      reconciled. Removing an entry prunes every file it last applied on the next
+      switch. All activation is handled by this module.
     '';
     type = configGraftLib.directoryEntryType {
       inherit lib pkgs;
@@ -127,6 +136,11 @@ let
     {
       inherit snapshotRel;
       source = entry.source;
+      unit = configGraftLib.mkDirectoryUnit {
+        inherit entry;
+        identity = configGraftLib.normalizePath target;
+        snapshot = snapshotRel;
+      };
       script =
         prevSnapshot snapshotRel
         + configGraftLib.mkDirectoryReconcileScript {
@@ -186,6 +200,20 @@ let
         in
         {
           inherit snapshotRel desired;
+          unit =
+            if format.name == "plist" && entry.cfprefsdDomain != null then
+              configGraftLib.mkUnit {
+                inherit format entry;
+                identity = configGraftLib.domainPlist "${config.home.homeDirectory}/Library/Preferences" entry.cfprefsdDomain;
+                snapshot = snapshotRel;
+                domain = entry.cfprefsdDomain;
+              }
+            else
+              configGraftLib.mkUnit {
+                inherit format entry;
+                identity = configGraftLib.normalizePath "${config.home.homeDirectory}/${entry.target}";
+                snapshot = snapshotRel;
+              };
           script = mkScript {
             inherit
               format
@@ -209,6 +237,15 @@ let
     "writeBoundary"
     "linkGeneration"
   ];
+
+  # What this generation manages, as the manifest the next switch reads to find
+  # what it no longer does. Linked as a `home.file` like the snapshots it points
+  # at, so it is in `$oldGenPath/home-files` with them.
+  units =
+    lib.concatMap (x: lib.mapAttrsToList (_: e: e.unit) x.entries) byFormat
+    ++ lib.mapAttrsToList (_: e: e.unit) directoryEntries;
+
+  manifestRel = ".local/state/home-manager/managed-manifest.json";
 
   # Managed targets (relative to $HOME) across all formats + directories, for the
   # overlap guard.
@@ -249,6 +286,11 @@ in
       ++ lib.mapAttrsToList (
         _: e: lib.nameValuePair e.snapshotRel { source = e.source; }
       ) directoryEntries
+      ++ [
+        (lib.nameValuePair manifestRel {
+          source = pkgs.writeText "config-graft-manifest.json" (configGraftLib.mkManifest units);
+        })
+      ]
     );
 
     # One activation entry per format (a static key), defined only when it has entries.
@@ -262,6 +304,39 @@ in
         );
       }) byFormat
       ++ [
+        # Unconditional, unlike the entries: the generation that removes the last
+        # entry has nothing else to key it off. Ahead of every entry, so an entry
+        # sharing a removed one's target re-applies after the prune.
+        {
+          name = "managedPrune";
+          value =
+            lib.hm.dag.entryBetween
+              (
+                map (format: format.optionName) formats
+                ++ [
+                  "managedDirectory"
+                ]
+              )
+              activationAfter
+              (
+                configGraftLib.mkPruneScript {
+                  inherit
+                    lib
+                    pkgs
+                    formats
+                    manifestRel
+                    units
+                    ;
+                  package = config.home.managed.package;
+                  prevRoot = prevGenRoot;
+                  hasPrev = "[[ -v oldGenPath ]]";
+                  claimed = map (file: configGraftLib.normalizePath "${config.home.homeDirectory}/${file.target}") (
+                    lib.filter (file: file.enable) (lib.attrValues config.home.file)
+                  );
+                  claimedBy = "home.file";
+                }
+              );
+        }
         {
           name = "managedDirectory";
           value = lib.mkIf (directoryEntries != { }) (

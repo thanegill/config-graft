@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Nix modules: removing an entry prunes what it last applied** ([#31](https://github.com/thanegill/config-graft/issues/31)), as dropping a key from a declared entry always did. Each generation records a manifest of its entries, and the next activation, before any entry runs, reconciles each one it no longer declares against an empty document with its last snapshot as BASE. A symlinked, store-linked or `home.file`/`environment.etc`-linked target is skipped with a warning, and so is an entry whose `whileRunning.skip` process or `restart` app is running (no app is quit for a removed entry); a missing target is not recreated, and a failed prune warns without failing the activation. A removal is not pruned on the first switch onto this version, at boot, when activating a generation built before this version, or after a skipped or failed prune (see README).
 - **Nix modules:** a per-entry `followSymlinks` option passes `--follow-symlinks`, so a target linked to a file kept elsewhere is written through the link.
 - **A scoped `--merge-key` whose PATH names no array is reported on stderr**, such as a key copied in the quoted form a warning prints (`x."[b]"`), which used to merge by value with nothing said.
 - **Man pages:** the Nix package installs config-graft(1) and one page per subcommand, generated from the `--help` text by `cargo xtask man`.
@@ -21,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Nix modules:** importing the home-manager, NixOS or nix-darwin module adds config-graft and jq to the closure even with no entries, so the generation that removes the last entry can prune it. On a system outside the flake's four, set `managed.package`.
 - **Breaking:** NixOS and nix-darwin: a `managed*` entry whose `target` is not an absolute path fails the build. It was used as given, relative to wherever activation ran. A `cfprefsdDomain` entry, which ignores `target`, is exempt.
 - **Breaking:** nix-darwin `managedPlist`: a `cfprefsdDomain` is the system-wide domain (`/Library/Preferences/<id>`), as documented, instead of root's own user domain. Keys earlier generations wrote stay in root's domain and still win for processes running as root; find them with `sudo defaults read <id>` and remove them with `sudo defaults delete <id> <key>`. On the first switch, a key dropped from `settings` is pruned from the system-wide domain if it holds the same value.
 - **home-manager:** the managed entries run after `linkGeneration`, so an entry moved from `home.file` finds its old store link removed rather than failing activation on it.
