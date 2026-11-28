@@ -155,6 +155,45 @@ fn a_binary_target_keeps_its_encoding() {
 }
 
 #[test]
+fn an_empty_xml_desired_prunes_a_binary_target_and_keeps_it_binary() {
+    // The Nix modules prune a removed `managedPlist` entry against an empty XML
+    // `<dict/>`: the managed key goes, the app's stays, and the binary target is
+    // still written as binary, since the write follows the target (issue #43).
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.plist");
+    let desired = dir.path().join("empty.plist");
+    let base = dir.path().join("base.plist");
+
+    let f = fs::File::create(&target).unwrap();
+    pdict(vec![("managed", pint(1)), ("app", pint(2))])
+        .to_writer_binary(f)
+        .unwrap();
+    fs::write(
+        &desired,
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+            "<plist version=\"1.0\">\n<dict/>\n</plist>\n",
+        ),
+    )
+    .unwrap();
+    pdict(vec![("managed", pint(1))])
+        .to_file_xml(&base)
+        .unwrap();
+
+    let out = run(&[
+        "plist",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+        base.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    assert!(fs::read(&target).unwrap().starts_with(b"bplist0"));
+    assert_eq!(read_plist(&target), pdict(vec![("app", pint(2))]));
+}
+
+#[test]
 fn an_xml_target_keeps_its_encoding() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.plist");

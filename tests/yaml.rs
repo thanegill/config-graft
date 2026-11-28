@@ -1194,6 +1194,20 @@ fn prune_of_every_key_writes_the_empty_mapping_before_a_document_end() {
 }
 
 #[test]
+fn an_empty_desired_prunes_managed_keys_and_keeps_the_apps_keys_and_comments() {
+    // The Nix modules prune a removed `managedYaml` entry against the empty
+    // DESIRED `{}`: keys still equal to BASE go, and the app's keys, comments
+    // and edits stay. A file holding only managed keys is
+    // `prune_of_every_key_writes_an_empty_mapping`.
+    yaml_golden(
+        "# app\nmanaged: 1\nedited: 9\nt:\n  x: 1\n  app: 2\napp: true\n",
+        "{}\n",
+        Some("managed: 1\nedited: 5\nt:\n  x: 1\n"),
+        "# app\nedited: 9\nt:\n  app: 2\napp: true\n",
+    );
+}
+
+#[test]
 fn an_empty_mapping_left_by_a_prune_is_filled_again() {
     let base = Some("{}\n");
     yaml_golden("# c\n{}\n", "x: 1\n", base, "# c\nx: 1\n");
