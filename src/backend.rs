@@ -530,7 +530,6 @@ pub(crate) trait Backend {
     /// elements it made equal so [`Backend::pass`] can decide whether that actually
     /// costs anything. Default: nothing to adjust.
     fn normalize_for_run(
-        _args: &RunArgs,
         _opts: WriteOpts,
         _node: &Node<Self::Leaf>,
     ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
@@ -648,7 +647,7 @@ pub(crate) trait Backend {
         // Kept as read: what an array lost to normalization is only visible against
         // what its elements held before.
         let mut desired_as_read = None;
-        let desired_risks = match Self::normalize_for_run(args, write_opts, &desired)? {
+        let desired_risks = match Self::normalize_for_run(write_opts, &desired)? {
             Some(normalized) => {
                 desired_as_read = Some(std::mem::replace(&mut desired, normalized.node));
                 normalized.rewritten
@@ -667,7 +666,7 @@ pub(crate) trait Backend {
         // normalized node would show nothing and disagree with the `--check` that
         // compares against the bytes on disk.
         let mut target_as_read = None;
-        let target_risks = match Self::normalize_for_run(args, write_opts, &target)? {
+        let target_risks = match Self::normalize_for_run(write_opts, &target)? {
             Some(normalized) => {
                 target_as_read = Some(std::mem::replace(&mut target, normalized.node));
                 normalized.rewritten
@@ -685,7 +684,7 @@ pub(crate) trait Backend {
         // managed key can never be pruned. BASE is never written, so a failure here
         // leaves it as read rather than failing the run.
         if let Some(base) = base.as_mut() {
-            if let Ok(Some(normalized)) = Self::normalize_for_run(args, write_opts, base) {
+            if let Ok(Some(normalized)) = Self::normalize_for_run(write_opts, base) {
                 *base = normalized.node;
             }
         }
@@ -836,7 +835,6 @@ impl<F: Format> Backend for ByteBackend<F> {
     }
 
     fn normalize_for_run(
-        _args: &RunArgs,
         opts: WriteOpts,
         node: &Node<F::Leaf>,
     ) -> Result<Option<Normalization<F::Leaf>>, Error> {
@@ -1128,11 +1126,10 @@ mod tests {
             }
 
             fn normalize_for_run(
-                args: &RunArgs,
                 opts: WriteOpts,
                 node: &Node<Leaf>,
             ) -> Result<Option<Normalization<Leaf>>, Error> {
-                JsonBackend::normalize_for_run(args, opts, node)
+                JsonBackend::normalize_for_run(opts, node)
             }
 
             fn prepare(
