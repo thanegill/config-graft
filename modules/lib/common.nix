@@ -20,6 +20,18 @@ let
     lib.optional entry.noOwner "--no-owner"
     ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}";
 
+  # The write flags of a byte-format file entry: how the result is encoded, and
+  # whether a symlinked target is written through. A `cfprefsdDomain` entry takes
+  # neither, since it writes a scratch file of its own.
+  fileWriteFlags =
+    {
+      lib,
+      format,
+      entry,
+    }:
+    lib.optional (format.name == "plist" && entry.binary) "--plist-format binary"
+    ++ lib.optional entry.followSymlinks "--follow-symlinks";
+
   # `whileRunning`, the same on every entry type.
   whileRunningOption =
     lib:
@@ -536,8 +548,10 @@ in
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
         run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${
-          lib.optionalString (format.name == "plist" && entry.binary) " --plist-format binary"
-        }${lib.optionalString entry.followSymlinks " --follow-symlinks"}
+          lib.concatMapStrings (flag: " ${flag}") (fileWriteFlags {
+            inherit lib format entry;
+          })
+        }
       '';
     in
     guardRunning {
