@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Nix modules:** a per-entry `followSymlinks` option passes `--follow-symlinks`, so a target linked to a file kept elsewhere is written through the link.
 - **A scoped `--merge-key` whose PATH names no array is reported on stderr**, such as a key copied in the quoted form a warning prints (`x."[b]"`), which used to merge by value with nothing said.
 - **Man pages:** the Nix package installs config-graft(1) and one page per subcommand, generated from the `--help` text by `cargo xtask man`.
 - **Warnings on stderr whenever a run changes a value beyond the managed edits**, naming the key path: an input array holding the same value (or `--merge-key` key) twice where a copy is dropped ([#49](https://github.com/thanegill/config-graft/issues/49)), and a plist `Date` floored to a whole second for XML output. They never change the exit code.
@@ -18,10 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **home-manager:** the managed entries run after `linkGeneration`, so an entry moved from `home.file` finds its old store link removed rather than failing activation on it.
 - **`json --help` shows `--indent`'s default as `[default: 2]`**, as `--array-strategy` and `--plist-format` already do.
 - **`--help` reads as a manual:** the root help explains TARGET, DESIRED and BASE and lists the exit codes, and each subcommand describes how its format is written.
 - **Building from source requires Rust 1.93 or later**, now declared as `rust-version` in Cargo.toml.
-- **Breaking:** a write through a symlinked TARGET is refused (exit 1) instead of replacing the link with a regular file; `--follow-symlinks` writes the file the link resolves to. The Nix modules don't pass it yet, so a symlinked managed target fails activation when a change is pending.
+- **Breaking:** a write through a symlinked TARGET is refused (exit 1) instead of replacing the link with a regular file; `--follow-symlinks` writes the file the link resolves to. In the Nix modules, a symlinked target fails activation when a change is pending, unless its entry sets `followSymlinks`.
 - **directory:** `--diff` shows each xattr as `name=` plus the first 8 hex digits of its value's SHA-256, which is stable across Rust releases. Every xattr digest in existing output changes once.
 - **Breaking:** `--base PATH` together with a positional BASE is a usage error (exit 2), even if one is empty; the flag used to win silently.
 - **Breaking:** plist output keeps the target's encoding. `--plist-binary` is replaced by `--plist-format follow|xml|binary` (default `follow`); `--plist-format binary` is the old flag, `--plist-format xml` the old default, and `--plist-binary` is gone (exit 2).

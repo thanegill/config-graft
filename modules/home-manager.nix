@@ -191,6 +191,14 @@ let
     }
   ) formats;
 
+  # After `linkGeneration`, which removes the previous generation's stale
+  # `home.file` links: an entry moved from `home.file` would otherwise meet its old
+  # read-only store link, which config-graft cannot write.
+  activationAfter = [
+    "writeBoundary"
+    "linkGeneration"
+  ];
+
   # Managed targets (relative to $HOME) across all formats + directories, for the
   # overlap guard.
   managedTargets =
@@ -237,7 +245,7 @@ in
       map (x: {
         name = x.format.optionName;
         value = lib.mkIf (x.active != { }) (
-          lib.hm.dag.entryAfter [ "writeBoundary" ] (
+          lib.hm.dag.entryAfter activationAfter (
             lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) x.entries)
           )
         );
@@ -246,7 +254,7 @@ in
         {
           name = "managedDirectory";
           value = lib.mkIf (directoryEntries != { }) (
-            lib.hm.dag.entryAfter [ "writeBoundary" ] (
+            lib.hm.dag.entryAfter activationAfter (
               lib.concatStringsSep "\n" (lib.mapAttrsToList (_: e: e.script) directoryEntries)
             )
           );

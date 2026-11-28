@@ -100,11 +100,11 @@ The Nix flake ships declarative wrappers for managing config files on NixOS, nix
 
 The flake exposes:
 
-- `homeManagerModules.default`: `home.managed{Json,Plist,Yaml,Toml}` and `home.managedDirectory`, targets relative to `$HOME`.
-- `nixosModules.default` / `darwinModules.default`: `environment.managed*`, absolute targets, reconciled during system activation.
+- `homeManagerModules.default`: `home.managed{Json,Plist,Yaml,Toml}` and `home.managedDirectory`, targets relative to `$HOME`. They run after `linkGeneration`, so an entry moved from `home.file` finds its old store link already removed.
+- `nixosModules.default` / `darwinModules.default`: `environment.managed*`, absolute targets, reconciled during system activation, after `/etc` is set up.
 - `overlays.default`: optional. It adds the `config-graft` CLI to `pkgs`; the modules don't need it, since they run the flake's own build by store path.
 
-Each byte-format entry takes `settings` (freeform data) or a pre-built `source` file (any generator, template, or derivation); an entry with neither is inert. Freeform formats accept a `format` override, any `pkgs.formats`-style generator, for a validating or specially configured type. `package` overrides the config-graft build for one entry. Plist entries take two more options.
+Each byte-format entry takes `settings` (freeform data) or a pre-built `source` file (any generator, template, or derivation); an entry with neither is inert. Freeform formats accept a `format` override, any `pkgs.formats`-style generator, for a validating or specially configured type. `package` overrides the config-graft build for one entry. `followSymlinks` passes `--follow-symlinks`, for a target linked to a file kept elsewhere; without it, an activation that would change a symlinked target fails rather than replacing the link. Plist entries take two more options.
 
 `cfprefsdDomain` reconciles through `cfprefsd` (`defaults`/`plutil`) instead of editing the file — macOS only, asserted at build time, per-user under home-manager and system/global under nix-darwin. That path always writes its scratch snapshot as a **binary** plist, since `defaults export` hands over binary and `defaults import` reads it back, so nothing a domain holds is squeezed through XML on the way.
 
