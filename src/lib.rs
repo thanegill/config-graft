@@ -18,7 +18,7 @@ mod symlink;
 mod value;
 mod warning;
 use backend::{Backend, ByteBackend, Directory};
-use format::directory::XattrScope;
+use format::directory::{AttrPolicy, XattrScope};
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use mode::{ModeChange, Modes, Owner, Writer, HOST_SETGID_ON_WRITE};
 use reconcile::{ArrayStrategy, ManagedPath, MergeKeys};
@@ -228,8 +228,8 @@ pub(crate) struct DirArgs {
 pub(crate) struct RunArgs {
     pub(crate) target: PathBuf,
     pub(crate) desired: PathBuf,
+    /// BASE, from `--base` or the positional, or `None` when neither names a path.
     pub(crate) base: Option<PathBuf>,
-    pub(crate) base_flag: Option<PathBuf>,
     pub(crate) no_prune: bool,
     pub(crate) stdout: bool,
     pub(crate) symlinks: SymlinkPolicy,
@@ -285,58 +285,21 @@ pub(crate) fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
 }
 
 impl RunArgs {
-    /// A [`RunArgs`] from a byte-format subcommand's flags. `indent`/`plist_format`
-    /// are format-specific, so the caller supplies them (JSON sets `indent`, plist
-    /// sets `plist_format`, YAML/TOML use the defaults). The directory-only fields
-    /// take their inert defaults.
-    fn from_byte(byte: ByteArgs, indent: Indent, plist_format: PlistFormat) -> RunArgs {
+    /// A [`RunArgs`] from the flags every subcommand shares, with every other
+    /// field at its inert default. BASE is resolved here, once: from `--base` or the
+    /// positional (clap refuses both), and an empty path means no BASE.
+    fn from_common(target: PathBuf, desired: PathBuf, common: CommonArgs) -> RunArgs {
         let CommonArgs {
             base,
             base_flag,
             no_prune,
             diff,
             check,
-        } = byte.common;
+        } = common;
         RunArgs {
-            target: byte.target,
-            desired: byte.desired,
-            base,
-            base_flag,
-            no_prune,
-            stdout: byte.stdout,
-            symlinks: if byte.follow_symlinks {
-                SymlinkPolicy::Follow
-            } else {
-                SymlinkPolicy::Refuse
-            },
-            diff,
-            check,
-            indent,
-            plist_format,
-            array_strategy: byte.array_strategy,
-            merge_key: byte.merge_key,
-            manage_root: false,
-            no_owner: false,
-            xattrs: None,
-        }
-    }
-
-    /// A [`RunArgs`] from the `directory` subcommand's flags. The byte-only fields
-    /// (stdout/symlinks/array_strategy/merge_key/indent/plist_format) take their
-    /// inert defaults -- a tree exposes none of them.
-    fn from_dir(args: DirArgs) -> RunArgs {
-        let CommonArgs {
-            base,
-            base_flag,
-            no_prune,
-            diff,
-            check,
-        } = args.common;
-        RunArgs {
-            target: args.target,
-            desired: args.desired,
-            base,
-            base_flag,
+            target,
+            desired,
+            base: base_flag.or(base).filter(|p| !p.as_os_str().is_empty()),
             no_prune,
             stdout: false,
             symlinks: SymlinkPolicy::Refuse,
@@ -344,13 +307,49 @@ impl RunArgs {
             check,
             indent: Indent::default(),
             plist_format: PlistFormat::default(),
-            // Matches the byte formats' `--array-strategy` default (`merge`); a tree
-            // has no arrays, so the value is inert either way.
-            array_strategy: ArrayStrategy::Merge,
+            array_strategy: ArrayStrategy::default(),
             merge_key: Vec::new(),
+            manage_root: false,
+            no_owner: false,
+            xattrs: None,
+        }
+    }
+
+    /// A [`RunArgs`] from a byte-format subcommand's flags. `indent`/`plist_format`
+    /// are format-specific, so the caller supplies them (JSON sets `indent`, plist
+    /// sets `plist_format`, YAML/TOML use the defaults).
+    fn from_byte(byte: ByteArgs, indent: Indent, plist_format: PlistFormat) -> RunArgs {
+        RunArgs {
+            stdout: byte.stdout,
+            symlinks: if byte.follow_symlinks {
+                SymlinkPolicy::Follow
+            } else {
+                SymlinkPolicy::Refuse
+            },
+            indent,
+            plist_format,
+            array_strategy: byte.array_strategy,
+            merge_key: byte.merge_key,
+            ..RunArgs::from_common(byte.target, byte.desired, byte.common)
+        }
+    }
+
+    /// A [`RunArgs`] from the `directory` subcommand's flags.
+    fn from_dir(args: DirArgs) -> RunArgs {
+        RunArgs {
             manage_root: args.manage_root,
             no_owner: args.no_owner,
             xattrs: args.xattrs,
+            ..RunArgs::from_common(args.target, args.desired, args.common)
+        }
+    }
+
+    /// The metadata policy for a directory run: manage everything by default, with
+    /// `--no-owner` and `--xattrs` as opt-outs.
+    fn dir_policy(&self) -> AttrPolicy {
+        AttrPolicy {
+            owner: !self.no_owner,
+            xattrs: self.xattrs.unwrap_or_default(),
         }
     }
 }

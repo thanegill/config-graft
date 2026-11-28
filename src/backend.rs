@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Outcome};
-use crate::format::directory::{self, AttrPolicy, FsLeaf};
+use crate::format::directory::{self, FsLeaf};
 use crate::format::{
     is_blank, parse_file, read_bytes, read_file, Format, FormatKind, Normalization, Normalized,
     WriteOpts,
@@ -676,12 +676,9 @@ pub(crate) trait Backend {
         };
 
         // Empty/missing/unreadable BASE disables pruning (first run).
-        let base_path = args
-            .base_flag
+        let mut base = args
+            .base
             .as_deref()
-            .or(args.base.as_deref())
-            .filter(|p| !p.as_os_str().is_empty());
-        let mut base = base_path
             .and_then(|p| Self::read(args, p).ok().flatten())
             .filter(Node::is_map);
         // BASE must be normalized too, or a floored TARGET never equals it and a
@@ -991,17 +988,6 @@ impl Backend for Directory {
     ) -> Result<WriteOutcome, Error> {
         directory::apply_tree(&args.target, Some(target), result, base, args.dir_policy())
             .map(|_| WriteOutcome::Written(None))
-    }
-}
-
-impl RunArgs {
-    /// The metadata policy for a directory run: manage everything by default, with
-    /// `--no-owner` and `--xattrs` as opt-outs.
-    fn dir_policy(&self) -> AttrPolicy {
-        AttrPolicy {
-            owner: !self.no_owner,
-            xattrs: self.xattrs.unwrap_or_default(),
-        }
     }
 }
 
