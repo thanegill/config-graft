@@ -366,7 +366,8 @@ let
   # The home-manager module's activation entries, evaluated without a home-manager
   # input: `lib.hm.dag.entryAfter` and the few options the module writes are
   # stubbed, which is enough to read each entry's ordering.
-  hmActivation =
+  hmConfig =
+    home:
     let
       hmLib = lib.extend (
         _: _: {
@@ -374,32 +375,41 @@ let
         }
       );
       stub = type: lib.mkOption { inherit type; };
-      evaluated = hmLib.evalModules {
-        modules = [
-          (import ./home-manager.nix {
-            self.packages.${pkgs.stdenv.hostPlatform.system}.default = package;
-          })
-          {
-            options.home = {
-              file = stub (lib.types.attrsOf lib.types.raw);
-              activation = stub (lib.types.attrsOf lib.types.raw);
-              homeDirectory = stub lib.types.str;
-            };
-            options.assertions = stub (lib.types.listOf lib.types.raw);
-            config = {
-              _module.args.pkgs = pkgs;
-              home.homeDirectory = "/home/probe";
-              home.managedJson.probe = {
-                settings.a = 1;
-                followSymlinks = true;
-              };
-              home.managedDirectory.tree.source = "/source";
-            };
-          }
-        ];
-      };
     in
-    evaluated.config.home.activation;
+    (hmLib.evalModules {
+      modules = [
+        (import ./home-manager.nix {
+          self.packages.${pkgs.stdenv.hostPlatform.system}.default = package;
+        })
+        {
+          options.home = {
+            file = stub (lib.types.attrsOf lib.types.raw);
+            activation = stub (lib.types.attrsOf lib.types.raw);
+            homeDirectory = stub lib.types.str;
+          };
+          options.assertions = stub (lib.types.listOf lib.types.raw);
+          config = {
+            _module.args.pkgs = pkgs;
+            home = {
+              homeDirectory = "/home/probe";
+            }
+            // home;
+          };
+        }
+      ];
+    }).config;
+
+  hmActivation =
+    (hmConfig {
+      managedJson.probe = {
+        settings.a = 1;
+        followSymlinks = true;
+      };
+      managedDirectory.tree.source = "/source";
+    }).home.activation;
+
+  # The messages of the assertions that fail for a configuration.
+  failedAssertions = config: map (a: a.message) (builtins.filter (a: !a.assertion) config.assertions);
 
   # An entry moved from `home.file` to `managedJson`: until home-manager's
   # `linkGeneration` removes it, the target is still the old generation's link into
@@ -806,7 +816,7 @@ let
   # the wiring around the shared reconcile bodies: the shims, the BASE probe and the
   # failure handling. The few platform options the module sets are declared here as
   # plain sinks.
-  systemActivation =
+  systemConfig =
     managed:
     (lib.evalModules {
       modules = [
@@ -840,7 +850,9 @@ let
         }
         { environment = managed; }
       ];
-    }).config.system.activationScripts.config-graft;
+    }).config;
+
+  systemActivation = managed: (systemConfig managed).system.activationScripts.config-graft;
 
   # A failing entry fails the system activation without stopping the entries after
   # it: NixOS reports the snippet and fails the switch, nix-darwin aborts at the
@@ -971,6 +983,27 @@ let
   };
 
   cases = [
+    {
+      name = "home-manager entries whose names share a snapshot path are rejected";
+      expected = 1;
+      actual = builtins.length (
+        failedAssertions (hmConfig {
+          managedJson."a/b.json".settings.a = 1;
+          managedJson."a-b.json".settings.a = 1;
+          managedJson."c.json".settings.a = 1;
+        })
+      );
+    }
+    {
+      name = "system entries whose names share a snapshot path are rejected";
+      expected = 1;
+      actual = builtins.length (
+        failedAssertions (systemConfig {
+          managedDirectory."/srv/a/b".source = "/source";
+          managedDirectory."/srv-a-b".source = "/source";
+        })
+      );
+    }
     {
       name = "cfprefsdDomain on a non-Darwin host is rejected";
       expected = 1;

@@ -110,7 +110,8 @@ let
   # Directory entries (all active — `source` is required), each with its snapshot
   # path and reconcile script. `entry.target` is absolute.
   directoryEntries = lib.mapAttrsToList (name: entry: {
-    inherit entry;
+    inherit entry name;
+    option = "environment.managedDirectory";
     snapshotRel = "config-graft/managed-directory/${configGraftLib.safeName name}";
     script = configGraftLib.mkDirectoryReconcileScript {
       inherit
@@ -133,7 +134,8 @@ let
   entries = lib.concatMap (
     { format, active }:
     lib.mapAttrsToList (name: entry: {
-      inherit format entry;
+      inherit format entry name;
+      option = "environment.${format.optionName}";
       snapshotRel = "config-graft/managed-${format.name}/${configGraftLib.safeName name}";
       desired = configGraftLib.mkDesired {
         inherit
@@ -278,6 +280,13 @@ in
         optionName = "managedDirectory";
         entries = config.environment.managedDirectory;
         needsUser = true;
+      }
+      ++ configGraftLib.mkSnapshotAssertions {
+        inherit lib;
+        entries = map (e: {
+          inherit (e) option name;
+          snapshot = e.snapshotRel;
+        }) (entries ++ directoryEntries);
       }
       ++ (
         # config-graft reconciles a mutable file/tree in place; `environment.etc`

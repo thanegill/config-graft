@@ -297,6 +297,23 @@ in
         optionName = "managedDirectory";
         entries = config.home.managedDirectory;
       }
+      ++ configGraftLib.mkSnapshotAssertions {
+        inherit lib;
+        entries =
+          lib.concatMap (
+            x:
+            lib.mapAttrsToList (name: e: {
+              option = "home.${x.format.optionName}";
+              inherit name;
+              snapshot = e.snapshotRel;
+            }) x.entries
+          ) byFormat
+          ++ lib.mapAttrsToList (name: e: {
+            option = "home.managedDirectory";
+            inherit name;
+            snapshot = e.snapshotRel;
+          }) directoryEntries;
+      }
       # config-graft reconciles a mutable file/tree in place; `home.file` symlinks an
       # immutable store path. The same path can't be both, so reject the overlap
       # (byte formats and directories alike).

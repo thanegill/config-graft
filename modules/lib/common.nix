@@ -836,4 +836,19 @@ in
         ]
       ) entries
     );
+
+  # Build-time guard against two entries sharing a snapshot path. `safeName` maps
+  # `a/b` and `a-b` to the same name, and the snapshot is linked once per path, so
+  # one entry would silently be reconciled against the other's BASE. `entries` is a
+  # list of `{ option, name, snapshot }`, `option` the entry's full option path.
+  mkSnapshotAssertions =
+    { lib, entries }:
+    lib.mapAttrsToList (snapshot: sharing: {
+      assertion = builtins.length sharing < 2;
+      message = ''
+        ${lib.concatMapStringsSep " and " (e: "${e.option}.\"${e.name}\"") sharing} share the
+        snapshot path `${snapshot}`, since `/` in an entry's name becomes `-`
+        there. Rename one of them.
+      '';
+    }) (builtins.groupBy (e: e.snapshot) entries);
 }
