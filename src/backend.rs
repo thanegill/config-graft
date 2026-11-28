@@ -337,6 +337,35 @@ fn lossy_collapses<L: Leaf>(arrays: &[CombinedArray<'_, L>]) -> Vec<Warning<L>> 
         .collect()
 }
 
+/// Recount each duplicate warning against what its input held before
+/// normalization, and drop the ones normalization manufactured: an element repeats
+/// only because normalizing made two originals one, which [`lossy_collapses`]
+/// reports instead.
+fn discount_manufactured_repeats<L: Leaf>(
+    warnings: &mut Vec<Warning<L>>,
+    combined: &[CombinedArray<'_, L>],
+) {
+    warnings.retain_mut(|w| match &mut w.kind {
+        WarningKind::DuplicateCollapsed {
+            source,
+            matched,
+            key,
+            held,
+            kept,
+            ..
+        } => {
+            let identity = (key.as_deref(), &*matched);
+            if let Some(repeats) = genuine_repeats(combined, &w.path, *source, identity) {
+                *held = repeats;
+            }
+            // `value_duplicates` reports a loss, so there has to be one: the
+            // repeat the file held must still outnumber what survived.
+            *held >= 2 && *held > *kept
+        }
+        _ => true,
+    });
+}
+
 /// How many times one input's array at `path` genuinely held the identity a
 /// duplicate warning names: the most any one original repeats among the elements
 /// that now share it. The engine sees normalized inputs, so it counts every element
@@ -721,25 +750,7 @@ pub(crate) trait Backend {
         } else {
             Vec::new()
         };
-        warnings.retain_mut(|w| match &mut w.kind {
-            WarningKind::DuplicateCollapsed {
-                source,
-                matched,
-                key,
-                held,
-                kept,
-                ..
-            } => {
-                let identity = (key.as_deref(), &*matched);
-                if let Some(repeats) = genuine_repeats(&combined, &w.path, *source, identity) {
-                    *held = repeats;
-                }
-                // `value_duplicates` reports a loss, so there has to be one: the
-                // repeat the file held must still outnumber what survived.
-                *held >= 2 && *held > *kept
-            }
-            _ => true,
-        });
+        discount_manufactured_repeats(&mut warnings, &combined);
         // Diagnostics only: none of these change the exit code.
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
