@@ -26,7 +26,8 @@ use crate::reconcile::{
 use crate::render::render_selector;
 use crate::value::{Leaf, Node};
 use crate::warning::{DiagnosticPath, Source, Step, Warning, WarningKind};
-use crate::{symlink, RunArgs, WriteOutcome};
+use crate::write::WriteOutcome;
+use crate::{symlink, RunArgs};
 
 /// How many times a run reconciles before giving up on a TARGET that changes under
 /// every write. One retry covers an app saving once in the window and a second a
@@ -337,6 +338,35 @@ fn lossy_collapses<L: Leaf>(arrays: &[CombinedArray<'_, L>]) -> Vec<Warning<L>> 
         .collect()
 }
 
+/// Recount each duplicate warning against what its input held before
+/// normalization, and drop the ones normalization manufactured: an element repeats
+/// only because normalizing made two originals one, which [`lossy_collapses`]
+/// reports instead.
+fn discount_manufactured_repeats<L: Leaf>(
+    warnings: &mut Vec<Warning<L>>,
+    combined: &[CombinedArray<'_, L>],
+) {
+    warnings.retain_mut(|w| match &mut w.kind {
+        WarningKind::DuplicateCollapsed {
+            source,
+            matched,
+            key,
+            held,
+            kept,
+            ..
+        } => {
+            let identity = (key.as_deref(), &*matched);
+            if let Some(repeats) = genuine_repeats(combined, &w.path, *source, identity) {
+                *held = repeats;
+            }
+            // `value_duplicates` reports a loss, so there has to be one: the
+            // repeat the file held must still outnumber what survived.
+            *held >= 2 && *held > *kept
+        }
+        _ => true,
+    });
+}
+
 /// How many times one input's array at `path` genuinely held the identity a
 /// duplicate warning names: the most any one original repeats among the elements
 /// that now share it. The engine sees normalized inputs, so it counts every element
@@ -473,9 +503,10 @@ pub(crate) trait Backend {
     /// byte format the write lands only while TARGET still holds it.
     type Snapshot;
     /// Separator between key-path components in diagnostics (`--diff` lines and
-    /// `merge` conflict warnings): the format's own separator for byte formats
-    /// (`.` for JSON/YAML/TOML, `:` for plist), `/` for a directory tree.
-    const COMPONENT_SEPARATOR: &'static str;
+    /// `merge` conflict warnings) and, for byte formats, in a `--merge-key` scope:
+    /// the format's own separator for byte formats (`.` for JSON/YAML/TOML, `:` for
+    /// plist), `/` for a directory tree.
+    const PATH_SEP: &'static str;
 
     /// Parsed `--merge-key` specs for the array engine. Byte formats parse them
     /// against their own key-path separator; a tree has no arrays, so the default
@@ -530,7 +561,6 @@ pub(crate) trait Backend {
     /// elements it made equal so [`Backend::pass`] can decide whether that actually
     /// costs anything. Default: nothing to adjust.
     fn normalize_for_run(
-        _args: &RunArgs,
         _opts: WriteOpts,
         _node: &Node<Self::Leaf>,
     ) -> Result<Option<Normalization<Self::Leaf>>, Error> {
@@ -610,7 +640,7 @@ pub(crate) trait Backend {
                     path: DiagnosticPath::new(),
                     kind,
                 }],
-                Self::COMPONENT_SEPARATOR,
+                Self::PATH_SEP,
             );
         }
         Err(Error::TargetKeptChanging {
@@ -648,7 +678,7 @@ pub(crate) trait Backend {
         // Kept as read: what an array lost to normalization is only visible against
         // what its elements held before.
         let mut desired_as_read = None;
-        let desired_risks = match Self::normalize_for_run(args, write_opts, &desired)? {
+        let desired_risks = match Self::normalize_for_run(write_opts, &desired)? {
             Some(normalized) => {
                 desired_as_read = Some(std::mem::replace(&mut desired, normalized.node));
                 normalized.rewritten
@@ -667,7 +697,7 @@ pub(crate) trait Backend {
         // normalized node would show nothing and disagree with the `--check` that
         // compares against the bytes on disk.
         let mut target_as_read = None;
-        let target_risks = match Self::normalize_for_run(args, write_opts, &target)? {
+        let target_risks = match Self::normalize_for_run(write_opts, &target)? {
             Some(normalized) => {
                 target_as_read = Some(std::mem::replace(&mut target, normalized.node));
                 normalized.rewritten
@@ -685,7 +715,7 @@ pub(crate) trait Backend {
         // managed key can never be pruned. BASE is never written, so a failure here
         // leaves it as read rather than failing the run.
         if let Some(base) = base.as_mut() {
-            if let Ok(Some(normalized)) = Self::normalize_for_run(args, write_opts, base) {
+            if let Ok(Some(normalized)) = Self::normalize_for_run(write_opts, base) {
                 *base = normalized.node;
             }
         }
@@ -721,37 +751,19 @@ pub(crate) trait Backend {
         } else {
             Vec::new()
         };
-        warnings.retain_mut(|w| match &mut w.kind {
-            WarningKind::DuplicateCollapsed {
-                source,
-                matched,
-                key,
-                held,
-                kept,
-                ..
-            } => {
-                let identity = (key.as_deref(), &*matched);
-                if let Some(repeats) = genuine_repeats(&combined, &w.path, *source, identity) {
-                    *held = repeats;
-                }
-                // `value_duplicates` reports a loss, so there has to be one: the
-                // repeat the file held must still outnumber what survived.
-                *held >= 2 && *held > *kept
-            }
-            _ => true,
-        });
+        discount_manufactured_repeats(&mut warnings, &combined);
         // Diagnostics only: none of these change the exit code.
         warnings.extend(normalization_warnings(&desired_risks, Source::Desired));
         warnings.extend(normalization_warnings(&target_risks, Source::Target));
-        emit(&warnings, Self::COMPONENT_SEPARATOR);
-        emit(&lossy_collapses(&combined), Self::COMPONENT_SEPARATOR);
+        emit(&warnings, Self::PATH_SEP);
+        emit(&lossy_collapses(&combined), Self::PATH_SEP);
 
         // Before `prepare`, which serializes and can refuse: `--diff` is a preview,
         // so it should still show what the run would do to a target the writer then
         // turns out to be unable to represent.
         if args.diff {
             let before = target_as_read.as_ref().unwrap_or(&target);
-            print!("{}", before.diff(&result, Self::COMPONENT_SEPARATOR));
+            print!("{}", before.diff(&result, Self::PATH_SEP));
         }
 
         let Prepared { output, changed } =
@@ -803,12 +815,10 @@ pub(crate) struct ByteBackend<F>(PhantomData<F>);
 impl<F: Format> Backend for ByteBackend<F> {
     type Leaf = F::Leaf;
     type Snapshot = Option<Vec<u8>>;
-    // Byte formats diff and report conflicts with the format's own key-path
-    // separator (`.` for JSON/YAML/TOML, `:` for plist).
-    const COMPONENT_SEPARATOR: &'static str = F::PATH_SEP;
+    const PATH_SEP: &'static str = F::PATH_SEP;
 
     fn merge_keys(args: &RunArgs) -> MergeKeys {
-        MergeKeys::parse(&args.merge_key, F::PATH_SEP)
+        MergeKeys::parse(&args.merge_key, Self::PATH_SEP)
     }
 
     /// Read through a symlinked TARGET, so under `--follow-symlinks` this is the
@@ -836,7 +846,6 @@ impl<F: Format> Backend for ByteBackend<F> {
     }
 
     fn normalize_for_run(
-        _args: &RunArgs,
         opts: WriteOpts,
         node: &Node<F::Leaf>,
     ) -> Result<Option<Normalization<F::Leaf>>, Error> {
@@ -875,7 +884,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         let current = snapshot.as_deref().unwrap_or_default();
         emit(
             &F::refuse_on_write(result, target, current, opts)?,
-            F::PATH_SEP,
+            Self::PATH_SEP,
         );
         let output = F::serialize(result, current, opts)?;
         Ok(Prepared {
@@ -896,7 +905,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         let resolved = symlink::write_path(&args.target, args.symlinks)?;
         let written = resolved.as_deref().unwrap_or(&args.target);
         let outcome =
-            crate::write_atomic(written, output, snapshot.as_deref()).map_err(|source| {
+            crate::write::write_atomic(written, output, snapshot.as_deref()).map_err(|source| {
                 match &resolved {
                     Some(resolved) => Error::WriteThroughSymlink {
                         link: args.target.clone(),
@@ -915,7 +924,7 @@ impl<F: Format> Backend for ByteBackend<F> {
                         change,
                     },
                 }],
-                F::PATH_SEP,
+                Self::PATH_SEP,
             );
         }
         Ok(outcome)
@@ -934,7 +943,7 @@ impl Backend for Directory {
     // A tree is read entry by entry, so there is no single snapshot to check before
     // the write; that read/apply window is a SPEC section 10 trade-off.
     type Snapshot = ();
-    const COMPONENT_SEPARATOR: &'static str = "/";
+    const PATH_SEP: &'static str = "/";
 
     fn error_desired_absent(path: PathBuf) -> Error {
         Error::MissingDesiredDirectory(path)
@@ -1055,7 +1064,8 @@ mod tests {
         use crate::format::{Json, Normalization, PlistFormat, WriteOpts};
         use crate::reconcile::MergeKeys;
         use crate::value::Node;
-        use crate::{Cli, Command, RunArgs, WriteOutcome};
+        use crate::write::WriteOutcome;
+        use crate::{Cli, Command, RunArgs};
 
         type JsonBackend = ByteBackend<Json>;
         type Leaf = <JsonBackend as Backend>::Leaf;
@@ -1085,7 +1095,7 @@ mod tests {
         impl Backend for AppSavesDuringWrite {
             type Leaf = Leaf;
             type Snapshot = Snapshot;
-            const COMPONENT_SEPARATOR: &'static str = JsonBackend::COMPONENT_SEPARATOR;
+            const PATH_SEP: &'static str = JsonBackend::PATH_SEP;
 
             fn merge_keys(args: &RunArgs) -> MergeKeys {
                 JsonBackend::merge_keys(args)
@@ -1128,11 +1138,10 @@ mod tests {
             }
 
             fn normalize_for_run(
-                args: &RunArgs,
                 opts: WriteOpts,
                 node: &Node<Leaf>,
             ) -> Result<Option<Normalization<Leaf>>, Error> {
-                JsonBackend::normalize_for_run(args, opts, node)
+                JsonBackend::normalize_for_run(opts, node)
             }
 
             fn prepare(

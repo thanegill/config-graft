@@ -62,12 +62,12 @@ fn resolve(link: &Path) -> Result<PathBuf, Error> {
             return Err(Error::SymlinkLoop(link.to_path_buf()));
         }
         let next = fs::read_link(&current).map_err(|e| Error::read(&current, e))?;
-        current = crate::dest_dir(&current).join(next);
+        current = crate::write::dest_dir(&current).join(next);
         hops += 1;
     }
     // Any failure to look at the directory already failed the `is_symlink` above,
     // which needed to search it.
-    let dir = crate::dest_dir(&current);
+    let dir = crate::write::dest_dir(&current);
     if !dir.is_dir() {
         return Err(Error::SymlinkDangling {
             link: link.to_path_buf(),
