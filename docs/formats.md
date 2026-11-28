@@ -40,7 +40,7 @@ CFPropertyList's XML parser rejects a fractional-second `<date>`, and a date rea
 
 ### XML-illegal characters
 
-XML 1.0 cannot carry a C0 control character other than tab, newline and carriage return, such as the ESC (`0x1B`) separators in `NSUserKeyEquivalents`. macOS's own parser tolerates them, so a file holding one loads on macOS but nowhere else. In an XML run:
+XML 1.0 cannot carry a C0 control character other than tab, newline and carriage return (such as the ESC (`0x1B`) separators in `NSUserKeyEquivalents`), nor the non-characters U+FFFE and U+FFFF. macOS's own parser tolerates them, so a file holding one loads on macOS but nowhere else. In an XML run:
 
 - a value this run would *introduce* with such a character is refused (exit 1, target untouched);
 - a value the XML target already holds is passed through with a warning, so a run that changes nothing never fails on a file macOS wrote;
