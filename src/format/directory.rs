@@ -17,7 +17,7 @@
 //! completed by a re-run, which is idempotent).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -62,12 +62,6 @@ impl std::ops::DerefMut for FsAttrs {
 impl FromIterator<(String, Vec<u8>)> for FsAttrs {
     fn from_iter<I: IntoIterator<Item = (String, Vec<u8>)>>(iter: I) -> Self {
         FsAttrs(iter.into_iter().collect())
-    }
-}
-
-impl FsAttrs {
-    fn new() -> Self {
-        FsAttrs(BTreeMap::new())
     }
 }
 
@@ -120,7 +114,7 @@ impl fmt::Display for FsAttrs {
 /// input, yet it's low enough that the read/apply recursion can't exhaust the
 /// stack. It exists to turn a malicious/looping-symlink-free-but-absurd tree into
 /// a clean refusal rather than a crash.
-const MAX_DEPTH: usize = 100;
+const MAX_TREE_DEPTH: usize = 100;
 
 /// Filename prefix for the temp files/symlinks staged during an atomic write.
 /// Skipped on read so a leftover from a crashed run is never ingested as a managed
@@ -320,7 +314,7 @@ pub fn read_tree(
             let meta = if manage_root {
                 FsAttrs::read(path, &m, policy)
             } else {
-                FsAttrs::new()
+                FsAttrs::default()
             };
             Ok(Some(read_dir(path, meta, policy, 0)?))
         }
@@ -437,7 +431,7 @@ fn read_dir(
     policy: AttrPolicy,
     depth: usize,
 ) -> Result<Node<FsLeaf>, Error> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_TREE_DEPTH {
         return Err(Error::TreeTooDeep(dir.to_path_buf()));
     }
     let mut paths: Vec<PathBuf> = fs::read_dir(dir)
@@ -513,7 +507,7 @@ impl FsAttrs {
     /// no `xattr:*` entries. (Applying them, by contrast, is strict -- see
     /// [`FsAttrs::apply`].)
     fn read(path: &Path, meta: &fs::Metadata, policy: AttrPolicy) -> FsAttrs {
-        let mut attrs = FsAttrs::new();
+        let mut attrs = FsAttrs::default();
         attrs.insert(
             "mode".to_string(),
             format!("{:o}", meta.permissions().mode() & 0o7777).into_bytes(),
@@ -522,18 +516,20 @@ impl FsAttrs {
             attrs.insert("uid".to_string(), meta.uid().to_string().into_bytes());
             attrs.insert("gid".to_string(), meta.gid().to_string().into_bytes());
         }
-        if policy.xattrs != XattrScope::None {
-            if let Ok(names) = xattr::list(path) {
-                for name in names {
-                    // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
-                    if let Some(name) = name.to_str() {
-                        if policy.xattrs.in_scope(name) {
-                            if let Ok(Some(value)) = xattr::get(path, name) {
-                                attrs.insert(format!("xattr:{name}"), value);
-                            }
-                        }
-                    }
-                }
+        if policy.xattrs == XattrScope::None {
+            return attrs;
+        }
+        let Ok(names) = xattr::list(path) else {
+            return attrs;
+        };
+        for name in names {
+            // Skip non-UTF-8 xattr names rather than risk a lossy key collision.
+            let Some(name) = name.to_str() else { continue };
+            if !policy.xattrs.in_scope(name) {
+                continue;
+            }
+            if let Ok(Some(value)) = xattr::get(path, name) {
+                attrs.insert(format!("xattr:{name}"), value);
             }
         }
         attrs
@@ -1012,26 +1008,24 @@ impl FsAttrs {
     /// a half-attributed entry.
     fn apply(&self, path: &Path, policy: AttrPolicy) -> Result<(), Error> {
         if policy.xattrs != XattrScope::None {
-            let desired: std::collections::HashSet<&str> = self
+            let desired: HashSet<&str> = self
                 .keys()
                 .filter_map(|k| k.strip_prefix("xattr:"))
                 .collect();
             // Remove in-scope xattrs on disk that DESIRED doesn't declare (out-of-scope
             // ones are left untouched). No-op for a fresh temp file (no xattrs yet).
-            if let Ok(names) = xattr::list(path) {
-                for name in names {
-                    if let Some(name) = name.to_str() {
-                        if policy.xattrs.in_scope(name) && !desired.contains(name) {
-                            xattr::remove(path, name).map_err(|e| Error::write(path, e))?;
-                        }
-                    }
+            for name in xattr::list(path).unwrap_or_default() {
+                let Some(name) = name.to_str() else { continue };
+                if policy.xattrs.in_scope(name) && !desired.contains(name) {
+                    xattr::remove(path, name).map_err(|e| Error::write(path, e))?;
                 }
             }
             for (key, value) in self.iter() {
-                if let Some(name) = key.strip_prefix("xattr:") {
-                    if policy.xattrs.in_scope(name) {
-                        xattr::set(path, name, value).map_err(|e| Error::write(path, e))?;
-                    }
+                let Some(name) = key.strip_prefix("xattr:") else {
+                    continue;
+                };
+                if policy.xattrs.in_scope(name) {
+                    xattr::set(path, name, value).map_err(|e| Error::write(path, e))?;
                 }
             }
         }
@@ -1104,10 +1098,7 @@ impl PathExt for Path {
         let mut file = fs::File::open(self).map_err(|e| Error::read(self, e))?;
         let mut hasher = Sha256::new();
         io::copy(&mut file, &mut hasher).map_err(|e| Error::read(self, e))?;
-        let out = hasher.finalize();
-        let mut digest = [0u8; 32];
-        digest.copy_from_slice(&out);
-        Ok(digest)
+        Ok(hasher.finalize().into())
     }
 
     fn ensure_root(&self) -> Result<(), Error> {
@@ -1218,8 +1209,7 @@ mod tests {
     fn leaf(source: &str, contents: &str, attrs: FsAttrs) -> FsLeaf {
         let mut hasher = Sha256::new();
         hasher.update(contents.as_bytes());
-        let mut digest = [0u8; 32];
-        digest.copy_from_slice(&hasher.finalize());
+        let digest = hasher.finalize().into();
         FsLeaf::File {
             source: PathBuf::from(source),
             len: contents.len() as u64,
@@ -1325,7 +1315,7 @@ mod tests {
         let stray = Node::Map(
             [(
                 "f".to_string(),
-                Node::Leaf(FsLeaf::DirectoryAttributes(FsAttrs::new())),
+                Node::Leaf(FsLeaf::DirectoryAttributes(FsAttrs::default())),
             )]
             .into_iter()
             .collect(),

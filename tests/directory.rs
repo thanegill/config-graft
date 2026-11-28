@@ -996,7 +996,7 @@ fn refuses_excessively_deep_tree() {
     let desired = dir.path().join("desired");
     let mut p = desired.clone();
     for _ in 0..150 {
-        p = p.join("d"); // deeper than MAX_DEPTH
+        p = p.join("d"); // deeper than MAX_TREE_DEPTH
     }
     fs::create_dir_all(&p).unwrap();
     fs::write(p.join("f.txt"), "x").unwrap();
@@ -1171,5 +1171,66 @@ fn replacing_symlink_does_not_graft_link_target_xattrs() {
     assert_eq!(
         xattr::get(&pointee, "user.graft_test").unwrap().as_deref(),
         Some(b"leak".as_slice())
+    );
+}
+
+#[test]
+fn reads_a_tree_nested_exactly_to_the_depth_limit() {
+    // `refuses_excessively_deep_tree` shows a tree far past the limit is refused;
+    // this pins the boundary itself, 100 directories deep.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    let mut deepest = desired.clone();
+    for _ in 0..100 {
+        deepest = deepest.join("d");
+    }
+    write(&deepest.join("f.txt"), "x");
+
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
+
+    write(&deepest.join("d").join("f.txt"), "x");
+    let out = graft(&[target.to_str().unwrap(), desired.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("deep"), "got: {err}");
+}
+
+#[test]
+fn applying_directory_attributes_keeps_an_out_of_scope_xattr() {
+    // A directory is never rewritten: its attributes are applied in place, so an
+    // xattr `--xattrs safe` leaves out of scope must survive that.
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let desired = dir.path().join("desired");
+    write(&target.join("sub").join("f.txt"), "same");
+    write(&desired.join("sub").join("f.txt"), "same");
+    let on_target = target.join("sub");
+    if !on_target.try_set_xattr("com.apple.cg_keep", b"k")
+        || !desired.join("sub").try_set_xattr("user.cg_want", b"w")
+    {
+        eprintln!(
+            "skipping applying_directory_attributes_keeps_an_out_of_scope_xattr: xattrs unsupported"
+        );
+        return;
+    }
+
+    let out = graft(&[
+        "--xattrs",
+        "safe",
+        target.to_str().unwrap(),
+        desired.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        xattr::get(&on_target, "user.cg_want").unwrap().as_deref(),
+        Some(b"w".as_slice())
+    );
+    assert_eq!(
+        xattr::get(&on_target, "com.apple.cg_keep")
+            .unwrap()
+            .as_deref(),
+        Some(b"k".as_slice())
     );
 }
