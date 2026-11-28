@@ -216,8 +216,8 @@ pub(crate) struct DirArgs {
 
     /// Which extended attributes to reconcile: all (default), safe (a conservative
     /// allowlist that skips privileged and system namespaces), or none.
-    #[arg(long = "xattrs", value_name = "SCOPE")]
-    xattrs: Option<XattrScope>,
+    #[arg(long = "xattrs", value_enum, default_value_t, value_name = "SCOPE")]
+    xattrs: XattrScope,
 }
 
 /// The resolved options a [`Backend`] run reads, built from whichever subcommand
@@ -241,7 +241,7 @@ pub(crate) struct RunArgs {
     merge_key: Vec<String>,
     pub(crate) manage_root: bool,
     pub(crate) no_owner: bool,
-    pub(crate) xattrs: Option<XattrScope>,
+    pub(crate) xattrs: XattrScope,
 }
 
 impl RunArgs {
@@ -271,7 +271,7 @@ impl RunArgs {
             merge_key: Vec::new(),
             manage_root: false,
             no_owner: false,
-            xattrs: None,
+            xattrs: XattrScope::default(),
         }
     }
 
@@ -309,7 +309,7 @@ impl RunArgs {
     fn dir_policy(&self) -> AttrPolicy {
         AttrPolicy {
             owner: !self.no_owner,
-            xattrs: self.xattrs.unwrap_or_default(),
+            xattrs: self.xattrs,
         }
     }
 }
