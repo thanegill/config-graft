@@ -17,4 +17,7 @@ import ./lib/system.nix {
   activationWiring = script: {
     postActivation.text = lib.mkAfter "${script}";
   };
+  # `whileRunning.restart` quits and relaunches an app as the logged-in user, the
+  # same user nix-darwin's own launchd and defaults modules act as.
+  restartUser = config.system.primaryUser;
 }

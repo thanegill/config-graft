@@ -98,6 +98,9 @@
                 ShowStatusBar = true;
                 FontSize = 13;
               };
+              # The import replaces the whole domain, so a write the running app
+              # makes mid-switch would be lost; skip the domain while it runs.
+              whileRunning.skip = [ "ExampleApp" ];
             };
           }
 
