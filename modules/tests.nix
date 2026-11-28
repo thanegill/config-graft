@@ -8,9 +8,10 @@
 # assertions read as plain expected/actual. `binaryTargetRun`,
 # `homeFileMigrationRun`, `domainRuns`, `runningRuns`, `restartRuns` and
 # `failingSystemRun` are the exceptions: they run the generated script, with the
-# real binary, against files the builder makes. `hmActivation` evaluates the
-# home-manager module itself, with home-manager's own pieces stubbed, and
-# `failingSystemRun` evaluates the system module itself.
+# real binary, against files the builder makes, and `patternRuns` runs it against
+# a logging `pgrep` alone. `hmActivation` evaluates the home-manager module
+# itself, with home-manager's own pieces stubbed, and `failingSystemRun` evaluates
+# the system module itself.
 {
   lib,
   pkgs,
@@ -260,6 +261,11 @@ let
       export:missing) cp "$STUB_DIR/empty.plist" "$3" ;;
       export:existing) cp "$STUB_DIR/existing.plist" "$3" ;;
       export:corrupt) echo "not a plist" > "$3" ;;
+      export:importfails) cp "$STUB_DIR/existing.plist" "$3" ;;
+      import:importfails)
+        echo "stub: import failed" >&2
+        exit 1
+        ;;
       import:*) cp "$3" "$STUB_DIR/imported.plist" ;;
     esac
   '';
@@ -323,18 +329,21 @@ let
 
         fail() { echo "$1 (export=$STUB_EXPORT strict=$STRICT)"; cat out; exit 1; }
         for STRICT in 1 0; do
-          for STUB_EXPORT in fail nothing missing existing corrupt; do
+          for STUB_EXPORT in fail nothing missing existing corrupt importfails; do
             export STRICT STUB_EXPORT
             rm -f imported.plist imported.xml log
             status=0
             ${domainScenario} > out 2>&1 || status=$?
-            if [ "$STUB_EXPORT:$STRICT" = corrupt:1 ]; then
-              [ "$status" != 0 ] || fail "a failed graft did not fail the activation"
+            if [ "$STUB_EXPORT:$STRICT" = corrupt:1 ] || [ "$STUB_EXPORT:$STRICT" = importfails:1 ]; then
+              [ "$status" != 0 ] || fail "a failed graft or import did not fail the activation"
             else
               [ "$status" = 0 ] || fail "the scenario exited $status"
               grep -q "reached the next entry" out || fail "the script stopped short"
             fi
             case $STUB_EXPORT in
+              importfails)
+                [ ! -e imported.plist ] || fail "the stub imported after failing"
+                ;;
               fail|nothing|corrupt)
                 [ ! -e imported.plist ] || fail "imported over the domain after a bad export"
                 grep -q "warning: Skipping plist domain com.example.app" out \
@@ -491,6 +500,69 @@ let
       commands.pgrep = stubPgrep;
     }
   );
+
+  # The pgrep pattern `whileRunning.skip` builds at run time, for each name, must
+  # be what `lib.escapeRegex` makes of it: the whole name on macOS, whose pgrep
+  # matches the basename of argv[0] in full, and its first 15 bytes on Linux,
+  # whose pgrep matches the kernel comm. The names hold every character the
+  # escape touches and some it must leave alone, a space, a quote, a trailing
+  # newline, and non-ASCII text, one name cut through the middle of a character.
+  # The stub pgrep logs each pattern and reports nothing running.
+  patternNames = [
+    "Long.Process-Name.App"
+    "a\\b[c{d(e)f^g$h?i*j+k|l.m]n}o"
+    "Other App"
+    "it's"
+    "Trailing\n"
+    "short"
+    "abcdefghijklmn${builtins.fromJSON ''"\u00fc"''}x"
+    "${builtins.fromJSON ''"\u00dcn\u00efc\u00f6d\u00e9"''}-Prozess-Name"
+  ];
+
+  patternRuns =
+    let
+      loggingPgrep = pkgs.writeShellScript "logging-pgrep" ''
+        printf '%s\n' "$3" >> patterns
+        exit 1
+      '';
+      expected =
+        darwin:
+        pkgs.writeText "expected-patterns" (
+          lib.concatMapStrings (
+            name: lib.escapeRegex (if darwin then name else builtins.substring 0 15 name) + "\n"
+          ) patternNames
+        );
+      guarded =
+        darwin:
+        common.mkEntryReconcileScript {
+          inherit lib;
+          pkgs = hostPkgs darwin;
+          format = {
+            name = "json";
+          };
+          entry = entry { whileRunning.skip = patternNames; };
+          desired = "/desired.json";
+          target = "/target.json";
+          commands.pgrep = loggingPgrep;
+        };
+      check = darwin: ''
+        rm -f patterns reconciled
+        run() { touch reconciled; }
+        _i() { :; }
+        _prev=""
+        ${guarded darwin}
+        cmp patterns ${expected darwin} \
+          || { echo "patterns (darwin=${lib.boolToString darwin}) differ:"; diff patterns ${expected darwin}; exit 1; }
+        [ -e reconciled ] || { echo "nothing was running, yet the entry was skipped"; exit 1; }
+      '';
+    in
+    pkgs.runCommand "config-graft-module-skip-patterns" { } ''
+      # An activation runs in the user's locale; the cut must still be in bytes.
+      export LC_ALL=C.UTF-8
+      ${check true}
+      ${check false}
+      echo "whileRunning.skip patterns ok" > $out
+    '';
 
   runningRuns =
     pkgs.runCommand "config-graft-module-skip-while-running"
@@ -830,6 +902,8 @@ let
         done
         STUB_EXPORT=corrupt expect 1 "a failed cfprefsd graft"
         [ ! -e imported.plist ] || fail "a failed cfprefsd graft was imported"
+        STUB_EXPORT=importfails expect 1 "a failed cfprefsd import"
+        [ ! -e imported.plist ] || fail "the stub imported after failing"
         STUB_EXPORT=fail expect 0 "a skipped export"
         [ ! -e imported.plist ] || fail "a skipped export was imported"
         STUB_FIRST=0 STUB_EXPORT=existing expect 0 "a skip while running"
@@ -1227,24 +1301,15 @@ let
       actual = builtins.length (restartFailures { });
     }
     {
-      # macOS's pgrep matches the basename of argv[0] in full.
-      name = "on macOS the whole name is matched, as a literal, by /usr/bin/pgrep";
-      expected = true;
-      actual = lib.hasInfix "/usr/bin/pgrep -x -- 'Long\\.Process-Name\\.App' " (
-        scriptOn true {
-          whileRunning.skip = [ "Long.Process-Name.App" ];
-        }
-      );
-    }
-    {
-      # Linux's matches the kernel comm, which keeps 15 bytes.
-      name = "on Linux the name is cut to 15 bytes for procps' pgrep";
+      # What each pattern holds is `patternRuns`' to check; this is which pgrep.
+      name = "macOS runs /usr/bin/pgrep and Linux procps' pgrep";
       expected = true;
       actual =
         let
-          linuxScript = scriptOn false { whileRunning.skip = [ "Long.Process-Name.App" ]; };
+          linuxScript = scriptOn false { whileRunning.skip = [ "App" ]; };
         in
-        lib.hasInfix (builtins.unsafeDiscardStringContext "${pkgs.procps}/bin/pgrep -x -- 'Long\\.Process-Na' ") linuxScript
+        lib.hasInfix "/usr/bin/pgrep -x -- " (scriptOn true { whileRunning.skip = [ "App" ]; })
+        && lib.hasInfix (builtins.unsafeDiscardStringContext "${pkgs.procps}/bin/pgrep -x -- ") linuxScript
         && !(lib.hasInfix "/usr/bin/pgrep" linuxScript);
     }
   ];
@@ -1260,6 +1325,7 @@ pkgs.runCommand "config-graft-module-tests" { } ''
   cat ${binaryTargetRun} >> $out
   cat ${domainRuns} >> $out
   cat ${runningRuns} >> $out
+  cat ${patternRuns} >> $out
   cat ${homeFileMigrationRun} >> $out
   cat ${restartRuns} >> $out
   cat ${failingSystemRun} >> $out

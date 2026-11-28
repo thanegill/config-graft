@@ -11,6 +11,27 @@ let
   # ends in one.
   safeName = builtins.replaceStrings [ "/" ] [ "-" ];
 
+  # The attribute *policy* flags of a directory entry, separate from `--manage-root`:
+  # the policy says which attributes are reconciled at all, `--manage-root` says
+  # whether the target's own attributes are among them. A reconcile wants both; a
+  # caller with a DESIRED tree of its own making wants only the policy.
+  directoryPolicyFlags =
+    { lib, entry }:
+    lib.optional entry.noOwner "--no-owner"
+    ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}";
+
+  # The write flags of a byte-format file entry: how the result is encoded, and
+  # whether a symlinked target is written through. A `cfprefsdDomain` entry takes
+  # neither, since it writes a scratch file of its own.
+  fileWriteFlags =
+    {
+      lib,
+      format,
+      entry,
+    }:
+    lib.optional (format.name == "plist" && entry.binary) "--plist-format binary"
+    ++ lib.optional entry.followSymlinks "--follow-symlinks";
+
   # `whileRunning`, the same on every entry type.
   whileRunningOption =
     lib:
@@ -229,12 +250,64 @@ let
         if (( _graftStatus != 0 )); then false; fi
       '';
 
-  # Wraps an entry's reconcile `body` so it runs only while none of `names` is
-  # running. pgrep exits 1 when nothing matches; a match (0) or a pgrep failure
-  # (2 or 3) skips the entry. macOS's pgrep matches the untruncated basename of
-  # argv[0], while Linux's matches the 15-byte kernel comm, hence the cut there.
-  # pgrep's stderr is dropped because procps warns on every miss for an escaped
-  # pattern over 15 bytes; a real failure still surfaces through its status.
+  # The cfprefsd round trip of one plist domain: export `$_domain`, graft
+  # `$_desired` into it with `$_prev` as BASE, and import the result. The three are
+  # shell variables the caller sets, so a domain this generation declares and one
+  # an earlier generation recorded go through the same guards. `onFailure` is shell
+  # code run once, after the scratch file is gone, when the graft or the import
+  # failed; a skip is not a failure.
+  #
+  # Read the live domain through cfprefsd (not the on-disk file, which may be
+  # staler than cfprefsd's cache). A domain that does not exist yet exports as an
+  # empty dictionary with status 0, so a failed or empty export is never a first
+  # run: grafting onto nothing and importing the result would replace every key the
+  # domain holds with the managed ones alone. `--plist-format binary` is
+  # unconditional here, not `binary`-gated: XML would drop XML-illegal bytes and
+  # sub-second dates that both `defaults` ends carry, and the flag keeps the write
+  # from depending on what the export produced. A failed graft must not reach the
+  # import, which would rewrite the domain from a stale snapshot. The failed `run`
+  # sits in a condition, which neither home-manager's errexit nor the system
+  # script's ERR trap sees, so `onFailure` is what reports it.
+  domainRoundTrip =
+    {
+      exe,
+      commands,
+      onFailure,
+    }:
+    let
+      defaults = commands.defaults or "/usr/bin/defaults";
+    in
+    ''
+      _live=$(mktemp)
+      _roundTripFailed=""
+      if ! ${defaults} export "$_domain" "$_live"; then
+        _iWarn "Skipping plist domain %s: defaults export failed, so it was left untouched" "$_domain"
+      elif [[ ! -s "$_live" ]]; then
+        _iWarn "Skipping plist domain %s: defaults export wrote nothing, so it was left untouched" "$_domain"
+      elif ! run ${exe} plist "$_live" "$_desired" "$_prev" --plist-format binary; then
+        _iWarn "Skipping plist domain %s: config-graft failed, so it was left untouched" "$_domain"
+        _roundTripFailed=1
+      elif ! run ${defaults} import "$_domain" "$_live"; then
+        _roundTripFailed=1
+      fi
+      rm -f "$_live"
+      if [[ -n "$_roundTripFailed" ]]; then ${onFailure}; fi
+    '';
+
+  # Wraps an entry's reconcile `body` so it runs only while none of the processes
+  # `names` expands to is running. `names` is a list of shell words, so the names
+  # can be literals (`lib.escapeShellArg`) or come from a variable at run time, and
+  # `label` is one shell word; an empty `names` adds no guard. pgrep exits 1 when
+  # nothing matches; a match (0) or a pgrep failure (2 or 3) skips the entry.
+  # macOS's pgrep matches the untruncated basename of argv[0], while Linux's
+  # matches the 15-byte kernel comm, hence the cut there. pgrep's stderr is dropped
+  # because procps warns on every miss for an escaped pattern over 15 bytes; a real
+  # failure still surfaces through its status.
+  #
+  # The pattern is built at run time the way `lib.escapeRegex` and
+  # `builtins.substring` would build it: byte by byte, which is why the subshell
+  # runs in the C locale, and ended by an `x` that is stripped after it, so a
+  # trailing newline survives the command substitution.
   guardRunning =
     {
       lib,
@@ -247,27 +320,39 @@ let
     let
       isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
       pgrep = commands.pgrep or (if isDarwin then "/usr/bin/pgrep" else lib.getExe' pkgs.procps "pgrep");
-      pattern = name: lib.escapeRegex (if isDarwin then name else builtins.substring 0 15 name);
-      probe = name: ''
-        if [[ -z "$_running" ]]; then
-          _pgrepStatus=0
-          ${pgrep} -x -- ${lib.escapeShellArg (pattern name)} >/dev/null 2>&1 || _pgrepStatus=$?
-          if [[ $_pgrepStatus -ne 1 ]]; then _running=${lib.escapeShellArg name}; fi
-        fi
-      '';
     in
     if names == [ ] then
       body
     else
       ''
         _running=""
-        ${lib.concatMapStrings probe names}
+        for _name in ${lib.concatStringsSep " " names}; do
+          _pattern=$(
+            LC_ALL=C
+            ${lib.optionalString (!isDarwin) "_name=\${_name:0:15}"}
+            for (( _k = 0; _k < ''${#_name}; _k++ )); do
+              _char=''${_name:_k:1}
+              case $_char in
+                '\' | '[' | '{' | '(' | ')' | '^' | '$' | '?' | '*' | '+' | '|' | '.') printf '\\%s' "$_char" ;;
+                *) printf '%s' "$_char" ;;
+              esac
+            done
+            printf x
+          )
+          _pattern=''${_pattern%x}
+          _pgrepStatus=0
+          ${pgrep} -x -- "$_pattern" >/dev/null 2>&1 || _pgrepStatus=$?
+          if [[ $_pgrepStatus -ne 1 ]]; then
+            _running=$_name
+            break
+          fi
+        done
         if [[ -z "$_running" ]]; then
         ${body}
         elif [[ $_pgrepStatus -eq 0 ]]; then
-          _iWarn "Skipping %s: %s is running (whileRunning.skip)" ${lib.escapeShellArg label} "$_running"
+          _iWarn "Skipping %s: %s is running (whileRunning.skip)" ${label} "$_running"
         else
-          _iWarn "Skipping %s: pgrep exited %s looking for %s (whileRunning.skip)" ${lib.escapeShellArg label} "$_pgrepStatus" "$_running"
+          _iWarn "Skipping %s: pgrep exited %s looking for %s (whileRunning.skip)" ${label} "$_pgrepStatus" "$_running"
         fi
       '';
 in
@@ -487,54 +572,34 @@ in
       restartUser ? null,
     }:
     let
-      defaults = commands.defaults or "/usr/bin/defaults";
       isDomain = format.name == "plist" && entry.cfprefsdDomain != null;
       label = if isDomain then entry.cfprefsdDomain else target;
 
       domainScript = ''
         _domain=${lib.escapeShellArg entry.cfprefsdDomain}
         _i "Reconciling managed plist domain %s" "$_domain"
-
-        # Read the live domain through cfprefsd (not the on-disk file, which may be
-        # staler than cfprefsd's cache). A domain that does not exist yet exports
-        # as an empty dictionary with status 0, so a failed or empty export is never
-        # a first run: grafting onto nothing and importing the result would replace
-        # every key the domain holds with the managed ones alone.
-        _live=$(mktemp)
-        if ! ${defaults} export "$_domain" "$_live"; then
-          _iWarn "Skipping plist domain %s: defaults export failed, so it was left untouched" "$_domain"
-        elif [[ ! -s "$_live" ]]; then
-          _iWarn "Skipping plist domain %s: defaults export wrote nothing, so it was left untouched" "$_domain"
-        # Graft our settings into the live state, then push it back through cfprefsd
-        # so it adopts the merged result. `--plist-format binary` is unconditional
-        # here, not `binary`-gated: XML would drop XML-illegal bytes and sub-second
-        # dates that both `defaults` ends carry, and the flag keeps the write from
-        # depending on what the export produced. A failed graft must not reach the
-        # import, which would rewrite the domain from a stale snapshot. `false` is
-        # what reports it: fatal under home-manager, counted by the system script's
-        # ERR trap (the failed `run` sits in a condition, which doesn't).
-        elif ! run ${lib.getExe entry.package} plist "$_live" ${desired} "$_prev" --plist-format binary; then
-          _iWarn "Skipping plist domain %s: config-graft failed, so it was left untouched" "$_domain"
-          rm -f "$_live"
-          false
-        else
-          run ${defaults} import "$_domain" "$_live"
-        fi
-        rm -f "$_live"
+        _desired=${desired}
+        ${domainRoundTrip {
+          inherit commands;
+          exe = lib.getExe entry.package;
+          onFailure = "false";
+        }}
       '';
 
       fileScript = ''
         _target=${lib.escapeShellArg target}
         _i "Reconciling managed ${format.name} file %s" "$_target"
         run ${lib.getExe entry.package} ${format.name} "$_target" ${desired} "$_prev"${
-          lib.optionalString (format.name == "plist" && entry.binary) " --plist-format binary"
-        }${lib.optionalString entry.followSymlinks " --follow-symlinks"}
+          lib.concatMapStrings (flag: " ${flag}") (fileWriteFlags {
+            inherit lib format entry;
+          })
+        }
       '';
     in
     guardRunning {
       inherit lib pkgs commands;
-      names = entry.whileRunning.skip;
-      inherit label;
+      names = map lib.escapeShellArg entry.whileRunning.skip;
+      label = lib.escapeShellArg label;
       body = guardRestart {
         inherit lib label commands;
         inherit (entry.whileRunning) quitTimeout;
@@ -641,15 +706,13 @@ in
     }:
     let
       flags = lib.concatStringsSep " " (
-        lib.optional entry.manageRoot "--manage-root"
-        ++ lib.optional entry.noOwner "--no-owner"
-        ++ lib.optional (entry.xattrs != "all") "--xattrs ${entry.xattrs}"
+        lib.optional entry.manageRoot "--manage-root" ++ directoryPolicyFlags { inherit lib entry; }
       );
     in
     guardRunning {
       inherit lib pkgs commands;
-      names = entry.whileRunning.skip;
-      label = target;
+      names = map lib.escapeShellArg entry.whileRunning.skip;
+      label = lib.escapeShellArg target;
       body = guardRestart {
         inherit lib commands;
         inherit (entry.whileRunning) quitTimeout;
