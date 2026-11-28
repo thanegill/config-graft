@@ -808,7 +808,7 @@ impl<F: Format> Backend for ByteBackend<F> {
     const COMPONENT_SEPARATOR: &'static str = F::PATH_SEP;
 
     fn merge_keys(args: &RunArgs) -> MergeKeys {
-        crate::parse_merge_keys(&args.merge_key, F::PATH_SEP)
+        MergeKeys::parse(&args.merge_key, F::PATH_SEP)
     }
 
     /// Read through a symlinked TARGET, so under `--follow-symlinks` this is the

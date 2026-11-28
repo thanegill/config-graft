@@ -21,7 +21,7 @@ use backend::{Backend, ByteBackend, Directory};
 use format::directory::{AttrPolicy, XattrScope};
 use format::{Indent, Json, Plist, PlistFormat, Toml, Yaml};
 use mode::{ModeChange, Modes, Owner, Writer, HOST_SETGID_ON_WRITE};
-use reconcile::{ArrayStrategy, ManagedPath, MergeKeys};
+use reconcile::ArrayStrategy;
 use symlink::SymlinkPolicy;
 
 /// Three-way reconcile for app-owned JSON, plist, YAML, and TOML files, or a
@@ -242,46 +242,6 @@ pub(crate) struct RunArgs {
     pub(crate) manage_root: bool,
     pub(crate) no_owner: bool,
     pub(crate) xattrs: Option<XattrScope>,
-}
-
-/// Parse `--merge-key` specs into [`MergeKeys`]. Each spec is `FIELD` / `f1,f2`
-/// (global candidates) or `PATH=FIELD` / `PATH=f1,f2` (scoped to the array at
-/// `PATH`). `PATH` is the array's full path from the document root, its segments
-/// joined by the format separator `sep` (`.` for JSON/YAML/TOML, `:` for plist).
-pub(crate) fn parse_merge_keys(specs: &[String], sep: &str) -> MergeKeys {
-    let mut mk = MergeKeys::default();
-    for spec in specs {
-        let (scope, fields) = match spec.split_once('=') {
-            Some((k, f)) => (Some(k.trim()), f),
-            None => (None, spec.as_str()),
-        };
-        let fields: Vec<String> = fields
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-        if fields.is_empty() {
-            continue;
-        }
-        let path: ManagedPath = scope
-            .into_iter()
-            .flat_map(|k| k.split(sep))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-        if path.is_empty() {
-            mk.global.extend(fields);
-            continue;
-        }
-        if !mk.scoped.contains_key(&path) {
-            let given = scope.unwrap_or_default().to_string();
-            mk.scopes_as_given.push((path.clone(), given));
-        }
-        mk.scoped.entry(path).or_default().extend(fields);
-    }
-    mk
 }
 
 impl RunArgs {
@@ -509,82 +469,8 @@ pub fn dest_dir(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use super::{command, owner_to_keep, parse_merge_keys};
+    use super::{command, owner_to_keep};
     use crate::mode::Owner;
-
-    /// `parse_merge_keys` as `(global, scoped)`, with owned strings built from
-    /// `&str` literals and each scope `ManagedPath` flattened to its keys, so the
-    /// expectations stay readable.
-    fn parsed(specs: &[&str], sep: &str) -> (Vec<String>, HashMap<Vec<String>, Vec<String>>) {
-        let keys = parse_merge_keys(&strings(specs), sep);
-        let scoped = keys
-            .scoped
-            .into_iter()
-            .map(|(path, fields)| (path.to_vec(), fields))
-            .collect();
-        (keys.global, scoped)
-    }
-
-    fn strings(items: &[&str]) -> Vec<String> {
-        items.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn a_bare_field_list_is_global_and_trimmed() {
-        let (global, scoped) = parsed(&[" name , id ", "a,,b"], ".");
-        assert_eq!(global, strings(&["name", "id", "a", "b"]));
-        assert!(scoped.is_empty());
-    }
-
-    #[test]
-    fn a_scope_splits_on_the_format_separator() {
-        let (global, scoped) = parsed(&["spec.containers=name"], ".");
-        assert!(global.is_empty());
-        assert_eq!(
-            scoped,
-            HashMap::from([(strings(&["spec", "containers"]), strings(&["name"]))])
-        );
-
-        let (_, plist) = parsed(&["spec:containers=name"], ":");
-        assert_eq!(
-            plist,
-            HashMap::from([(strings(&["spec", "containers"]), strings(&["name"]))])
-        );
-        // The other format's separator is part of the key, not a split.
-        let (_, dotted) = parsed(&["spec:containers=name"], ".");
-        assert_eq!(
-            dotted,
-            HashMap::from([(strings(&["spec:containers"]), strings(&["name"]))])
-        );
-    }
-
-    #[test]
-    fn scope_segments_are_trimmed_and_empty_ones_dropped() {
-        let (_, scoped) = parsed(&[" a . . b = f "], ".");
-        assert_eq!(
-            scoped,
-            HashMap::from([(strings(&["a", "b"]), strings(&["f"]))])
-        );
-    }
-
-    #[test]
-    fn an_empty_scope_is_global_and_an_empty_field_list_is_ignored() {
-        let (global, scoped) = parsed(&["=name", "servers=", "servers= , "], ".");
-        assert_eq!(global, strings(&["name"]));
-        assert!(scoped.is_empty());
-    }
-
-    #[test]
-    fn repeated_specs_extend_the_same_rule() {
-        let (global, scoped) = parsed(&["servers=name", "id", "servers=id", "key"], ".");
-        assert_eq!(global, strings(&["id", "key"]));
-        assert_eq!(
-            scoped,
-            HashMap::from([(strings(&["servers"]), strings(&["name", "id"]))])
-        );
-    }
 
     const ALICE: Owner = Owner { uid: 501, gid: 20 };
     const ROOT: Owner = Owner { uid: 0, gid: 0 };
