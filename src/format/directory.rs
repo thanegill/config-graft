@@ -403,7 +403,7 @@ impl Created {
             return Ok(());
         };
         Err(name_collision(
-            &crate::dest_dir(path),
+            &crate::write::dest_dir(path),
             first.clone(),
             entry_name(path),
         ))
@@ -830,7 +830,7 @@ fn apply_dir(
     // is best-effort: the renames already landed, so a filesystem that can't fsync
     // a directory (e.g. some network mounts) must not fail an otherwise-good apply.
     if changed {
-        let _ = crate::fsync_dir(dir);
+        let _ = crate::write::fsync_dir(dir);
     }
     Ok(changed)
 }
@@ -957,7 +957,7 @@ fn write_file(
     attrs: &FsAttrs,
     policy: AttrPolicy,
 ) -> Result<(), Error> {
-    let dir = crate::dest_dir(dest);
+    let dir = crate::write::dest_dir(dest);
     fs::create_dir_all(&dir).map_err(|e| Error::write(&dir, e))?;
     let mut src = fs::File::open(source).map_err(|e| Error::read(source, e))?;
     let mut tmp = tempfile::Builder::new()
@@ -1125,7 +1125,7 @@ impl PathExt for Path {
     }
 
     fn atomic_symlink(&self, target: &Path) -> io::Result<()> {
-        let dir = crate::dest_dir(self);
+        let dir = crate::write::dest_dir(self);
         fs::create_dir_all(&dir)?;
         let base = self
             .file_name()
@@ -1501,7 +1501,7 @@ mod tests {
     #[test]
     fn fsync_dir_smoke() {
         let dir = tempfile::tempdir().unwrap();
-        crate::fsync_dir(dir.path()).unwrap();
+        crate::write::fsync_dir(dir.path()).unwrap();
     }
 
     #[test]

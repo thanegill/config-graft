@@ -26,7 +26,8 @@ use crate::reconcile::{
 use crate::render::render_selector;
 use crate::value::{Leaf, Node};
 use crate::warning::{DiagnosticPath, Source, Step, Warning, WarningKind};
-use crate::{symlink, RunArgs, WriteOutcome};
+use crate::write::WriteOutcome;
+use crate::{symlink, RunArgs};
 
 /// How many times a run reconciles before giving up on a TARGET that changes under
 /// every write. One retry covers an app saving once in the window and a second a
@@ -904,7 +905,7 @@ impl<F: Format> Backend for ByteBackend<F> {
         let resolved = symlink::write_path(&args.target, args.symlinks)?;
         let written = resolved.as_deref().unwrap_or(&args.target);
         let outcome =
-            crate::write_atomic(written, output, snapshot.as_deref()).map_err(|source| {
+            crate::write::write_atomic(written, output, snapshot.as_deref()).map_err(|source| {
                 match &resolved {
                     Some(resolved) => Error::WriteThroughSymlink {
                         link: args.target.clone(),
@@ -1063,7 +1064,8 @@ mod tests {
         use crate::format::{Json, Normalization, PlistFormat, WriteOpts};
         use crate::reconcile::MergeKeys;
         use crate::value::Node;
-        use crate::{Cli, Command, RunArgs, WriteOutcome};
+        use crate::write::WriteOutcome;
+        use crate::{Cli, Command, RunArgs};
 
         type JsonBackend = ByteBackend<Json>;
         type Leaf = <JsonBackend as Backend>::Leaf;
